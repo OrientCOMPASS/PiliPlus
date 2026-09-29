@@ -1,0 +1,159 @@
+name: PiliPlayer CI
+
+# CI for the `piliplayer` branch (Android only).
+# The development sandbox cannot build Flutter apps (1 GiB RAM / 2 vCPU),
+# so every verification (analyze / test / apk build) happens here.
+
+on:
+    push:
+        branches:
+            - piliplayer
+        paths-ignore:
+            - "**.md"
+            - "docs/**"
+    pull_request:
+        branches:
+            - piliplayer
+    workflow_dispatch:
+        inputs:
+            build_apk:
+                description: "Build Android APK"
+                type: boolean
+                default: true
+            apk_mode:
+                description: "APK build mode"
+                type: choice
+                default: "debug"
+                options:
+                    - debug
+                    - release
+            upload_apk:
+                description: "Upload APK as artifact"
+                type: boolean
+                default: true
+
+concurrency:
+    group: piliplayer-ci-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+env:
+    # paths added by this branch: analyzed with zero tolerance (infos included)
+    STRICT_PATHS: >-
+        lib/pages/local_media
+        lib/services/local_media_service.dart
+        lib/models/local_media
+        lib/plugin/pl_player/models/vr_projection.dart
+        lib/plugin/pl_player/utils/vr_shader.dart
+        lib/utils/local_media_progress.dart
+
+jobs:
+    check:
+        name: Analyze & Test
+        runs-on: ubuntu-latest
+        timeout-minutes: 45
+        steps:
+            - name: 代码迁出
+              uses: actions/checkout@v7
+
+            - name: 安装Flutter
+              uses: subosito/flutter-action@v2
+              with:
+                  channel: stable
+                  flutter-version-file: pubspec.yaml
+                  cache: true
+
+            # patches the Flutter SDK + material_ui / cupertino_ui in pub-cache,
+            # and runs `flutter pub get`
+            - name: Apply Patch
+              shell: pwsh
+              run: lib/scripts/patch.ps1 android
+
+            - name: Analyze (errors are fatal)
+              shell: bash
+              run: |
+                  set -uo pipefail
+                  flutter analyze --no-pub | tee analyze.txt
+                  err=$(grep -cE '(^|[[:space:]])error[[:space:]]+•' analyze.txt || true)
+                  warn=$(grep -cE '(^|[[:space:]])warning[[:space:]]+•' analyze.txt || true)
+                  info=$(grep -cE '(^|[[:space:]])info[[:space:]]+•' analyze.txt || true)
+                  echo "::notice::analyze summary errors=$err warnings=$warn infos=$info"
+                  if [ "$err" != "0" ]; then
+                    echo "::error::flutter analyze reported $err error(s)"
+                    grep -E '(^|[[:space:]])error[[:space:]]+•' analyze.txt | head -60
+                    exit 1
+                  fi
+                  echo "analyze: no errors"
+
+            - name: Analyze new code (zero tolerance)
+              shell: bash
+              run: |
+                  set -uo pipefail
+                  paths=""
+                  for p in $STRICT_PATHS; do
+                    [ -e "$p" ] && paths="$paths $p"
+                  done
+                  if [ -z "$paths" ]; then
+                    echo "no strict paths present yet"
+                    exit 0
+                  fi
+                  echo "strict analyze:$paths"
+                  dart analyze --fatal-infos $paths
+
+            - name: Test
+              run: flutter test --no-pub --reporter expanded
+
+    build_android:
+        name: Build Android (${{ github.event.inputs.apk_mode || 'debug' }})
+        needs: check
+        runs-on: ubuntu-latest
+        timeout-minutes: 70
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_apk }}
+        steps:
+            - name: 代码迁出
+              uses: actions/checkout@v7
+              with:
+                  fetch-depth: 0
+
+            - name: 构建Java环境
+              uses: actions/setup-java@v5
+              with:
+                  distribution: "zulu"
+                  java-version: "17"
+                  cache: "gradle"
+                  cache-dependency-path: |
+                      android/*.gradle*
+                      android/**/gradle-wrapper.properties
+
+            - name: 安装Flutter
+              uses: subosito/flutter-action@v2
+              with:
+                  channel: stable
+                  flutter-version-file: pubspec.yaml
+                  cache: true
+
+            - name: Apply Patch
+              shell: pwsh
+              run: lib/scripts/patch.ps1 android
+
+            - name: Build Debug Apk
+              if: ${{ (github.event.inputs.apk_mode || 'debug') == 'debug' }}
+              run: flutter build apk --debug --target-platform android-arm64 --no-pub
+
+            - name: Build Release Apk
+              if: ${{ github.event.inputs.apk_mode == 'release' }}
+              run: flutter build apk --release --split-per-abi --android-project-arg dev=1 --no-pub
+
+            - name: List outputs
+              run: ls -la build/app/outputs/flutter-apk/ || true
+
+            - name: Upload artifact
+              if: ${{ github.event_name != 'workflow_dispatch' || inputs.upload_apk }}
+              uses: actions/upload-artifact@v7
+              with:
+                  name: PiliPlayer-android-${{ github.event.inputs.apk_mode || 'debug' }}-${{ github.sha }}
+                  path: build/app/outputs/flutter-apk/*.apk
+                  if-no-files-found: error
+                  retention-days: 14

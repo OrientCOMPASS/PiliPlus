@@ -287,73 +287,79 @@ class LocalMediaController extends GetxController {
   /// 浏览页里把当前目录收藏成快捷方式(VLC 的 bookmark 行为)。
   ///
   /// 返回 null 表示当前层级不适合收藏(直链来源、或就在来源根目录上)。
-  LocalMediaSource? shortcutFor({
+  /// 做成静态纯函数是为了能单测(不依赖 GetX/Hive)。
+  static LocalMediaSource? shortcutFor({
     required LocalMediaSource source,
     required String path,
     required String title,
   }) {
     final name = title.isEmpty ? source.name : title;
-    switch (source.type) {
-      case LocalMediaSourceType.device:
-        if (path.isEmpty) {
-          return null;
-        }
-        return LocalMediaSource(
-          type: LocalMediaSourceType.device,
-          name: name,
-          url: path,
-        );
-      case LocalMediaSourceType.smb:
-        final h = source.smbHost;
-        if (h == null) {
-          return null;
-        }
-        // 主机级来源: path 的第一段是共享名; 共享级来源: 共享名在 endpoint 里
-        final String url;
-        if (source.isSmbHostRoot) {
-          final (share, inner) = SmbBrowse.splitSharePath(path);
-          if (share.isEmpty) {
-            return null; // 就在主机根上, 收藏它等于收藏主机本身
-          }
-          url = SmbBrowse.uri(
-            host: h.host,
-            port: h.port,
-            share: share,
-            remotePath: inner,
-          );
-        } else {
-          final ep = source.smbEndpoint!;
-          url = SmbBrowse.uri(
-            host: ep.host,
-            port: ep.port,
-            share: ep.share,
-            remotePath: path,
-          );
-        }
-        return LocalMediaSource(
-          type: LocalMediaSourceType.smb,
-          name: name,
-          url: url,
-          username: source.username,
-          password: source.password,
-          domain: source.domain,
-          address: source.address,
-        );
-      case LocalMediaSourceType.webdav:
-        if (path.isEmpty || path == '/') {
-          return null;
-        }
-        return LocalMediaSource(
-          type: LocalMediaSourceType.webdav,
-          name: name,
-          url: LocalMediaService.joinUrl(source.url, path),
-          username: source.username,
-          password: source.password,
-        );
-      case LocalMediaSourceType.http:
-      case LocalMediaSourceType.ftp:
-        return null; // 直链来源没有目录可收藏
+    return switch (source.type) {
+      LocalMediaSourceType.device => path.isEmpty
+          ? null
+          : LocalMediaSource(
+              type: LocalMediaSourceType.device,
+              name: name,
+              url: path,
+            ),
+      LocalMediaSourceType.smb => _smbShortcut(source, path, name),
+      LocalMediaSourceType.webdav => path.isEmpty || path == '/'
+          ? null
+          : LocalMediaSource(
+              type: LocalMediaSourceType.webdav,
+              name: name,
+              url: LocalMediaService.joinUrl(source.url, path),
+              username: source.username,
+              password: source.password,
+            ),
+      // 直链来源没有目录可收藏
+      LocalMediaSourceType.http || LocalMediaSourceType.ftp => null,
+    };
+  }
+
+  static LocalMediaSource? _smbShortcut(
+    LocalMediaSource source,
+    String path,
+    String name,
+  ) {
+    final h = source.smbHost;
+    if (h == null) {
+      return null;
     }
+    // 主机级来源: path 的第一段是共享名; 共享级来源: 共享名在 endpoint 里
+    final String? host;
+    final int port;
+    final String share;
+    final String inner;
+    if (source.isSmbHostRoot) {
+      final (s, i) = SmbBrowse.splitSharePath(path);
+      if (s.isEmpty) {
+        // 就在主机根上, 收藏它等于收藏主机本身
+        return null;
+      }
+      host = h.host;
+      port = h.port;
+      share = s;
+      inner = i;
+    } else {
+      final ep = source.smbEndpoint;
+      if (ep == null) {
+        return null;
+      }
+      host = ep.host;
+      port = ep.port;
+      share = ep.share;
+      inner = path;
+    }
+    return LocalMediaSource(
+      type: LocalMediaSourceType.smb,
+      name: name,
+      url: SmbBrowse.uri(host: host, port: port, share: share, remotePath: inner),
+      username: source.username,
+      password: source.password,
+      domain: source.domain,
+      address: source.address,
+    );
   }
 
   /// 浏览中弹出凭据框后, 把账号写回来源(否则每进一层都要重输)

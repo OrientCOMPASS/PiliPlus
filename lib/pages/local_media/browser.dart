@@ -18,7 +18,7 @@ import 'package:PiliPlus/utils/page_utils.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
-import 'package:get/get.dart' show Get, Obx;
+import 'package:get/get.dart' show Get;
 import 'package:material_ui/material_ui.dart';
 
 /// 目录浏览页: 从一个来源(本机目录 / SMB 共享 / WebDAV)的某个路径开始逐层浏览。
@@ -248,16 +248,16 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
             overflow: TextOverflow.ellipsis,
           ),
           actions: [
-            // VLC 式书签: 浏览到常用目录时手动收藏, 而不是连接主机时被动弹窗
-            Obx(
-              () => IconButton(
-                tooltip: _isBookmarked ? '已在快捷方式中' : '添加到快捷方式',
-                onPressed: _isBookmarked ? null : _addShortcut,
-                icon: Icon(
-                  _isBookmarked
-                      ? Icons.bookmark_added_outlined
-                      : Icons.bookmark_add_outlined,
-                ),
+            // VLC 式书签: 浏览到常用目录时手动收藏, 而不是连接主机时被动弹窗。
+            // 刻意不用 Obx: 收藏状态只在点按后变化, setState 足够, 也避免
+            // 控制器没注册时 Obx 因为"没订阅到任何可观察对象"而报错。
+            IconButton(
+              tooltip: _isBookmarked ? '已在快捷方式中' : '添加到快捷方式',
+              onPressed: _shortcut == null ? null : _addShortcut,
+              icon: Icon(
+                _isBookmarked
+                    ? Icons.bookmark_added_outlined
+                    : Icons.bookmark_add_outlined,
               ),
             ),
             PopupMenuButton<LocalMediaSort>(
@@ -372,19 +372,16 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
   // ==================== 快捷方式(书签) ====================
 
   /// 当前层级对应的快捷方式(不可收藏时为 null)
-  LocalMediaSource? get _shortcut => _mediaController?.shortcutFor(
+  LocalMediaSource? get _shortcut => LocalMediaController.shortcutFor(
     source: _current.source,
     path: _current.path,
     title: _current.title,
   );
 
   bool get _isBookmarked {
-    // 先读一次 `.value`: Obx 要求 build 期间至少订阅到一个可观察对象,
-    // 提前 return 会让它认为"没在监听"而报错
-    final saved =
-        _mediaController?.savedSources.value ?? const <LocalMediaSource>[];
+    final saved = _mediaController?.savedSources;
     final target = _shortcut;
-    if (target == null) {
+    if (saved == null || target == null) {
       return false;
     }
     return saved.any((e) => e.type == target.type && e.url == target.url);
@@ -398,6 +395,9 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
       return;
     }
     await controller.addSource(target);
+    if (mounted) {
+      setState(() {}); // 让书签图标立刻变成"已收藏"
+    }
     SmartDialog.showToast('已添加「${target.name}」到快捷方式');
   }
 

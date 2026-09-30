@@ -284,7 +284,6 @@ abstract final class LocalMediaService {
     LocalMediaSource source,
     String path, {
     required bool showHidden,
-    required bool onlyMedia,
   }) async {
     if (source.isSmbHostRoot) {
       return _listSmbHost(source, path, showHidden: showHidden);

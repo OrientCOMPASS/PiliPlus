@@ -61,6 +61,7 @@ env:
         test/services/smb/smb_protocol_test.dart
         test/services/smb/smb_live_test.dart
         test/services/smb/smb_share_enum_test.dart
+        test/services/smb/smb_browse_test.dart
         lib/plugin/pl_player/widgets/vr_control_layer.dart
         lib/plugin/pl_player/utils/vr_gyro.dart
         lib/plugin/pl_player/utils/vr_gyro_math.dart
@@ -187,10 +188,13 @@ jobs:
                   --dart-define=pili.code=${{ env.PILI_CODE }}
                   --no-pub
 
+            # 测试包只出 arm64-v8a: 真机/平板验证用不到其它 ABI,
+            # 少两条腿能省一半以上的构建时间(上游 build.yml 仍然全 ABI)
             - name: Build Release Apk
               if: ${{ matrix.mode == 'release' }}
               run: >-
                   flutter build apk --release --split-per-abi
+                  --target-platform android-arm64
                   --android-project-arg dev=1
                   --dart-define=pili.hash=${{ env.PILI_HASH }}
                   --dart-define=pili.time=${{ env.PILI_TIME }}

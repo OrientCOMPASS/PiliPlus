@@ -49,6 +49,9 @@ env:
         lib/plugin/pl_player/models/vr_projection.dart
         lib/plugin/pl_player/utils/vr_shader.dart
         lib/utils/local_media_progress.dart
+        test/plugin/vr_test.dart
+        test/services/local_media_service_test.dart
+        test/utils/local_media_progress_test.dart
 
 jobs:
     check:

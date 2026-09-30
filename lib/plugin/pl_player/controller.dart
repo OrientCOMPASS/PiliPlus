@@ -750,9 +750,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   final Rx<VrProjection> vrProjection = Rx<VrProjection>(VrProjection.off);
 
   /// 双目片源渲染哪只眼睛(手机单屏只显示一只)
-  final Rx<VrEye> vrEye = Rx<VrEye>(Pref.vrEye);
+  late final Rx<VrEye> vrEye = Rx<VrEye>(Pref.vrEye);
 
-  VrViewState _vrView = VrViewState(fov: Pref.vrDefaultFov);
+  late VrViewState _vrView = VrViewState(fov: Pref.vrDefaultFov);
   VrViewState get vrView => _vrView;
 
   bool get vrEnabled => vrProjection.value.enabled;
@@ -771,7 +771,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   }) {
     var projection = hint;
     if (projection == null && autoDetect && Pref.vrAutoDetect) {
-      projection = VrProjection.detectFromName(mediaName(source));
+      final detected = VrProjection.detectFromName(mediaName(source));
+      if (detected.enabled) {
+        projection = detected;
+        SmartDialog.showToast(
+          '已识别为${detected.label}片源，进入 VR 模式\n单指拖拽环视，双指缩放视场角',
+          displayTime: const Duration(milliseconds: 2500),
+        );
+      }
     }
     vrProjection.value = projection ?? VrProjection.off;
     _vrView = VrViewState(fov: Pref.vrDefaultFov);

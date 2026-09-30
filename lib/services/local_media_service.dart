@@ -488,6 +488,12 @@ abstract final class LocalMediaService {
       // 部分 NAS 回 OBJECT_NAME_NOT_FOUND), 统一翻译并给出自动枚举的出路
       return '$what: 共享不存在或无权访问。可在「网络」页点主机名自动获取共享列表';
     }
+    // 主机级浏览靠 SRVSVC 枚举共享, 服务端禁用 RPC / 不允许匿名枚举时
+    // 要给出手动填写的出路, 否则用户只看到一句协议错误
+    if (e.context.contains('srvsvc') || e.context.contains('NetShareEnum')) {
+      return '$what: 这台主机不提供共享列表(${e.statusText})。'
+          '可用「添加网络共享」手动填写 smb://主机/共享名';
+    }
     if (e.isNotFound) {
       return '$what: 路径不存在';
     }
@@ -616,6 +622,10 @@ abstract final class LocalMediaService {
   }
 
   static String _humanize(Object err, LocalMediaSource source) {
+    // SMB 的协议错误单独翻译(状态码对用户没有意义)
+    if (err is SmbException) {
+      return _translateSmb(err, source);
+    }
     final msg = err.toString();
     if (msg.contains('401') || msg.contains('Unauthorized')) {
       return '${source.name}: 用户名或密码错误';

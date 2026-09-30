@@ -279,6 +279,8 @@ abstract final class LocalMediaService {
   /// 每个目录一次网络往返, 不设上限会把 UI 和连接一起拖死; 触到上限时
   /// 通过 [onProgress] 让调用方能把"已扫描/已找到"显示出来。
   /// [cancelled] 返回 true 立刻收手(改关键词、退出页面、销毁控制器)。
+  /// [onFound] 每命中一条就立刻回调 —— 结果**边扫边出**, 不用等整棵树遍历完
+  /// (大目录/局域网下等全部扫完可能要几十秒, 期间界面一片空白是不可接受的)。
   static Future<List<LocalMediaItem>> search({
     required LocalMediaSource source,
     required String rootPath,
@@ -288,6 +290,7 @@ abstract final class LocalMediaService {
     bool showHidden = false,
     bool Function()? cancelled,
     void Function(int scannedDirs, int matches)? onProgress,
+    void Function(LocalMediaItem item)? onFound,
   }) async {
     final keyword = query.trim().toLowerCase();
     if (keyword.isEmpty) {
@@ -323,6 +326,7 @@ abstract final class LocalMediaService {
         }
         if (item.isPlayable && item.name.toLowerCase().contains(keyword)) {
           results.add(item);
+          onFound?.call(item);
           if (results.length >= maxResults) {
             break;
           }

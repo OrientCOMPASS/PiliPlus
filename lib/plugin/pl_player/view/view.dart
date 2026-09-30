@@ -61,6 +61,7 @@ import 'package:PiliPlus/utils/feed_back.dart';
 import 'package:PiliPlus/utils/id_utils.dart';
 import 'package:PiliPlus/utils/image_utils.dart';
 import 'package:PiliPlus/utils/mobile_observer.dart';
+import 'package:PiliPlus/utils/page_utils.dart';
 import 'package:PiliPlus/utils/path_utils.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
@@ -402,6 +403,114 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     final anySeason = isSeason || isPart || isPgc || isPlayAll;
     final isFullScreen = this.isFullScreen;
     final double widgetWidth = isLandscape && isFullScreen ? 42 : 35;
+
+    // ==================== 倍速面板 ====================
+    //
+    // 原来是个 PopupMenuButton 列预设档位(0.5/0.75/1/1.25/1.5/1.75/2/3/4/8),
+    // 只能挑那几档。改成**滑动条 + 0.1 步进**: 想 1.3X 听清外语、0.9X 跟唱
+    // 都能调到; 预设档位保留成快捷 chip(含滑动条范围外的 8X), 一个都不少。
+    const double speedSliderMin = 0.5;
+    const double speedSliderMax = 4.0;
+    const double speedSliderStep = 0.1;
+
+    /// 滑到 0.1 的整数倍上, 避免出现 1.7000000000000002 这种显示
+    double roundSpeed(double value) => (value * 10).roundToDouble() / 10;
+
+    void showSpeedSheet() {
+      PageUtils.showVideoBottomSheet(
+        context,
+        maxWidth: 512,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Material(
+            clipBehavior: Clip.hardEdge,
+            color: ColorScheme.of(context).surface,
+            borderRadius: const BorderRadius.all(Radius.circular(12)),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+              child: Obx(
+                () {
+                  final colorScheme = ColorScheme.of(context);
+                  final speed = plPlayerController.playbackSpeed;
+                  return Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Text(
+                            '播放速度',
+                            style: TextStyle(fontSize: 15),
+                          ),
+                          const Spacer(),
+                          Text(
+                            '$speed X',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                              color: colorScheme.primary,
+                            ),
+                          ),
+                        ],
+                      ),
+                      Slider(
+                        value: speed < speedSliderMin
+                            ? speedSliderMin
+                            : speed > speedSliderMax
+                            ? speedSliderMax
+                            : speed,
+                        min: speedSliderMin,
+                        max: speedSliderMax,
+                        divisions: ((speedSliderMax - speedSliderMin) /
+                                speedSliderStep)
+                            .round(),
+                        label: '$speed X',
+                        onChanged: (value) => plPlayerController
+                            .setPlaybackSpeed(roundSpeed(value)),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        child: Text(
+                          '${speedSliderMin}X — ${speedSliderMax}X，'
+                          '步进 ${speedSliderStep}',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 4,
+                        children: [
+                          for (final preset in plPlayerController.speedList)
+                            ChoiceChip(
+                              label: Text('$preset X'),
+                              selected: speed == preset,
+                              onSelected: (_) => plPlayerController
+                                  .setPlaybackSpeed(preset),
+                            ),
+                        ],
+                      ),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton(
+                          onPressed: speed == 1.0
+                              ? null
+                              : () => plPlayerController.setPlaybackSpeed(1.0),
+                          child: const Text('重置为 1.0X'),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+      );
+    }
 
     Widget progressWidget(
       BottomControlType bottomControl,
@@ -752,34 +861,17 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
 
       /// 播放速度
       BottomControlType.speed => Obx(
-        () => PopupMenuButton<double>(
-          tooltip: '倍速',
-          requestFocus: false,
-          initialValue: plPlayerController.playbackSpeed,
-          color: Colors.black.withValues(alpha: 0.8),
-          itemBuilder: (context) {
-            return plPlayerController.speedList
-                .map(
-                  (double speed) => PopupMenuItem<double>(
-                    height: 35,
-                    padding: const EdgeInsets.only(left: 30),
-                    value: speed,
-                    onTap: () => plPlayerController.setPlaybackSpeed(speed),
-                    child: Text(
-                      "${speed}X",
-                      style: const TextStyle(color: Colors.white, fontSize: 13),
-                      semanticsLabel: "$speed倍速",
-                    ),
-                  ),
-                )
-                .toList();
-          },
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: Text(
-              "${plPlayerController.playbackSpeed}X",
-              style: const TextStyle(color: Colors.white, fontSize: 13),
-              semanticsLabel: "${plPlayerController.playbackSpeed}倍速",
+        () => Tooltip(
+          message: '倍速',
+          child: InkWell(
+            onTap: showSpeedSheet,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Text(
+                "${plPlayerController.playbackSpeed}X",
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+                semanticsLabel: "${plPlayerController.playbackSpeed}倍速",
+              ),
             ),
           ),
         ),

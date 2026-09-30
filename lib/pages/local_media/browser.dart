@@ -69,6 +69,7 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
   @override
   void dispose() {
     _searchDebounce?.cancel();
+    _searchFlushTimer?.cancel();
     _searchGen++; // 让在飞的检索作废, 回调里会因 mounted/gen 不符而直接返回
     _searchCtr.dispose();
     super.dispose();
@@ -411,6 +412,7 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
       );
     }
     if (_results.isEmpty) {
+      // 还在扫的时候只显示进度, 不要提前下"没有匹配"的结论
       return SliverFillRemaining(
         hasScrollBody: false,
         child: Padding(
@@ -503,6 +505,9 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
 
   void _exitSearch() {
     _searchDebounce?.cancel();
+    _searchFlushTimer?.cancel();
+    _searchFlushTimer = null;
+    _pendingResults.clear();
     _searchGen++;
     setState(() {
       _searching = false;
@@ -518,6 +523,9 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
 
   void _onQueryChanged(String value) {
     _searchDebounce?.cancel();
+    _searchFlushTimer?.cancel();
+    _searchFlushTimer = null;
+    _pendingResults.clear();
     final gen = ++_searchGen;
     final keyword = value.trim();
     setState(() {
@@ -542,26 +550,65 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
     });
   }
 
+  /// 命中结果的增量缓冲 + 节流刷新。
+  ///
+  /// 每条命中都 setState 会把整张列表重建一遍(大目录里可能一秒几十条),
+  /// 所以攒着按 ~120ms 批量刷一次: 既是"边扫边出", 又不会把 UI 拖垮。
+  final List<LocalMediaItem> _pendingResults = [];
+  Timer? _searchFlushTimer;
+
+  void _scheduleSearchFlush(int gen) {
+    if (_searchFlushTimer?.isActive ?? false) {
+      return;
+    }
+    _searchFlushTimer = Timer(const Duration(milliseconds: 120), () {
+      _searchFlushTimer = null;
+      if (gen != _searchGen || !mounted || _pendingResults.isEmpty) {
+        return;
+      }
+      setState(() {
+        _results = [..._results, ..._pendingResults];
+        _pendingResults.clear();
+        _syncProgress(_results);
+      });
+    });
+  }
+
   Future<void> _runSearch(String keyword, int gen) async {
     final level = _current;
+    _pendingResults.clear();
     final found = await LocalMediaService.search(
       source: level.source,
       rootPath: level.path,
       query: keyword,
       showHidden: _showHidden,
       cancelled: () => gen != _searchGen || !mounted,
+      // 命中就先进缓冲并排一次刷新, 不等整棵树扫完
+      onFound: (item) {
+        if (gen != _searchGen) {
+          return;
+        }
+        _pendingResults.add(item);
+        _scheduleSearchFlush(gen);
+      },
       onProgress: (dirs, matches) {
         if (gen != _searchGen || !mounted) {
           return;
         }
-        setState(() => _searchInfo = '已扫描 $dirs 个目录，找到 $matches 个');
+        setState(
+          () => _searchInfo = '已扫描 $dirs 个目录，找到 $matches 个（仍在检索…）',
+        );
       },
     );
+    _searchFlushTimer?.cancel();
+    _searchFlushTimer = null;
     if (gen != _searchGen || !mounted) {
       return;
     }
     setState(() {
+      // 以 search 的返回值为准(缓冲里可能还剩没刷出去的)
       _results = found;
+      _pendingResults.clear();
       _searchRunning = false;
       _searchInfo = found.isEmpty
           ? '「$keyword」没有匹配的可播放文件'

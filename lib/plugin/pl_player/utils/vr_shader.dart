@@ -76,7 +76,9 @@ vec4 hook() {
   vec2 uv = HOOKED_pos;
   // 本 pass 的输出会被缩放贴到视频区域(dst rect), 因此按视频区域的宽高比投影,
   // 缩放后画面几何关系才是正确的(全屏/半屏、fit 模式变化都会自动跟随)
-  float aspect = target_size.x / max(target_size.y, 1.0);
+  // 首帧或尺寸未知时 target_size 可能为 0, 这里兜底避免画面被拉成一条
+  float aspect = clamp(
+      max(target_size.x, 1.0) / max(target_size.y, 1.0), 0.1, 20.0);
   float tanH = tan(radians(VR_FOV) * 0.5);
   float tanV = tanH / max(aspect, 0.01);
   vec2 sc = (uv - 0.5) * 2.0;

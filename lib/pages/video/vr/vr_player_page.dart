@@ -355,8 +355,10 @@ class _VrPlayerPageState extends State<VrPlayerPage> {
         return Center(
           child: FilledButton.tonalIcon(
             onPressed: () {
-              _c.seek(Duration.zero);
-              _c.play();
+              // 级联写法: cascade_invocations 要求同一接收者的连续调用合并
+              _c
+                ..seek(Duration.zero)
+                ..play();
             },
             icon: const Icon(Icons.replay),
             label: const Text('重新播放'),

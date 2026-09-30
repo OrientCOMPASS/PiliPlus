@@ -821,6 +821,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   static const int vrGyroApplyIntervalMs = 180;
   int _vrLastApplyMs = 0;
 
+  /// 节流窗口内的"尾随下发"定时器(见 [applyVrView])
+  Timer? _vrApplyTimer;
+
   /// 预算耗尽只提示一次
   bool _vrBudgetWarned = false;
 
@@ -935,7 +938,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           ),
         )
         .clamped(vrProjection.value);
-    applyVrView(force: true);
+    // 不 force: 长按连续转动时是 110ms 一次, force 会绕过节流,
+    // 变成每秒 ~9 次渲染管线重建(就是第三轮那个卡顿)。节流带尾随下发,
+    // 松手后最后一下也一定会落地。
+    applyVrView();
   }
 
   /// 拖拽改变视角。dx/dy 为像素位移, 手势方向与画面移动方向一致
@@ -1043,17 +1049,30 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     applyVrView(force: true);
   }
 
-  /// 节流应用视角; [force] 用于手势结束/按钮步进时保证视角准确,
+  /// 节流应用视角; [force] 用于手势结束这类"必须立刻落地"的时机,
   /// [gyro] 表示来自陀螺仪(用更宽松的最小间隔)。
+  ///
+  /// 节流是**带尾随下发**的: 落在窗口内的更新不是丢弃, 而是排一个定时器在
+  /// 窗口末尾补发。否则"按住方向键连续转动"的最后一下、或拖拽结束前的最后
+  /// 一段位移会不生效, 表现成"画面差一点点没跟上手指"。
   void applyVrView({bool force = false, bool gyro = false}) {
     if (!vrEnabled) {
       return;
     }
     final now = DateTime.now().millisecondsSinceEpoch;
     final interval = gyro ? vrGyroApplyIntervalMs : vrApplyIntervalMs;
-    if (!force && now - _vrLastApplyMs < interval) {
+    final elapsed = now - _vrLastApplyMs;
+    if (!force && elapsed < interval) {
+      _vrApplyTimer?.cancel();
+      _vrApplyTimer = Timer(Duration(milliseconds: interval - elapsed), () {
+        _vrApplyTimer = null;
+        _vrLastApplyMs = DateTime.now().millisecondsSinceEpoch;
+        _applyVrShader();
+      });
       return;
     }
+    _vrApplyTimer?.cancel();
+    _vrApplyTimer = null;
     _vrLastApplyMs = now;
     _applyVrShader();
   }
@@ -2026,6 +2045,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     vrGyroEnabled.value = false;
     _vrGyroTracker?.stop();
     _vrGyroTracker = null;
+    _vrApplyTimer?.cancel();
+    _vrApplyTimer = null;
     // 着色器文件与"源码 -> 路径"映射随播放器一起作废
     // (下一次 _initPlayer 会 purge 目录并重置变体预算)
     _vrAppliedSource = null;

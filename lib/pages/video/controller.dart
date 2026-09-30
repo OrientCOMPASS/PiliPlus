@@ -10,6 +10,7 @@ import 'package:PiliPlus/grpc/bilibili/app/listener/v1.pbenum.dart'
     show PlaylistSource;
 import 'package:PiliPlus/grpc/dm.dart';
 import 'package:PiliPlus/http/browser_ua.dart';
+import 'package:PiliPlus/http/constants.dart';
 import 'package:PiliPlus/http/fav.dart';
 import 'package:PiliPlus/http/init.dart';
 import 'package:PiliPlus/http/loading_state.dart';
@@ -48,13 +49,16 @@ import 'package:PiliPlus/pages/video/medialist/view.dart';
 import 'package:PiliPlus/pages/video/note/view.dart';
 import 'package:PiliPlus/pages/video/post_panel/view.dart';
 import 'package:PiliPlus/pages/video/send_danmaku/view.dart';
+import 'package:PiliPlus/pages/video/vr/vr_player_page.dart';
 import 'package:PiliPlus/pages/video/widgets/header_control.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/data_source.dart';
 import 'package:PiliPlus/plugin/pl_player/models/heart_beat_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
+import 'package:PiliPlus/plugin/pl_player/models/vr_projection.dart';
 import 'package:PiliPlus/services/download/download_service.dart';
 import 'package:PiliPlus/services/local_media_service.dart';
+import 'package:PiliPlus/services/vr/vr_native_player.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/connectivity_utils.dart';
 import 'package:PiliPlus/utils/extension/context_ext.dart';
@@ -413,6 +417,63 @@ class VideoDetailController extends GetxController
     defaultST = LocalMediaProgress.get(item.uri);
     _lastLocalProgressSavedMs = 0;
     _setVideoHeight();
+  }
+
+  /// 打开**自研 VR 播放器**(整页切换, 参考 xl_player 的交互)。
+  ///
+  /// 为什么不在 mpv 上做全景: 安卓端 mpv 固定 `vo=gpu`, 它的用户着色器
+  /// **不支持 `//!PARAM`**, 视角参数只能烘焙进源码; 而 `glsl-shaders` 一变,
+  /// `gl_video_render_frame()` 就会重建整条渲染管线并重编译 GLSL ——
+  /// 逐帧头追在这条路上是不可能的(详见 docs/piliplayer.md 9.1 / 10.1)。
+  /// 自研渲染器里 yaw/pitch/fov 都是 uniform, 每帧直接改。
+  ///
+  /// 进入时暂停 mpv、退出时恢复, 避免两路同时出声。
+  Future<void> openVrPlayer([VrProjection? hint]) async {
+    if (!VrNativePlayerController.isSupported) {
+      SmartDialog.showToast('自研 VR 播放器只在安卓上可用');
+      return;
+    }
+    final projection = hint ?? plPlayerController.vrProjection.value;
+    if (!projection.enabled) {
+      SmartDialog.showToast('请先在「播放器设置 → VR/全景」选择片源布局');
+      return;
+    }
+    final String uri;
+    final Map<String, String>? headers;
+    if (isLocalMedia) {
+      if (!LocalMediaService.nativePlayerCanPlay(localItem.source)) {
+        SmartDialog.showToast('FTP 源不支持 VR 播放器（系统解码器不认 ftp://）');
+        return;
+      }
+      uri = localPlayUrl ?? LocalMediaService.playbackUrl(localItem);
+      // MediaExtractor 不会自己处理 URL 里的 userinfo, 凭据要转成 Authorization 头
+      headers = LocalMediaService.nativeHeaders(localItem.source);
+    } else {
+      final online = videoUrl;
+      if (online == null || online.isEmpty) {
+        SmartDialog.showToast('还没有可播放的地址');
+        return;
+      }
+      uri = online;
+      headers = {'User-Agent': BrowserUa.pc, 'Referer': HttpString.baseUrl};
+    }
+    // 记住布局, 让播放器上的 VR 入口状态保持一致
+    plPlayerController.vrProjection.value = projection;
+    final resumeAfter = plPlayerController.playerStatus.isPlaying;
+    await plPlayerController.pause();
+    await Get.to(
+      () => VrPlayerPage(
+        uri: uri,
+        title: isLocalMedia ? localItem.name : 'VR 全景视频',
+        headers: headers,
+        start: Duration(milliseconds: plPlayerController.positionInMilliseconds),
+        projection: projection,
+        eye: Pref.vrEye,
+        fov: Pref.vrDefaultFov,
+        gyro: Pref.vrGyro,
+        onResumeOuter: resumeAfter ? () => plPlayerController.play() : null,
+      ),
+    );
   }
 
   /// 本机文件用 [FileSource](关闭缓存); 局域网用 [NetworkSource](保留缓冲策略)

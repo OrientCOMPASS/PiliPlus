@@ -313,6 +313,16 @@ List<SettingsModel> get playSettings => [
     onTap: _showVrFovDialog,
   ),
   const SwitchModel(
+    title: 'VR 使用独立播放器',
+    subtitle:
+        '自研 MediaCodec + OpenGL ES 球面重投影，视角是逐帧 uniform，'
+        '头追跟手；关掉则退回 mpv 着色器方案(改视角要重建渲染管线，'
+        '只能量化跟手，但保留弹幕/字幕等 mpv 能力)',
+    leading: Icon(Icons.view_in_ar_outlined),
+    setKey: SettingBoxKey.vrNativeRenderer,
+    defaultVal: true,
+  ),
+  const SwitchModel(
     title: 'VR 陀螺仪视角',
     subtitle: '进入 VR 操作模式后转动设备环视(参考头追), 播放中可随时开关',
     leading: Icon(Icons.screen_rotation_outlined),

@@ -741,3 +741,119 @@ CI 那一轮的输出正好说明了这批测试的价值：`flutter analyze` er
   Release 里只有 `app-arm64-v8a-release.apk` + `app-debug.apk` 与各自的
   SHA256SUMS；旧的 `v2.1.5-test.1` release 与 tag 已在新包产出并校验之后删除。
   tag 那条 workflow run 三个 job（Analyze & Test / Build debug / Build release）全绿。
+
+---
+
+## 10. 第五轮真机反馈修复（v2.1.5-test 固定 tag）
+
+### 10.1 本地视频强制自动播放（顺带解释"三点菜单是在线菜单"）
+
+「自动播放」设置关掉时，播放页停在封面占位状态 —— 那个状态下顶栏挂的是
+**在线视频**的菜单（分享/举报/稍后再看…），对本地文件全都不成立。
+本地点开就是要看，没有"先不播"的语义，所以 `isLocalMedia` 时
+`_autoPlay` 强制为 true（`VideoDetailController.onInit`）。
+
+### 10.2 三点菜单打不开：`as FileSource` 的第二处
+
+上一轮只修了弹幕控制器里的强转，没把全仓扫干净。这次崩在
+`header_control.dart:679`「只听音频」那一项：
+
+```dart
+if ((isFileSource && !(plPlayerController.dataSource as FileSource).isMp4) || ...)
+```
+
+页面的 `isFileSource` 对本地媒体是 true，而 `dataSource` 是 `NetworkSource`
+（SMB 回环代理 / WebDAV / HTTP）→ 一强转就抛。抽成 `_canOnlyPlayAudio` getter，
+先判类型再用，不做任何强转。`grep -rn "as FileSource" lib/` 现在只剩注释里的说明。
+
+### 10.3 内嵌字幕：根因是被我们自己关掉的
+
+现象是"播内嵌字幕的片子看不到字幕，播放信息里只有 video/audio"。
+根因不在解码器，而在 `VideoDetailController.playerInit` 的 `onInit`：
+
+```dart
+onInit: () { videoState.value = true; setSubtitle(vttSubtitlesIndex.value); }
+```
+
+`vttSubtitlesIndex` 默认 -1 → `setSubtitle(-1)` → `setSubtitleTrack(SubtitleTrack.no())`
+→ mpv `sid=no`，**把片源里内嵌的字幕轨一起关掉了**。
+media_kit 只在创建播放器时设 `vid=no`，并不动 `sid`，所以本来 mpv 的
+`sid=auto` 会自动选一条内嵌字幕。
+
+修法：
+
+1. 本地媒体不再调 `setSubtitle(...)`，内嵌字幕交给 mpv 的 `sid=auto` 自选；
+2. `PlPlayerController` 订阅 media_kit 的 `stream.tracks` / `stream.track`，
+   暴露 `internalSubtitleTracks` / `internalAudioTracks` / `currentTrack`
+   （过滤掉 media_kit 塞在列表最前面的 `auto`/`no` 两个伪轨道）；
+3. **字幕入口按 VLC 的做法从三点菜单移到播放器顶栏**：顶栏新增「字幕」按钮，
+   面板里一屏给出「当前正在用的字幕流」（以 mpv 实际选中的轨为准，不是本地记的）、
+   B 站字幕 / 内嵌字幕轨道 / 自动 / 关闭、多音轨片源的音轨切换、
+   加载外挂字幕（srt/ass/vtt/json/bcc）与字幕设置；三点菜单里的
+   「字幕设置」「加载字幕」随之移除（逻辑原样搬进面板，行为不变）；
+4. 播放信息补 `SubtitleTrack` 与可用轨道数 —— 上一轮定位问题就是卡在
+   "播放信息里看不到字幕轨"。
+
+### 10.4 VR 改为自研 native 播放器（不再用 mpv 渲染）
+
+第 9.1 节已经论证过：mpv 安卓端固定 `vo=gpu`，用户着色器不支持 `//!PARAM`，
+视角参数只能烘焙进源码，改一次视角 = 重建整条渲染管线 + 编译一份新 GLSL +
+在 mpv 进程里永久留一份程序缓存。**逐帧头追在这条路上做不到**，
+量化/节流/预算只能把体验做到"能用"，做不到 xl_player 那样跟手。
+
+这轮按 xl_player 的管线自己写了一套（`android/app/src/main/kotlin/com/example/piliplus/vr/`）：
+
+```
+MediaExtractor ─┬─ video → MediaCodec ──→ SurfaceTexture(OES 纹理)
+                │                                    │
+                └─ audio → MediaCodec → AudioTrack   │  GLES2 程序(全屏四边形 +
+                              (主时钟)               ▼  等距柱状→直线投影片元着色器)
+                                            VrGlPipeline ──→ Flutter TextureRegistry
+```
+
+| 文件 | 内容 |
+| --- | --- |
+| `VrGlPipeline.kt` | EGL14 + GLES2 渲染线程（`HandlerThread` + `Choreographer` 跟 vsync 出帧）；片元着色器做等距柱状→直线投影，**yaw/pitch/fov/覆盖角/眼位全是 uniform**；OES 外部纹理 + `SurfaceTexture.getTransformMatrix` |
+| `VrEngine.kt` | MediaExtractor + MediaCodec（视频解到 Surface，音频解到 AudioTrack 并作**主时钟**）、倍速（`AudioTrack.playbackParams`）、seek（flush + `SEEK_TO_PREVIOUS_SYNC`）、丢帧追赶、缓冲/结束/错误回调 |
+| `VrHeadTracker.kt` | 优先 `TYPE_ROTATION_VECTOR`（系统已融合陀螺仪+加速度计+磁力计）：每次取绝对姿态的 yaw/pitch，**用相邻两次的差累加** —— 增量是两个绝对值之差，所以不像纯陀螺仪积分那样慢漂（这正是 Dart 版 `VrGyroMath` 的已知限制）。没有旋转矢量传感器时退回「加速度计定姿态 + 陀螺仪积分」 |
+| `VrPlayerBridge.kt` | MethodChannel `piliplus/vr_player`：create/open/play/pause/seekTo/setSpeed/lookBy/setFov/zoomBy/resetView/setProjection/setEye/setGyro/release，事件回传 prepared/view/buffering/ended/error |
+| `lib/services/vr/vr_native_player.dart` | Dart 侧控制器（`GetxController` + Rx 状态） |
+| `lib/pages/video/vr/vr_player_page.dart` | 独立全屏播放页：拖拽环视、双指缩放视场角、方向键/缩放键长按连续、片源布局与眼位切换、陀螺仪开关、视角摆正、进度条与快进快退、错误/缓冲/播完状态 |
+
+关键设计：
+
+- **视角状态以 native 为准**，Dart 只发增量指令（`lookBy`/`setFov`/`resetView`），
+  native 在**每帧绘制前**（`onBeforeFrame`，GL 线程上）把头追增量叠到 yaw/pitch 上，
+  再按 10Hz 把读数回报给 Dart 显示。头追不经过 platform channel 往返，
+  所以是真正的逐帧跟手；
+- 投影数学与 Dart/mpv 版**逐行对齐**（同样的 rotX→rotY 顺序、同样的
+  `u = lon/coverageH + 0.5`、`v = 0.5 - lat/π`、180° 片源按 `±(coverage-fov)/2`
+  收敛、双目取单眼区域），所以两条路径看到的画面几何一致，只是刷新方式不同；
+- 用全屏四边形 + 片元着色器做投影，**不是球面网格**：没有网格密度不足导致的
+  边缘拉伸，也不用生成/上传顶点缓冲；
+- 进入这一页时暂停外层 mpv、退出时恢复（`onResumeOuter`），不会两路一起出声；
+- `open`/`release` 都放到后台线程（`awaitVideoSurface` 最多等 3s、解码线程要 join），
+  避免占着主线程触发 ANR；`TextureRegistry` 的 entry 仍回主线程释放；
+- WebDAV/HTTP 的凭据转成 `Authorization: Basic` 头（`LocalMediaService.nativeHeaders`）：
+  MediaExtractor 不会像 FFmpeg 那样自己解析 URL 里的 userinfo；
+- **保留回退开关**：设置 → 播放设置 → 「VR 使用独立播放器」（默认开）。
+  关掉就回到 mpv 用户着色器路径（第 9.1 节那套量化+节流+预算的实现原样保留），
+  万一新渲染器在某些机型上有问题，用户可以立刻退回，也能对比两条路径的手感。
+
+已知边界（不藏）：
+
+- 只实现了安卓；其它平台自动退回 mpv 着色器路径（`isSupported` 判定）；
+- VR 播放页里**没有弹幕**（这一页不经过 mpv，弹幕是 mpv 播放器上的 Flutter 层），
+  也暂时没有字幕与多音轨切换（`VrEngine` 只取第一条视频轨/第一条音频轨）；
+- seek 对齐到前一个关键帧，不是逐帧精确；
+- 不支持 DRM 与 `ftp://`（MediaExtractor 不认，会明确提示）；
+- 沙盒里没有 Android SDK/设备，**这套 native 代码只经过 CI 的 gradle 编译验证**，
+  运行时行为（GL 上下纹理方向、色彩、音画同步、传感器轴向）需要真机确认；
+  真机上如有问题，先用上面的回退开关退回 mpv 路径，再反馈现象。
+
+### 10.5 版本与发布流程
+
+- 版本**切回 `2.1.5+2`**，不再随每轮 bump；
+- tag 固定为 **`v2.1.5-test`**：每次新构建先删掉旧的 release 与同名 tag，
+  再在新提交上重建 —— 下载链接永远不变，Release 页永远只有一个测试包；
+- CI 的 release 腿仍然只出 `arm64-v8a`。

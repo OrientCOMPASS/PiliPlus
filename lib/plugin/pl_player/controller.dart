@@ -33,6 +33,7 @@ import 'package:PiliPlus/plugin/pl_player/models/vr_projection.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/vr_gyro.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/vr_shader.dart';
+import 'package:PiliPlus/services/vr/vr_native_player.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/android/android_helper.dart';
@@ -730,8 +731,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         setting.put(SettingBoxKey.superResolutionType, type.index);
       }
     }
-    // VR 重投影与超分辨率都占用 glsl-shaders, 不能同时生效, VR 优先
-    if (vrEnabled) {
+    // VR 重投影与超分辨率都占用 glsl-shaders, 不能同时生效, VR 优先。
+    // (走自研 VR 播放器时 mpv 这边没有占用着色器, 超分辨率照常可用)
+    if (vrUsesMpvShader) {
       return;
     }
     pp ??= _videoPlayerController!;
@@ -840,6 +842,18 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   bool get vrEnabled => vrProjection.value.enabled;
 
+  /// VR 是否交给**自研 native 播放器**(MediaCodec + GLES 球面重投影)。
+  ///
+  /// 只有安卓实现了那套渲染管线; 其它平台自动退回 mpv 用户着色器方案。
+  bool get vrNativeAvailable =>
+      VrNativePlayerController.isSupported && Pref.vrNativeRenderer;
+
+  /// VR 重投影是否走 mpv 的用户着色器。
+  ///
+  /// 走 native 时这边**完全不碰 glsl-shaders**: 否则 mpv 会白白重建渲染管线,
+  /// 而画面根本不显示给用户(用户看的是 native 那一页)。
+  bool get vrUsesMpvShader => vrEnabled && !vrNativeAvailable;
+
   /// 量化步长 + 变体预算(见 `VrQuantizer`): 每一份不同的着色器源码在 mpv
   /// 那边都是一次真实的 GLSL 编译和一条永久驻留的程序缓存, 所以必须限量。
   final VrQuantizer _vrQuantizer = VrQuantizer();
@@ -892,11 +906,23 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }
     }
     vrProjection.value = projection ?? VrProjection.off;
-    vrControlMode.value = vrEnabled;
     vrView.value = VrViewState(fov: Pref.vrDefaultFov);
     _vrLastApplyMs = 0;
     // 注意: 这里**不能**清 `_vrAppliedSource`。换视频时播放器是复用的,
     // mpv 里的着色器还在; 清掉只会导致重复下发同一路径、白白重建一次管线。
+    if (vrEnabled && vrNativeAvailable) {
+      // 走自研 VR 播放器: 这里只记住片源布局, 不下发着色器、不接管手势。
+      // 独立播放页由「VR」按钮 / 设置面板打开(VideoDetailController.openVrPlayer)。
+      vrControlMode.value = false;
+      setVrGyro(false, persist: false, toast: false);
+      SmartDialog.showToast(
+        '已识别为${vrProjection.value.label}片源\n'
+        '点播放器上的「VR」按钮进入 VR 播放器',
+        displayTime: const Duration(milliseconds: 3500),
+      );
+      return;
+    }
+    vrControlMode.value = vrEnabled;
     setVrGyro(vrEnabled && Pref.vrGyro, persist: false, toast: false);
     if (vrEnabled) {
       SmartDialog.showToast(
@@ -1336,14 +1362,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         return;
       }
       _videoPlayerController = player;
-      if (!vrEnabled && isAnim && superResolutionType.value != .disable) {
+      if (!vrUsesMpvShader && isAnim && superResolutionType.value != .disable) {
         await setShader();
       }
     }
 
     // VR 着色器每次装载新源都要重新下发: PlPlayerController 是单例,
-    // 切集/换视频时播放器不会重建, 只放在"新建播放器"分支里会漏掉
-    if (vrEnabled) {
+    // 切集/换视频时播放器不会重建, 只放在"新建播放器"分支里会漏掉。
+    // 走自研 VR 播放器时(vrUsesMpvShader == false)这里什么都不做。
+    if (vrUsesMpvShader) {
       await _applyVrShader();
     }
 

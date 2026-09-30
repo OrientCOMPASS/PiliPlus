@@ -512,13 +512,38 @@ class HeaderControlState extends State<HeaderControl>
                   },
                   itemBuilder: (_) => enumItemBuilder(VrProjection.values),
                   onSelected: (value, setState) {
-                    plPlayerController.setVrProjection(value);
+                    // 选了具体布局就等于"我要看全景": 走自研 VR 播放器时
+                    // 直接切到独立播放页, 而不是在 mpv 上下发着色器
+                    if (value.enabled && plPlayerController.vrNativeAvailable) {
+                      Get.back();
+                      videoDetailCtr.openVrPlayer(value);
+                    } else {
+                      plPlayerController.setVrProjection(value);
+                    }
                     setState();
                   },
                   descPosType: .subtitle,
                   descStyle: subTitleStyle,
                 ),
-                if (plPlayerController.vrEnabled) ...[
+                if (plPlayerController.vrEnabled &&
+                    plPlayerController.vrNativeAvailable)
+                  ListTile(
+                    dense: true,
+                    onTap: () {
+                      Get.back();
+                      videoDetailCtr.openVrPlayer();
+                    },
+                    leading: const Icon(Icons.view_in_ar_outlined, size: 20),
+                    title: const Text('进入 VR 播放器', style: titleStyle),
+                    subtitle: Text(
+                      '独立渲染管线（MediaCodec + OpenGL ES 球面重投影），'
+                      '视角逐帧更新；此模式下没有弹幕',
+                      style: subTitleStyle,
+                    ),
+                  ),
+                // 下面是 mpv 用户着色器路径(设置里关掉「VR 使用独立播放器」时才走)
+                if (plPlayerController.vrEnabled &&
+                    !plPlayerController.vrNativeAvailable) ...[
                   ListTile(
                     dense: true,
                     onTap: () {

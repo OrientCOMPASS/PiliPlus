@@ -1,3 +1,4 @@
+import 'dart:convert' show base64Encode, utf8;
 import 'dart:io';
 
 import 'package:PiliPlus/http/loading_state.dart';
@@ -420,6 +421,34 @@ abstract final class LocalMediaService {
       address: source.address,
     );
   }
+
+  /// 交给**自研 VR 播放器**(Android MediaExtractor)时要带的请求头。
+  ///
+  /// MediaExtractor 走系统的 HTTP 栈, **不会**自己把 URL 里的 userinfo 转成
+  /// Basic 认证(mpv/FFmpeg 会), 所以 WebDAV/HTTP 的账号密码必须在这里转成
+  /// `Authorization` 头, 否则带凭据的局域网源会 401。
+  /// 本机文件与 SMB(走本机回环代理, 无需认证)返回 null。
+  static Map<String, String>? nativeHeaders(LocalMediaSource source) {
+    if (!source.hasCredential) {
+      return null;
+    }
+    switch (source.type) {
+      case LocalMediaSourceType.webdav:
+      case LocalMediaSourceType.http:
+        final raw = '${source.username ?? ''}:${source.password ?? ''}';
+        return {
+          'Authorization': 'Basic ${base64Encode(utf8.encode(raw))}',
+        };
+      case LocalMediaSourceType.device:
+      case LocalMediaSourceType.smb:
+      case LocalMediaSourceType.ftp:
+        return null;
+    }
+  }
+
+  /// 自研 VR 播放器能不能播这个来源(MediaExtractor 不认 ftp://)
+  static bool nativePlayerCanPlay(LocalMediaSource source) =>
+      source.type != LocalMediaSourceType.ftp;
 
   /// 连通性检查(添加/编辑来源时立即验证)
   static Future<LoadingState<int>> testConnection(

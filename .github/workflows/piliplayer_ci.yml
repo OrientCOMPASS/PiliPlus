@@ -66,6 +66,8 @@ env:
         lib/plugin/pl_player/utils/vr_gyro.dart
         lib/plugin/pl_player/utils/vr_gyro_math.dart
         test/services/local_media_source_test.dart
+        lib/services/vr
+        lib/pages/video/vr
 
 jobs:
     check:

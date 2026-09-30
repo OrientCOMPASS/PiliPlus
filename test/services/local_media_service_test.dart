@@ -199,6 +199,51 @@ void main() {
     });
   });
 
+  group('nativeHeaders(自研 VR 播放器)', () {
+    test('WebDAV/HTTP 的 userinfo 要转成 Basic 认证头', () {
+      // Android MediaExtractor 不会自己处理 URL 里的 user:pass(mpv/FFmpeg 会),
+      // 不转的话带凭据的局域网源在 VR 播放器里必然 401
+      const source = LocalMediaSource(
+        type: LocalMediaSourceType.webdav,
+        name: 'dav',
+        url: 'https://nas.example.com/dav',
+        username: 'user',
+        password: 'p@ss',
+      );
+      final headers = LocalMediaService.nativeHeaders(source);
+      expect(headers, isNotNull);
+      // base64('user:p@ss') == dXNlcjpwQHNz
+      expect(headers!['Authorization'], 'Basic dXNlcjpwQHNz');
+    });
+
+    test('本机文件与 SMB(走回环代理, 无需认证)不带头', () {
+      expect(LocalMediaService.nativeHeaders(device), isNull);
+      expect(LocalMediaService.nativeHeaders(smbHost), isNull);
+      expect(LocalMediaService.nativeHeaders(smbShare), isNull);
+    });
+
+    test('没有凭据时不带头', () {
+      const anon = LocalMediaSource(
+        type: LocalMediaSourceType.http,
+        name: 'h',
+        url: 'http://a/b.mp4',
+      );
+      expect(LocalMediaService.nativeHeaders(anon), isNull);
+    });
+
+    test('FTP 不能交给自研 VR 播放器(MediaExtractor 不认 ftp://)', () {
+      const ftp = LocalMediaSource(
+        type: LocalMediaSourceType.ftp,
+        name: 'f',
+        url: 'ftp://a/b.mp4',
+      );
+      expect(LocalMediaService.nativePlayerCanPlay(ftp), isFalse);
+      expect(LocalMediaService.nativePlayerCanPlay(device), isTrue);
+      expect(LocalMediaService.nativePlayerCanPlay(smbHost), isTrue);
+      expect(LocalMediaService.nativePlayerCanPlay(dav), isTrue);
+    });
+  });
+
   group('shortcutFor(添加到快捷方式)', () {
     test('本机目录: url 就是绝对路径', () {
       final s = LocalMediaController.shortcutFor(

@@ -335,16 +335,13 @@ class VideoDetailController extends GetxController
   late final watchProgress = GStorage.watchProgress;
   void cacheLocalProgress() {
     if (isLocalMedia) {
-      // 只写本机记录, 不上报 B 站
-      final pl = plPlayerController;
-      final pos = pl.positionInMilliseconds;
-      if (pos > 0) {
-        final total = pl.durationInMilliseconds;
-        LocalMediaProgress.put(
-          localItem.uri,
-          Duration(milliseconds: pos),
-          duration: total > 0 ? Duration(milliseconds: total) : null,
-        );
+      // 只写本机记录, 不上报 B 站。
+      // 播放器可能已先于本控制器销毁, 此时 position 取不到, 退回用
+      // 播放过程中周期落盘的值(不会覆盖成 0)。
+      final pos = playedTime ??
+          Duration(milliseconds: plPlayerController.positionInMilliseconds);
+      if (pos > Duration.zero) {
+        _saveLocalProgress(pos);
       }
       return;
     }
@@ -376,10 +373,36 @@ class VideoDetailController extends GetxController
     _setVideoHeight();
   }
 
+  /// 本地媒体续播进度的落盘间隔
+  static const int _localProgressSaveIntervalMs = 5000;
+  int _lastLocalProgressSavedMs = 0;
+
+  /// 播放位置回调: 每 5 秒把本地媒体的进度写到本机(不上报 B 站)
+  void _onLocalProgress(Duration position) {
+    if (!isLocalMedia || !plPlayerController.isLocalMedia) {
+      return;
+    }
+    final ms = position.inMilliseconds;
+    if (ms <= 0 || ms - _lastLocalProgressSavedMs < _localProgressSaveIntervalMs) {
+      return;
+    }
+    _lastLocalProgressSavedMs = ms;
+    _saveLocalProgress(position);
+  }
+
+  void _saveLocalProgress(Duration position) {
+    final total = plPlayerController.durationInMilliseconds;
+    LocalMediaProgress.put(
+      localItem.uri,
+      position,
+      duration: total > 0 ? Duration(milliseconds: total) : null,
+    );
+  }
+
   /// 本地/局域网媒体: 播放地址来自文件系统或 URL, 全程不请求 B 站接口
-  void initLocalMediaSource(LocalMediaItem item) {
+  void initLocalMediaSource(LocalMediaItem item, {String? playUrl}) {
     localItem = item;
-    localPlayUrl = LocalMediaService.playbackUrl(item);
+    localPlayUrl = playUrl ?? LocalMediaService.playbackUrl(item);
     firstVideo = VideoItem(
       id: 0,
       // 本地文件没有 B 站画质概念, 这里只是占位(简介面板不展示画质)
@@ -388,6 +411,7 @@ class VideoDetailController extends GetxController
     data = PlayUrlModel(timeLength: null);
     // 续播位置来自本机记录
     defaultST = LocalMediaProgress.get(item.uri);
+    _lastLocalProgressSavedMs = 0;
     _setVideoHeight();
   }
 
@@ -429,7 +453,14 @@ class VideoDetailController extends GetxController
     isFileSource = sourceType == SourceType.file || isLocalMedia;
     isPlayAll = sourceType != SourceType.normal && !isFileSource;
     if (isLocalMedia) {
-      initLocalMediaSource(args['localMedia'] as LocalMediaItem);
+      initLocalMediaSource(
+        args['localMedia'] as LocalMediaItem,
+        // SMB 之类需要先在本机代理上注册, 由「本地」板块解析好后传进来
+        playUrl: args['localPlayUrl'] as String?,
+      );
+      // 周期性落盘续播进度: 只靠 onClose 保存并不可靠
+      // (进程被杀、后台回收、播放器先于控制器销毁都会丢进度)
+      plPlayerController.addPositionListener(_onLocalProgress);
     } else if (isFileSource) {
       initFileSource(args['entry']);
     } else if (isPlayAll) {
@@ -1301,6 +1332,9 @@ class VideoDetailController extends GetxController
   @override
   void onClose() {
     cid.close();
+    if (isLocalMedia) {
+      plPlayerController.removePositionListener(_onLocalProgress);
+    }
     if (isFileSource) {
       cacheLocalProgress();
     }

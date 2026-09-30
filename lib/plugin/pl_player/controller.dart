@@ -749,11 +749,25 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// 当前片源的立体布局, [VrProjection.off] 表示普通视频
   final Rx<VrProjection> vrProjection = Rx<VrProjection>(VrProjection.off);
 
+  /// VR 操作模式(参考 PiliPlus#364 提出的"切换操作模式"方案)。
+  ///
+  /// 开启后由 `VrControlLayer` 接管手势, 播放器原有手势(左右进退、
+  /// 上下亮度/音量、上下滑全屏、双指缩放画面)全部让位, 因此不会与
+  /// PiliPlus 自身的双指缩放冲突; 退出后立刻恢复常规操作(方便进退/调音量)。
+  final RxBool vrControlMode = RxBool(false);
+
+  /// 屏幕按钮的步进量: 每次转动 10°, 视场角每次变化 8°
+  static const double vrStepDeg = 10.0;
+  static const double vrFovStep = 8.0;
+
   /// 双目片源渲染哪只眼睛(手机单屏只显示一只)
   late final Rx<VrEye> vrEye = Rx<VrEye>(Pref.vrEye);
 
-  late VrViewState _vrView = VrViewState(fov: Pref.vrDefaultFov);
-  VrViewState get vrView => _vrView;
+  /// 当前视角。做成可观察是为了让 VR 控制层实时显示读数,
+  /// 便于确认操作是否生效。
+  late final Rx<VrViewState> vrView = Rx<VrViewState>(
+    VrViewState(fov: Pref.vrDefaultFov),
+  );
 
   bool get vrEnabled => vrProjection.value.enabled;
 
@@ -774,16 +788,20 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       final detected = VrProjection.detectFromName(mediaName(source));
       if (detected.enabled) {
         projection = detected;
-        SmartDialog.showToast(
-          '已识别为${detected.label}片源，进入 VR 模式\n单指拖拽环视，双指缩放视场角',
-          displayTime: const Duration(milliseconds: 2500),
-        );
       }
     }
     vrProjection.value = projection ?? VrProjection.off;
-    _vrView = VrViewState(fov: Pref.vrDefaultFov);
+    vrControlMode.value = vrEnabled;
+    vrView.value = VrViewState(fov: Pref.vrDefaultFov);
     _vrShaderSource = null;
     _vrLastApplyMs = 0;
+    if (vrEnabled) {
+      SmartDialog.showToast(
+        '已识别为${vrProjection.value.label}片源，已进入 VR 操作模式\n'
+        '单指拖拽环视，双指缩放视场角，也可用屏幕按钮微调',
+        displayTime: const Duration(milliseconds: 3000),
+      );
+    }
   }
 
   /// 从路径/URL 中取出文件名
@@ -797,6 +815,26 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     return slash >= 0 ? name.substring(slash + 1) : name;
   }
 
+  /// 进入/退出 VR 操作模式
+  void setVrControlMode(bool value) {
+    if (value && !vrEnabled) {
+      SmartDialog.showToast('请先在「播放器设置 → VR/全景」选择片源布局');
+      return;
+    }
+    if (vrControlMode.value == value) {
+      return;
+    }
+    vrControlMode.value = value;
+    if (value) {
+      // 进入时强制下发一次: 单例播放器可能是在着色器应用之前就已创建
+      applyVrView(force: true);
+      SmartDialog.showToast(
+        'VR 操作模式：单指拖拽环视，双指缩放视场角\n点按顶部提示条可退回常规操作',
+        displayTime: const Duration(milliseconds: 3000),
+      );
+    }
+  }
+
   /// 切换片源布局
   Future<void> setVrProjection(
     VrProjection projection, {
@@ -804,11 +842,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   }) async {
     vrProjection.value = projection;
     if (resetView) {
-      _vrView = VrViewState(fov: _vrView.fov);
+      vrView.value = VrViewState(fov: vrView.value.fov);
     }
     if (projection.enabled) {
       await _applyVrShader(force: true);
+      // 选定布局即进入 VR 操作模式, 可随时退出以使用常规手势
+      vrControlMode.value = true;
     } else {
+      vrControlMode.value = false;
       // 退出 VR: 恢复超分辨率着色器(未开启时其内部会清空着色器列表)
       _vrShaderSource = null;
       await setShader();
@@ -824,6 +865,25 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     await _applyVrShader(force: true);
   }
 
+  /// 屏幕按钮步进: 偏航/俯仰/视场角
+  void vrStep({double dyaw = 0, double dpitch = 0, double dfov = 0}) {
+    if (!vrEnabled) {
+      return;
+    }
+    final cur = vrView.value;
+    vrView.value = cur
+        .copyWith(
+          yaw: cur.yaw + dyaw,
+          pitch: cur.pitch + dpitch,
+          fov: (cur.fov + dfov).clamp(
+            VrViewState.minFov,
+            VrViewState.maxFov,
+          ),
+        )
+        .clamped(vrProjection.value);
+    applyVrView(force: true);
+  }
+
   /// 拖拽改变视角。dx/dy 为像素位移, 手势方向与画面移动方向一致
   /// (手指右滑 -> 画面右移 -> 视角左转), 与主流 360 播放器手感一致。
   void onVrLook(
@@ -835,12 +895,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (!vrEnabled) {
       return;
     }
+    final cur = vrView.value;
     // 一屏宽度对应 1.5 倍水平视场角
-    final scale = _vrView.fov * 1.5;
-    _vrView = _vrView
+    final scale = cur.fov * 1.5;
+    vrView.value = cur
         .copyWith(
-          yaw: _vrView.yaw - dx * scale / max(width, 1.0),
-          pitch: _vrView.pitch - dy * scale / max(height, 1.0),
+          yaw: cur.yaw - dx * scale / max(width, 1.0),
+          pitch: cur.pitch - dy * scale / max(height, 1.0),
         )
         .clamped(vrProjection.value);
     applyVrView();
@@ -851,7 +912,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (!vrEnabled) {
       return;
     }
-    _vrView = _vrView
+    vrView.value = vrView.value
         .copyWith(fov: fov.clamp(VrViewState.minFov, VrViewState.maxFov))
         .clamped(vrProjection.value);
     applyVrView();
@@ -862,24 +923,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (!vrEnabled || factor <= 0) {
       return;
     }
-    _vrView = _vrView
-        .copyWith(
-          fov: (_vrView.fov / factor).clamp(
-            VrViewState.minFov,
-            VrViewState.maxFov,
-          ),
-        )
-        .clamped(vrProjection.value);
-    applyVrView();
+    setVrFov(vrView.value.fov / factor);
   }
 
   /// 视角摆正
   void resetVrView() {
-    _vrView = VrViewState(fov: _vrView.fov);
+    vrView.value = VrViewState(fov: vrView.value.fov);
     applyVrView(force: true);
   }
 
-  /// 节流应用视角; [force] 用于手势结束时保证最终视角准确
+  /// 节流应用视角; [force] 用于手势结束/按钮步进时保证视角准确
   void applyVrView({bool force = false}) {
     if (!vrEnabled) {
       return;
@@ -900,7 +953,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final source = VrShader.source(
       projection: vrProjection.value,
       eye: vrEye.value,
-      view: _vrView,
+      view: vrView.value,
     );
     if (!force && source == _vrShaderSource) {
       return;
@@ -910,11 +963,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       final file = VrShader.write(source);
       await player.command(['change-list', 'glsl-shaders', 'set', file]);
     } catch (err) {
+      _vrShaderSource = null;
+      vrError.value = '下发着色器失败: $err';
       if (kDebugMode) {
         debugPrint('apply vr shader failed: $err');
       }
     }
   }
+
+  /// 最近一次 VR 相关错误, 便于定位"操作没反应"的问题
+  final RxnString vrError = RxnString();
 
   Future<Player> _initPlayer() async {
     assert(_videoPlayerController == null);
@@ -988,11 +1046,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         return;
       }
       _videoPlayerController = player;
-      if (vrEnabled) {
-        await _applyVrShader(force: true);
-      } else if (isAnim && superResolutionType.value != .disable) {
+      if (!vrEnabled && isAnim && superResolutionType.value != .disable) {
         await setShader();
       }
+    }
+
+    // VR 着色器每次装载新源都要重新下发: PlPlayerController 是单例,
+    // 切集/换视频时播放器不会重建, 只放在"新建播放器"分支里会漏掉
+    if (vrEnabled) {
+      await _applyVrShader(force: true);
     }
 
     final Map<String, String> extras = {
@@ -1740,6 +1802,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     danmakuController = null;
     // VR 状态是单次播放会话的, 播放器销毁后复位
     vrProjection.value = VrProjection.off;
+    vrControlMode.value = false;
+    vrError.value = null;
     _vrShaderSource = null;
     isLocalMedia = false;
     _stopOrientationListener();

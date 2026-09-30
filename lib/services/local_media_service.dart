@@ -4,6 +4,8 @@ import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/models/local_media/local_media_item.dart';
 import 'package:PiliPlus/models/local_media/local_media_sort.dart';
 import 'package:PiliPlus/models/local_media/local_media_source.dart';
+import 'package:PiliPlus/services/smb/smb2_client.dart' show NtStatus, SmbException;
+import 'package:PiliPlus/services/smb/smb_browse.dart';
 import 'package:PiliPlus/utils/permission_handler.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
@@ -132,6 +134,12 @@ abstract final class LocalMediaService {
           showHidden: showHidden,
           onlyMedia: onlyMedia,
         ),
+        LocalMediaSourceType.smb => await _listSmb(
+          source,
+          path,
+          showHidden: showHidden,
+          onlyMedia: onlyMedia,
+        ),
         _ => <LocalMediaItem>[],
       };
       return Success(sortItems(items, sort));
@@ -237,7 +245,123 @@ abstract final class LocalMediaService {
         ..setReceiveTimeout(20000)
         ..setSendTimeout(20000);
 
-  /// WebDAV 连通性检查(添加来源时立即验证)
+  /// 浏览 SMB 共享(协议实现见 `services/smb/`, 纯 Dart, 可对真实 smbd 联调)
+  static Future<List<LocalMediaItem>> _listSmb(
+    LocalMediaSource source,
+    String path, {
+    required bool showHidden,
+    required bool onlyMedia,
+  }) async {
+    final ep = source.smbEndpoint;
+    if (ep == null) {
+      throw 'SMB 地址格式不正确, 应为 smb://主机/共享名: ${source.url}';
+    }
+    final entries = await SmbBrowse.list(
+      host: ep.host,
+      port: ep.port,
+      share: ep.share,
+      path: path,
+      user: source.username,
+      password: source.password,
+      domain: source.domain ?? '',
+      showHidden: showHidden,
+    );
+    final items = <LocalMediaItem>[
+      for (final e in entries)
+        LocalMediaItem(
+          name: e.name,
+          uri: SmbBrowse.uri(
+            host: ep.host,
+            port: ep.port,
+            share: ep.share,
+            remotePath: e.remotePath,
+          ),
+          source: source,
+          remotePath: e.remotePath,
+          size: e.size,
+          modified: e.modified,
+          isDirectory: e.isDirectory,
+        ),
+    ];
+    return onlyMedia ? _filterPlayable(items) : items;
+  }
+
+  /// 交给播放器之前解析出真正可播的地址:
+  /// SMB 需要经本机回环 HTTP 代理(安卓端打包的 FFmpeg 没有 smb 协议),
+  /// 其余协议(WebDAV/HTTP/FTP/本机)直接返回给 mpv。
+  static Future<String> resolvePlayUrl(LocalMediaItem item) async {
+    final source = item.source;
+    if (!source.type.needsProxy) {
+      return playbackUrl(item);
+    }
+    final ep = source.smbEndpoint;
+    if (ep == null) {
+      return playbackUrl(item);
+    }
+    return SmbBrowse.serveUrl(
+      host: ep.host,
+      port: ep.port,
+      share: ep.share,
+      remotePath: item.remotePath ?? ep.path,
+      user: source.username,
+      password: source.password,
+      domain: source.domain ?? '',
+    );
+  }
+
+  /// 连通性检查(添加/编辑来源时立即验证)
+  static Future<LoadingState<int>> testConnection(
+    LocalMediaSource source,
+  ) async {
+    switch (source.type) {
+      case LocalMediaSourceType.webdav:
+        return testWebDav(source);
+      case LocalMediaSourceType.smb:
+        return _testSmb(source);
+      default:
+        return const Error('直链来源无法预先校验，保存后直接播放即可');
+    }
+  }
+
+  static Future<LoadingState<int>> _testSmb(LocalMediaSource source) async {
+    final ep = source.smbEndpoint;
+    if (ep == null) {
+      return Error('SMB 地址格式不正确, 应为 smb://主机/共享名: ${source.url}');
+    }
+    try {
+      final count = await SmbBrowse.probe(
+        host: ep.host,
+        port: ep.port,
+        share: ep.share,
+        path: ep.path,
+        user: source.username,
+        password: source.password,
+        domain: source.domain ?? '',
+      );
+      return Success(count);
+    } on SmbException catch (e) {
+      return Error(_translateSmb(e, source));
+    } catch (err) {
+      return Error(_humanize(err, source));
+    }
+  }
+
+  /// 把 SMB 协议错误翻译成用户能看懂的话
+  static String _translateSmb(SmbException e, LocalMediaSource source) {
+    final what = '${source.name} (${e.context})';
+    if (e.isAuthFailure) {
+      return '$what: 用户名或密码错误';
+    }
+    if (e.status == NtStatus.badNetworkName) {
+      return '$what: 共享名不存在';
+    }
+    if (e.isNotFound) {
+      return '$what: 路径不存在';
+    }
+    return '$what: ${e.statusText}';
+  }
+
+  /// WebDAV 连通性检查
   static Future<LoadingState<int>> testWebDav(LocalMediaSource source) async {
     try {
       final files = await _webDavClient(source).readDir(source.rootPath);

@@ -33,12 +33,14 @@ class _SourceEditorDialogState extends State<SourceEditorDialog> {
   late final _urlCtr = TextEditingController(text: widget.initial?.url);
   late final _userCtr = TextEditingController(text: widget.initial?.username);
   late final _passCtr = TextEditingController(text: widget.initial?.password);
+  late final _domainCtr = TextEditingController(text: widget.initial?.domain);
 
   bool _obscure = true;
   bool _testing = false;
 
   /// 可添加的网络来源类型(本机存储由系统自动发现, 不需要手动添加)
   static const _types = [
+    LocalMediaSourceType.smb,
     LocalMediaSourceType.webdav,
     LocalMediaSourceType.http,
     LocalMediaSourceType.ftp,
@@ -50,13 +52,16 @@ class _SourceEditorDialogState extends State<SourceEditorDialog> {
     _urlCtr.dispose();
     _userCtr.dispose();
     _passCtr.dispose();
+    _domainCtr.dispose();
     super.dispose();
   }
 
   String get _hint => switch (_type) {
+    LocalMediaSourceType.smb => 'smb://192.168.1.10/video',
     LocalMediaSourceType.webdav => 'http://192.168.1.10:5005/dav',
     LocalMediaSourceType.http => 'http://192.168.1.10:8080/video.mp4',
-    _ => 'ftp://192.168.1.10/media/video.mkv',
+    LocalMediaSourceType.ftp => 'ftp://192.168.1.10/media/video.mkv',
+    LocalMediaSourceType.device => '/storage/emulated/0',
   };
 
   LocalMediaSource? _build() {
@@ -77,6 +82,7 @@ class _SourceEditorDialogState extends State<SourceEditorDialog> {
       url: url,
       username: _userCtr.text.isEmpty ? null : _userCtr.text,
       password: _passCtr.text.isEmpty ? null : _passCtr.text,
+      domain: _domainCtr.text.isEmpty ? null : _domainCtr.text,
     );
   }
 
@@ -86,12 +92,7 @@ class _SourceEditorDialogState extends State<SourceEditorDialog> {
       return;
     }
     setState(() => _testing = true);
-    final LoadingState<int> res;
-    if (source.type == LocalMediaSourceType.webdav) {
-      res = await LocalMediaService.testWebDav(source);
-    } else {
-      res = const Error('直链来源无法预先校验，保存后直接播放即可');
-    }
+    final res = await LocalMediaService.testConnection(source);
     if (!mounted) {
       return;
     }
@@ -162,6 +163,17 @@ class _SourceEditorDialogState extends State<SourceEditorDialog> {
               ),
             ),
             const SizedBox(height: 12),
+            if (_type == LocalMediaSourceType.smb) ...[
+              const SizedBox(height: 12),
+              TextField(
+                controller: _domainCtr,
+                autocorrect: false,
+                decoration: const InputDecoration(
+                  labelText: '域 / 工作组(可选, 常见为 WORKGROUP)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
             TextField(
               controller: _passCtr,
               autofillHints: const [AutofillHints.password],
@@ -179,8 +191,10 @@ class _SourceEditorDialogState extends State<SourceEditorDialog> {
             ),
             const SizedBox(height: 8),
             Text(
-              '账号密码仅保存在本机，播放时以 URL 凭据形式交给播放器；\n'
-              'WebDAV 可浏览目录，HTTP/FTP 为直链播放。',
+              '账号密码只保存在本机。SMB 由内置客户端浏览，播放时经本机回环'
+              '代理转发给播放器(安卓端的 FFmpeg 没有编译 smb 协议)；'
+              'WebDAV 可浏览目录，HTTP/FTP 为直链播放。\n'
+              'SMB 地址格式: smb://主机/共享名，例如 $_hint',
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ],

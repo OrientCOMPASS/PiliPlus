@@ -10,6 +10,7 @@ import 'package:collection/collection.dart';
 ///   * SMB/NFS 需要额外的客户端与本地代理, 暂未支持(见 docs/piliplayer.md)
 enum LocalMediaSourceType with EnumWithLabel {
   device('本机存储'),
+  smb('SMB/CIFS'),
   webdav('WebDAV'),
   http('HTTP 直链'),
   ftp('FTP 直链'),
@@ -20,9 +21,14 @@ enum LocalMediaSourceType with EnumWithLabel {
   const LocalMediaSourceType(this.label);
 
   /// 是否支持在应用内浏览目录
-  bool get browsable => this == device || this == webdav;
+  bool get browsable => this == device || this == webdav || this == smb;
 
   bool get isNetwork => this != device;
+
+  /// 是否需要本机代理转发才能播放。
+  /// 安卓端打包的 FFmpeg 没有 smb 协议, 所以 SMB 走回环 HTTP 代理
+  /// (见 `services/smb/local_media_proxy.dart`)。
+  bool get needsProxy => this == smb;
 }
 
 /// 一个媒体来源。
@@ -36,6 +42,7 @@ class LocalMediaSource {
     required this.url,
     this.username,
     this.password,
+    this.domain,
   });
 
   final LocalMediaSourceType type;
@@ -44,10 +51,34 @@ class LocalMediaSource {
   final String? username;
   final String? password;
 
+  /// SMB 域/工作组(其它类型用不到)
+  final String? domain;
+
   bool get hasCredential =>
       (username?.isNotEmpty ?? false) || (password?.isNotEmpty ?? false);
 
   bool get canBrowse => type.browsable;
+
+  /// 解析 `smb://host[:port]/share[/子目录]`
+  ({String host, int port, String share, String path})? get smbEndpoint {
+    if (type != LocalMediaSourceType.smb) {
+      return null;
+    }
+    final uri = Uri.tryParse(url);
+    if (uri == null || uri.host.isEmpty) {
+      return null;
+    }
+    final segments = uri.pathSegments.where((e) => e.isNotEmpty).toList();
+    if (segments.isEmpty) {
+      return null;
+    }
+    return (
+      host: uri.host,
+      port: uri.hasPort && uri.port > 0 ? uri.port : 445,
+      share: segments.first,
+      path: segments.length > 1 ? segments.sublist(1).join(r'\') : '',
+    );
+  }
 
   /// 浏览的起始路径
   String get rootPath {
@@ -97,6 +128,7 @@ class LocalMediaSource {
     'url': url,
     if (username != null) 'username': username,
     if (password != null) 'password': password,
+    if (domain != null) 'domain': domain,
   };
 
   static LocalMediaSource? fromJson(Object? json) {
@@ -117,6 +149,7 @@ class LocalMediaSource {
       url: url,
       username: json['username'] as String?,
       password: json['password'] as String?,
+      domain: json['domain'] as String?,
     );
   }
 
@@ -126,12 +159,14 @@ class LocalMediaSource {
     String? url,
     String? username,
     String? password,
+    String? domain,
   }) => LocalMediaSource(
     type: type ?? this.type,
     name: name ?? this.name,
     url: url ?? this.url,
     username: username ?? this.username,
     password: password ?? this.password,
+    domain: domain ?? this.domain,
   );
 
   @override
@@ -141,10 +176,18 @@ class LocalMediaSource {
       other.name == name &&
       other.url == url &&
       other.username == username &&
-      other.password == password;
+      other.password == password &&
+      other.domain == domain;
 
   @override
-  int get hashCode => Object.hash(type, name, url, username, password);
+  int get hashCode => Object.hash(
+    type,
+    name,
+    url,
+    username,
+    password,
+    domain,
+  );
 
   @override
   String toString() => 'LocalMediaSource(${type.name}, $name, $url)';

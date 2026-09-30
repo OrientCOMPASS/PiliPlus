@@ -247,7 +247,10 @@ abstract final class SettingBoxKey {
       // 本地板块
       localMediaSources = 'localMediaSources',
       localMediaSort = 'localMediaSort',
-      localMediaShowHidden = 'localMediaShowHidden';
+      localMediaShowHidden = 'localMediaShowHidden',
+      localMediaLibrary = 'localMediaLibrary',
+      localMediaScanTime = 'localMediaScanTime',
+      navBarSortMigratedLocal = 'navBarSortMigratedLocal';
 }
 
 abstract final class LocalCacheKey {
@@ -264,5 +267,6 @@ abstract final class VideoBoxKey {
       playSpeedDefault = 'playSpeedDefault',
       longPressSpeedDefault = 'longPressSpeedDefault',
       speedsList = 'speedsList',
+      speedsListMigrated4x8x = 'speedsListMigrated4x8x',
       cacheVideoFit = 'cacheVideoFit';
 }

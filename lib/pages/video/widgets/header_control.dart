@@ -515,6 +515,23 @@ class HeaderControlState extends State<HeaderControl>
                   descStyle: subTitleStyle,
                 ),
                 if (plPlayerController.vrEnabled) ...[
+                  ListTile(
+                    dense: true,
+                    onTap: () {
+                      Get.back();
+                      plPlayerController.setVrControlMode(
+                        !plPlayerController.vrControlMode.value,
+                      );
+                    },
+                    leading: const Icon(Icons.gesture_outlined, size: 20),
+                    title: const Text('VR 操作模式', style: titleStyle),
+                    subtitle: Text(
+                      plPlayerController.vrControlMode.value
+                          ? '已接管手势：拖拽环视、双指缩放视场角'
+                          : '未接管：拖拽仍是进退/音量，点击开启后再操作视角',
+                      style: subTitleStyle,
+                    ),
+                  ),
                   if (plPlayerController.vrProjection.value.isStereo)
                     PopupListTile<VrEye>(
                       dense: true,

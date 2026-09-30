@@ -1,4 +1,7 @@
+import 'dart:convert' show utf8;
+
 import 'package:PiliPlus/models/local_media/local_media_source.dart';
+import 'package:archive/archive.dart' show getCrc32;
 
 /// 扩展名白名单。
 ///
@@ -93,6 +96,10 @@ class LocalMediaItem {
   bool get isAudio => LocalMediaExtensions.audios.contains(extension);
 
   bool get isSubtitle => LocalMediaExtensions.subtitles.contains(extension);
+
+  /// 稳定的数字 id(crc32)。只用于 heroTag / GetX tag 这类需要 int 的地方,
+  /// 不会发给任何接口。
+  int get cid => getCrc32(utf8.encode(uri));
 
   /// 可播放(目录不可播放)
   bool get isPlayable => !isDirectory && (isVideo || isAudio);

@@ -1,204 +1,187 @@
-import 'dart:convert' show utf8;
-
-import 'package:PiliPlus/http/loading_state.dart';
-import 'package:PiliPlus/models/common/video/source_type.dart';
 import 'package:PiliPlus/models/local_media/local_media_item.dart';
-import 'package:PiliPlus/models/local_media/local_media_sort.dart';
 import 'package:PiliPlus/models/local_media/local_media_source.dart';
+import 'package:PiliPlus/pages/local_media/browser.dart';
+import 'package:PiliPlus/pages/local_media/library.dart';
+import 'package:PiliPlus/pages/local_media/widgets/source_editor.dart';
 import 'package:PiliPlus/services/local_media_service.dart';
-import 'package:PiliPlus/utils/local_media_progress.dart';
-import 'package:PiliPlus/utils/page_utils.dart';
-import 'package:PiliPlus/utils/storage.dart';
-import 'package:PiliPlus/utils/storage_key.dart';
-import 'package:PiliPlus/utils/storage_pref.dart';
-import 'package:archive/archive.dart' show getCrc32;
+import 'package:PiliPlus/services/smb/smb_discovery.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
+import 'package:material_ui/material_ui.dart';
 
-/// 浏览路径栈中的一层
-class LocalMediaPath {
-  const LocalMediaPath({
-    required this.source,
-    required this.path,
-    required this.title,
-  });
-
-  final LocalMediaSource source;
-  final String path;
-  final String title;
-}
-
+/// 「本地」板块控制器: 本机媒体库(按文件夹归组) + 局域网发现 + 已保存的来源。
 class LocalMediaController extends GetxController {
-  /// 用户添加的网络共享
-  final RxList<LocalMediaSource> savedSources = <LocalMediaSource>[].obs;
+  final LocalMediaLibrary library = LocalMediaLibrary();
 
   /// 本机存储卷(主存储 + SD 卡/U 盘)
   final RxList<LocalMediaSource> deviceSources = <LocalMediaSource>[].obs;
 
-  /// 目录栈, 为空表示停留在「来源列表」
-  final RxList<LocalMediaPath> stack = <LocalMediaPath>[].obs;
+  /// 用户添加的网络共享(SMB / WebDAV / HTTP / FTP)
+  final RxList<LocalMediaSource> savedSources = <LocalMediaSource>[].obs;
 
-  final Rx<LoadingState<List<LocalMediaItem>>> state = Rx(
-    LoadingState.loading(),
-  );
+  /// 自动发现的 SMB 主机
+  final RxList<SmbHost> discovered = <SmbHost>[].obs;
 
-  final RxBool loadingDevices = false.obs;
-
-  LocalMediaSort sort = Pref.localMediaSort;
-  bool showHidden = Pref.localMediaShowHidden;
-
-  List<LocalMediaItem> get items => state.value.dataOrNull ?? const [];
-
-  bool get isRoot => stack.isEmpty;
-
-  LocalMediaPath? get current => stack.isEmpty ? null : stack.last;
+  final RxBool scanningNetwork = false.obs;
+  final RxInt scanDone = 0.obs;
+  final RxInt scanTotal = 0.obs;
+  final RxnString networkError = RxnString();
 
   @override
   void onInit() {
     super.onInit();
+    library.loadCache();
     savedSources.value = LocalMediaService.loadSources();
     refreshDevices();
+    // 第一次进入且没有缓存时自动扫描一次
+    if (library.folders.isEmpty) {
+      library.scan();
+    }
   }
-
-  // ==================== 浏览 ====================
 
   Future<void> refreshDevices() async {
-    loadingDevices.value = true;
-    try {
-      deviceSources.value = await LocalMediaService.deviceSources();
-    } finally {
-      loadingDevices.value = false;
+    deviceSources.value = await LocalMediaService.deviceSources();
+  }
+
+  Future<void> rescanLibrary() async {
+    if (!await LocalMediaService.ensureDevicePermission()) {
+      SmartDialog.showToast('未获得存储读取权限，无法扫描本机视频');
+      return;
+    }
+    await library.scan();
+    if (library.lastError case final err?) {
+      SmartDialog.showToast(err);
     }
   }
 
-  @override
-  Future<void> refresh() async {
-    final cur = current;
-    if (cur == null) {
-      state.value = const Success(<LocalMediaItem>[]);
+  /// 扫描局域网里开着 SMB(445) 端口的主机
+  Future<void> discoverNetwork() async {
+    if (scanningNetwork.value) {
       return;
     }
-    state.value = LoadingState.loading();
-    state.value = await LocalMediaService.list(
-      source: cur.source,
-      path: cur.path,
-      sort: sort,
-      showHidden: showHidden,
+    scanningNetwork.value = true;
+    networkError.value = null;
+    scanDone.value = 0;
+    scanTotal.value = 0;
+    try {
+      final hosts = await SmbDiscovery.scan(
+        onProgress: (done, total) {
+          scanDone.value = done;
+          scanTotal.value = total;
+        },
+      );
+      discovered.value = hosts;
+      if (hosts.isEmpty) {
+        networkError.value =
+            '没有发现开启 SMB(445) 的主机。请确认与 NAS/电脑在同一局域网，'
+            '或手动添加共享地址。';
+      }
+    } catch (err) {
+      networkError.value = err.toString();
+    } finally {
+      scanningNetwork.value = false;
+    }
+  }
+
+  // ==================== 打开 ====================
+
+  /// 媒体库里的文件夹 -> 浏览页
+  Future<void> openFolder(LocalMediaFolder folder) async {
+    final source = LocalMediaSource(
+      type: LocalMediaSourceType.device,
+      name: folder.name,
+      url: folder.path,
+    );
+    final items = await library.itemsOf(folder);
+    Get.to(
+      () => LocalMediaBrowserPage(
+        source: source,
+        path: folder.path,
+        title: folder.name,
+        initialItems: items,
+      ),
     );
   }
 
+  /// 本机存储卷 -> 浏览页
+  Future<void> openDevice(LocalMediaSource source) async {
+    if (!await LocalMediaService.ensureDevicePermission()) {
+      SmartDialog.showToast('未获得存储读取权限，无法浏览本机文件');
+      return;
+    }
+    _browse(source, source.rootPath, source.name);
+  }
+
+  /// 已保存的网络来源
   Future<void> openSource(LocalMediaSource source) async {
     if (!source.canBrowse) {
-      // HTTP / FTP 直链来源: 没有目录可浏览, 直接播放
-      // playbackBase 已经把账号密码拼进 URL, 交给 mpv 处理认证
-      play(
-        LocalMediaItem(
-          name: source.name,
-          uri: source.playbackBase,
+      // 直链来源: 没有目录可浏览, 直接播放
+      final item = LocalMediaItem(
+        name: source.name,
+        uri: source.playbackBase,
+        source: source,
+      );
+      Get.to(
+        () => LocalMediaBrowserPage(
           source: source,
+          path: '',
+          title: source.name,
+          initialItems: [item],
         ),
       );
       return;
     }
-    if (source.type == LocalMediaSourceType.device) {
-      if (!await LocalMediaService.ensureDevicePermission()) {
-        SmartDialog.showToast('未获得存储读取权限，无法浏览本机文件');
-        return;
-      }
-    }
-    stack.add(
-      LocalMediaPath(source: source, path: source.rootPath, title: source.name),
-    );
-    await refresh();
+    _browse(source, source.rootPath, source.name);
   }
 
-  Future<void> openItem(LocalMediaItem item) async {
-    if (!item.isDirectory) {
-      play(item);
-      return;
-    }
-    final cur = current;
-    if (cur == null) {
-      return;
-    }
-    final childPath = cur.source.type == LocalMediaSourceType.device
-        ? item.uri
-        : item.remotePath ?? item.uri;
-    stack.add(
-      LocalMediaPath(source: cur.source, path: childPath, title: item.name),
-    );
-    await refresh();
-  }
-
-  /// 返回上一层; 返回 false 表示已经在来源列表, 交给路由 pop
-  bool back() {
-    if (stack.isEmpty) {
-      return false;
-    }
-    stack.removeLast();
-    refresh();
-    return true;
-  }
-
-  /// 面包屑跳转, [index] 为 -1 表示回到来源列表
-  Future<void> goToLevel(int index) async {
-    if (index >= stack.length - 1) {
-      return;
-    }
-    if (index < -1) {
-      return;
-    }
-    stack.removeRange(index + 1, stack.length);
-    await refresh();
-  }
-
-  Future<void> setSort(LocalMediaSort value) async {
-    sort = value;
-    await GStorage.setting.put(SettingBoxKey.localMediaSort, value.index);
-    final cur = state.value.dataOrNull;
-    if (cur != null) {
-      state.value = Success(LocalMediaService.sortItems(cur, value));
-    }
-  }
-
-  Future<void> toggleHidden() async {
-    showHidden = !showHidden;
-    await GStorage.setting.put(SettingBoxKey.localMediaShowHidden, showHidden);
-    await refresh();
-  }
-
-  // ==================== 播放 ====================
-
-  /// 本地媒体没有 cid, 用 uri 的 crc32 合成一个稳定 int
-  /// (只用于 heroTag / GetX tag, 不会发给任何接口)
-  static int cidOf(String uri) => getCrc32(utf8.encode(uri));
-
-  /// 播放一个条目, 同目录的其他视频自动作为播放列表(类似 VLC 的文件夹播放)
-  void play(LocalMediaItem item, {List<LocalMediaItem>? playlist}) {
-    final siblings = playlist ?? items.where((e) => e.isVideo).toList();
-    final index = siblings.indexWhere((e) => e.uri == item.uri);
-    final list = index >= 0 ? siblings : <LocalMediaItem>[item];
-    PageUtils.toVideoPage(
-      aid: 0,
-      bvid: '',
-      cid: cidOf(item.uri),
-      title: item.name,
-      extraArguments: {
-        'sourceType': SourceType.localMedia,
-        'localMedia': item,
-        'localPlaylist': list,
-        'localIndex': index >= 0 ? index : 0,
-      },
+  void _browse(LocalMediaSource source, String path, String title) {
+    Get.to(
+      () => LocalMediaBrowserPage(source: source, path: path, title: title),
     );
   }
 
-  Duration? progressOf(LocalMediaItem item) => LocalMediaProgress.get(item.uri);
+  /// 发现的主机 -> 让用户填共享名与凭据 -> 保存并打开
+  Future<void> openDiscoveredHost(
+    BuildContext context,
+    SmbHost host,
+  ) async {
+    final preset = LocalMediaSource(
+      type: LocalMediaSourceType.smb,
+      name: host.displayName,
+      url: 'smb://${host.address}/',
+    );
+    final source = await showSourceEditor(context, initial: preset);
+    if (source == null) {
+      return;
+    }
+    SmartDialog.showLoading(msg: '连接中');
+    final res = await LocalMediaService.testConnection(source);
+    SmartDialog.dismiss();
+    switch (res) {
+      case Success():
+        await addSource(source);
+        openSource(source);
+      case Error(:final errMsg):
+        SmartDialog.showToast(errMsg ?? '连接失败');
+      case _:
+        break;
+    }
+  }
+
+  Future<void> addSourceFromDialog(BuildContext context) async {
+    final source = await showSourceEditor(context);
+    if (source != null) {
+      await addSource(source);
+    }
+  }
 
   // ==================== 来源管理 ====================
 
   Future<void> addSource(LocalMediaSource source) async {
-    savedSources.add(source);
-    await LocalMediaService.saveSources(savedSources);
+    if (!savedSources.contains(source)) {
+      savedSources.add(source);
+    }
+    await _persist();
   }
 
   Future<void> replaceSource(
@@ -210,11 +193,21 @@ class LocalMediaController extends GetxController {
       return;
     }
     savedSources[index] = updated;
-    await LocalMediaService.saveSources(savedSources);
+    await _persist();
   }
 
   Future<void> removeSource(LocalMediaSource source) async {
     savedSources.remove(source);
-    await LocalMediaService.saveSources(savedSources);
+    await _persist();
   }
+
+  Future<void> _persist() => LocalMediaService.saveSources(savedSources);
+
+  Future<void> editSource(BuildContext context, LocalMediaSource source) async {
+    final updated = await showSourceEditor(context, initial: source);
+    if (updated != null) {
+      await replaceSource(source, updated);
+    }
+  }
+
 }

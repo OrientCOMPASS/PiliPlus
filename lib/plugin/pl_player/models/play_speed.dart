@@ -9,6 +9,8 @@ enum PlaySpeed {
 
   two(2.0),
   three(3.0),
+  four(4.0),
+  eight(8.0),
   ;
 
   final double value;

@@ -227,16 +227,41 @@ class MainController extends GetxController
     }
   }
 
+  /// 默认导航顺序: 首页、动态、本地、我的
+  static const List<NavigationBarType> kDefaultNavBars = [
+    NavigationBarType.home,
+    NavigationBarType.dynamics,
+    NavigationBarType.local,
+    NavigationBarType.mine,
+  ];
+
   void setNavBarConfig() {
     List<int>? navBarSort =
         (GStorage.setting.get(SettingBoxKey.navBarSort) as List?)?.fromCast();
     late final List<NavigationBarType> navigationBars;
     if (navBarSort == null || navBarSort.isEmpty) {
-      navigationBars = NavigationBarType.values;
+      navigationBars = List.of(kDefaultNavBars);
     } else {
       navigationBars = navBarSort
           .map(NavigationBarType.values.elementAt)
           .toList();
+      // 一次性迁移: 老配置里没有「本地」, 插到「我的」前面
+      if (GStorage.setting.get(SettingBoxKey.navBarSortMigratedLocal) !=
+          true) {
+        if (!navigationBars.contains(NavigationBarType.local)) {
+          final mineIndex = navigationBars.indexOf(NavigationBarType.mine);
+          navigationBars.insert(
+            mineIndex < 0 ? navigationBars.length : mineIndex,
+            NavigationBarType.local,
+          );
+        }
+        GStorage.setting
+          ..put(
+            SettingBoxKey.navBarSort,
+            navigationBars.map((e) => e.index).toList(),
+          )
+          ..put(SettingBoxKey.navBarSortMigratedLocal, true);
+      }
     }
     this.navigationBars = navigationBars;
     final defPage = Pref.defaultHomePage;

@@ -1,9 +1,10 @@
+import 'dart:async' show unawaited;
 import 'dart:math' show max;
 
 import 'package:PiliPlus/models/local_media/local_media_item.dart';
+import 'package:PiliPlus/services/local_media_service.dart';
 import 'package:PiliPlus/models_new/video/video_detail/stat_detail.dart';
 import 'package:PiliPlus/pages/common/common_intro_controller.dart';
-import 'package:PiliPlus/pages/local_media/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
@@ -106,19 +107,28 @@ class LocalMediaIntroController extends CommonIntroController {
   }
 
   void playIndex(int i, {LocalMediaItem? entry}) {
-    entry ??= list[i];
+    final item = entry ?? list[i];
+    videoDetail
+      ..value.title = item.name
+      ..refresh();
+    index.value = i;
+    unawaited(_switchTo(item));
+  }
+
+  /// 切换播放条目。SMB 条目要先在本机代理上注册地址, 所以这一步是异步的。
+  Future<void> _switchTo(LocalMediaItem item) async {
+    final url = await LocalMediaService.resolvePlayUrl(item);
+    if (isClosed) {
+      return;
+    }
     videoDetailCtr
       ..onReset()
       ..cover.value = ''
-      ..cid.value = LocalMediaController.cidOf(entry.uri)
-      ..initLocalMediaSource(entry)
+      ..cid.value = item.cid
+      ..initLocalMediaSource(item, playUrl: url)
       ..playerInit();
-    videoDetail
-      ..value.title = entry.name
-      ..refresh();
-    index.value = i;
     if (PlatformUtils.isMobile) {
-      onVideoDetailChange(entry);
+      onVideoDetailChange(item);
     }
   }
 

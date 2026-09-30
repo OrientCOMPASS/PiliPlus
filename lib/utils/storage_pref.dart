@@ -112,12 +112,43 @@ abstract final class Pref {
   );
   //   [0.5, 100.0, 2.2 * math.sqrt(50)], // [mass, stiffness, damping]
 
-  static List<double> get speedList => List<double>.from(
-    _video.get(
-      VideoBoxKey.speedsList,
-      defaultValue: const [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0],
-    ),
-  );
+  /// 默认倍速档位(含 4x / 8x)
+  static const List<double> kDefaultSpeedList = [
+    0.5,
+    0.75,
+    1.0,
+    1.25,
+    1.5,
+    1.75,
+    2.0,
+    3.0,
+    4.0,
+    8.0,
+  ];
+
+  static List<double> get speedList {
+    final saved = _video.get(VideoBoxKey.speedsList);
+    if (saved is! List) {
+      return List<double>.from(kDefaultSpeedList);
+    }
+    final list = saved.whereType<num>().map((e) => e.toDouble()).toList();
+    // 一次性迁移: 老版本自定义过的列表里没有 4x/8x, 自动补上
+    if (_video.get(VideoBoxKey.speedsListMigrated4x8x) != true) {
+      var changed = false;
+      for (final speed in const [4.0, 8.0]) {
+        if (!list.contains(speed)) {
+          list.add(speed);
+          changed = true;
+        }
+      }
+      if (changed) {
+        list.sort();
+        _video.put(VideoBoxKey.speedsList, list);
+      }
+      _video.put(VideoBoxKey.speedsListMigrated4x8x, true);
+    }
+    return list;
+  }
 
   static List<Pair<SegmentType, SkipType>> get blockSettings {
     final list = _setting.get(SettingBoxKey.blockSettings) as List?;

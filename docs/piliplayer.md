@@ -339,3 +339,71 @@ mpv  --(http, Range)-->  127.0.0.1:<随机端口>/s/<token>  --(SMB2 READ)-->  N
   并上传产物，方便直接装机验证；手动 dispatch 时可切 `release`。
 
 `STRICT_PATHS`（workflow 的 env）列出了本分支新增的目录/文件，新增代码请一并加进去。
+
+---
+
+## 7. 真机验证记录
+
+CI 产出的 debug 包装机后（Lenovo TB-J706F / Android 12）暴露的问题，这些是纯静态
+检查和沙盒里都发现不了的，记录在这里避免重复踩。
+
+### 7.1 「本地」板块整页空白：`SimpleScaffold` 撑不住带 `bottom` 的 `AppBar`
+
+现象：点进「本地」板块整页是空的，日志里刷一屏
+`RenderBox was not laid out` 加一条根因：
+
+```
+RenderFlex children have non-zero flex but incoming height constraints are unbounded.
+...
+#4  _RenderScaffoldLayout.performLayout (common/widgets/scaffold/simple_scaffold.dart:88)
+```
+
+原因链：
+
+1. `SimpleScaffold` 是自绘的槽位布局（`lib/common/widgets/scaffold/simple_scaffold.dart`），
+   它用 `BoxConstraints.tightFor(width: ...)` 测量 `appBar` 槽位 —— **高度是无界的**；
+2. Flutter 自带的 `Scaffold` 之所以没这个问题，是因为它会先调
+   `AppBar.preferredHeightFor()` 把 appBar 槽位夹成 `ConstrainedBox(maxHeight: ...)`；
+   `SimpleScaffold` 没有这一步；
+3. 不带 `bottom` 的 `AppBar` 恰好能自适应高度，所以仓库里 70 多处
+   `SimpleScaffold(appBar: AppBar(...))` 一直是好的；
+4. 但带 `bottom`（TabBar）的 `AppBar` 内部是
+   `Column(mainAxisSize: max, mainAxisAlignment: spaceBetween)` 里套 `Flexible`，
+   高度无界时直接抛断言 → 整棵子树布局失败 → 页面空白。
+
+修法：「本地」板块改用真正的 `Scaffold`，与 `lib/pages/dynamics/view.dart`
+（同样是顶层 Tab）保持一致：
+
+```dart
+Scaffold(
+  primary: false,                  // MainApp 已统一加过状态栏内边距，AppBar 再加会多一条空白
+  resizeToAvoidBottomInset: false,
+  backgroundColor: Colors.transparent,
+  appBar: AppBar(primary: false, bottom: TabBar(...)),
+  ...
+)
+```
+
+> 约定：**顶层 Tab 页不要往 `SimpleScaffold` 里塞带 `bottom` 的 `AppBar`**。
+> 没有改 `SimpleScaffold` 本身，因为它被 80 多处复用，而
+> `MultiSelectAppBarWidget.preferredSize` 直接透传 `AppBar.preferredSize`
+> （不含状态栏高度），在那里加高度夹取会把「下载/历史」等页的标题栏裁掉一截。
+
+### 7.2 首扫时界面像卡死：Rx 通知没有节流
+
+全盘递归扫描动辄上万个文件，原来每发现一个文件就 `scannedFiles.value++`，
+等于触发同样多次 `Obx` 重建（整张 `ListView` 重建）。已改为内部普通 `int` 计数 +
+300 ms 定时器批量推送进度、1.2 s 发布一次阶段性文件夹列表，
+并加了 `_abort` 标志让板块销毁时（`LocalMediaController.onClose`）能尽快停下扫描。
+
+### 7.3 顶层 Tab 页的控制器要用 `Get.putOrFind`
+
+原来写的是字段初始化里的 `Get.put(LocalMediaController())`：顶层 Tab 页会被
+`MainApp` 的 `TabBarView` 反复重建，`put` 每次都把控制器连同扫描结果整个换掉。
+已改为 `Get.putOrFind(LocalMediaController.new)` + `AutomaticKeepAliveClientMixin`，
+与 `HomePage` / `DynamicsPage` / `MinePage` 的写法一致。
+
+### 7.4 CI 构建的包现在自报 commit
+
+`piliplayer_ci.yml` 的构建步骤补上了 `--dart-define=pili.hash/pili.time/pili.code`，
+装机后在「关于」页能看到 Commit Hash 和构建时间，不用再猜手上这个 apk 是哪次提交。

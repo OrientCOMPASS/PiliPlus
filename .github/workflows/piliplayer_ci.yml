@@ -148,13 +148,36 @@ jobs:
               shell: pwsh
               run: lib/scripts/patch.ps1 android
 
+            # 让测试包自报家门: 关于页会显示 Commit Hash / Build Time,
+            # 否则装机后无法判断手上这个 apk 到底是哪次提交构建的。
+            - name: 注入构建信息
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  {
+                    echo "PILI_HASH=$(git rev-parse HEAD)"
+                    echo "PILI_TIME=$(date +%s)"
+                    echo "PILI_CODE=$(git rev-list --count HEAD)"
+                  } >> "$GITHUB_ENV"
+
             - name: Build Debug Apk
               if: ${{ (github.event.inputs.apk_mode || 'debug') == 'debug' }}
-              run: flutter build apk --debug --target-platform android-arm64 --no-pub
+              run: >-
+                  flutter build apk --debug --target-platform android-arm64
+                  --dart-define=pili.hash=${{ env.PILI_HASH }}
+                  --dart-define=pili.time=${{ env.PILI_TIME }}
+                  --dart-define=pili.code=${{ env.PILI_CODE }}
+                  --no-pub
 
             - name: Build Release Apk
               if: ${{ github.event.inputs.apk_mode == 'release' }}
-              run: flutter build apk --release --split-per-abi --android-project-arg dev=1 --no-pub
+              run: >-
+                  flutter build apk --release --split-per-abi
+                  --android-project-arg dev=1
+                  --dart-define=pili.hash=${{ env.PILI_HASH }}
+                  --dart-define=pili.time=${{ env.PILI_TIME }}
+                  --dart-define=pili.code=${{ env.PILI_CODE }}
+                  --no-pub
 
             - name: List outputs
               run: ls -la build/app/outputs/flutter-apk/ || true

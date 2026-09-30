@@ -1,4 +1,3 @@
-import 'package:PiliPlus/common/widgets/scaffold/simple_scaffold.dart';
 import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/models/local_media/local_media_source.dart';
 import 'package:PiliPlus/pages/local_media/controller.dart';
@@ -6,6 +5,7 @@ import 'package:PiliPlus/pages/local_media/library.dart';
 import 'package:PiliPlus/services/local_media_service.dart';
 import 'package:PiliPlus/services/smb/smb_discovery.dart';
 import 'package:PiliPlus/utils/cache_manager.dart';
+import 'package:PiliPlus/utils/extension/get_ext.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
 import 'package:material_ui/material_ui.dart';
@@ -23,12 +23,18 @@ class LocalMediaPage extends StatefulWidget {
 }
 
 class _LocalMediaPageState extends State<LocalMediaPage>
-    with SingleTickerProviderStateMixin {
-  final _controller = Get.put(LocalMediaController());
+    with SingleTickerProviderStateMixin, AutomaticKeepAliveClientMixin {
+  /// `putOrFind` 而不是 `put`: 顶层 Tab 页会被 MainApp 的 TabBarView 反复重建,
+  /// `put` 每次都会把控制器(连同扫描结果)整个换掉。
+  final _controller = Get.putOrFind(LocalMediaController.new);
   late final TabController _tabController = TabController(
     length: 2,
     vsync: this,
   );
+
+  /// 与其它顶层板块(首页/动态/我的)一致: 切走再切回来不丢滚动位置与 Tab
+  @override
+  bool get wantKeepAlive => true;
 
   @override
   void initState() {
@@ -52,33 +58,53 @@ class _LocalMediaPageState extends State<LocalMediaPage>
 
   @override
   Widget build(BuildContext context) {
-    return SimpleScaffold(
+    super.build(context); // AutomaticKeepAliveClientMixin
+    // 这里必须用真正的 `Scaffold` 而不是 `SimpleScaffold`:
+    //
+    // `SimpleScaffold` 用 `BoxConstraints.tightFor(width: ...)`(即**高度无界**)
+    // 去测量 appBar 槽位。不带 bottom 的 AppBar 恰好能自适应高度, 但带
+    // `bottom`(TabBar) 的 AppBar 内部是
+    // `Column(mainAxisSize: max, mainAxisAlignment: spaceBetween)` + `Flexible`,
+    // 高度无界时直接抛 "RenderFlex children have non-zero flex but incoming
+    // height constraints are unbounded", 整页布局失败 -> 板块一片空白。
+    // Flutter 自带的 `Scaffold` 会先用 `AppBar.preferredHeightFor` 把 appBar
+    // 槽位夹成有限高度, 所以 AppBar + bottom 在它是正常的。
+    //
+    // `primary: false`: 本页是顶层 Tab, `MainApp` 已经统一加过状态栏内边距
+    // (见 lib/pages/main/view.dart 的 padding), AppBar 再加一次会多出一条空白。
+    // 同样的写法见 lib/pages/dynamics/view.dart。
+    return Scaffold(
+      primary: false,
+      resizeToAvoidBottomInset: false,
+      backgroundColor: Colors.transparent,
       appBar: AppBar(
+        primary: false,
         title: const Text('本地'),
         bottom: TabBar(
           controller: _tabController,
           tabs: const [Tab(text: '媒体库'), Tab(text: '网络')],
         ),
         actions: [
-          Builder(
-            builder: (context) => _tabController.index == 0
-                ? IconButton(
-                    tooltip: '重新扫描本机视频',
-                    onPressed: _controller.library.scanning.value
-                        ? null
-                        : _controller.rescanLibrary,
-                    icon: const Icon(Icons.refresh),
-                  )
-                : Obx(
-                    () => IconButton(
-                      tooltip: '扫描局域网 SMB 主机',
-                      onPressed: _controller.scanningNetwork.value
-                          ? null
-                          : _controller.discoverNetwork,
-                      icon: const Icon(Icons.wifi_find_outlined),
-                    ),
-                  ),
-          ),
+          if (_tabController.index == 0)
+            Obx(
+              () => IconButton(
+                tooltip: '重新扫描本机视频',
+                onPressed: _controller.library.scanning.value
+                    ? null
+                    : _controller.rescanLibrary,
+                icon: const Icon(Icons.refresh),
+              ),
+            )
+          else
+            Obx(
+              () => IconButton(
+                tooltip: '扫描局域网 SMB 主机',
+                onPressed: _controller.scanningNetwork.value
+                    ? null
+                    : _controller.discoverNetwork,
+                icon: const Icon(Icons.wifi_find_outlined),
+              ),
+            ),
           const SizedBox(width: 6),
         ],
       ),

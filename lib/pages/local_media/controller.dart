@@ -40,6 +40,12 @@ class LocalMediaController extends GetxController {
     }
   }
 
+  @override
+  void onClose() {
+    library.cancelScan();
+    super.onClose();
+  }
+
   Future<void> refreshDevices() async {
     deviceSources.value = await LocalMediaService.deviceSources();
   }

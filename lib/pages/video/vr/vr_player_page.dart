@@ -418,12 +418,28 @@ class _VrPlayerPageState extends State<VrPlayerPage> {
             ),
           ),
           const SizedBox(height: 6),
-          Obx(
-            () => ActionChip(
-              label: Text(_c.passthrough.value ? '退出原画直通' : '原画直通(诊断)'),
-              avatar: const Icon(Icons.image_outlined, size: 16),
-              onPressed: () => _c.setPassthrough(!_c.passthrough.value),
-            ),
+          Wrap(
+            spacing: 8,
+            children: [
+              Obx(
+                () => ActionChip(
+                  label: Text(
+                    _c.passthrough.value ? '退出原画直通' : '原画直通(诊断)',
+                  ),
+                  avatar: const Icon(Icons.image_outlined, size: 16),
+                  onPressed: () => _c.setPassthrough(!_c.passthrough.value),
+                ),
+              ),
+              Obx(
+                () => ActionChip(
+                  label: Text(
+                    _c.flipV.value ? '垂直翻转: 开' : '垂直翻转: 关',
+                  ),
+                  avatar: const Icon(Icons.flip_outlined, size: 16),
+                  onPressed: () => _c.setFlipV(!_c.flipV.value),
+                ),
+              ),
+            ],
           ),
         ],
       ),

@@ -129,6 +129,13 @@ class VrPlayerBridge(
                     gl?.requestRender()
                     result.success(true)
                 }
+                // 诊断: 片源 v 方向翻不翻(SurfaceTexture 的 transform matrix
+                // 各机型不统一, 真机可以当场切, 不用为这个再出一版包)
+                "setFlipV" -> {
+                    gl?.flipV = call.argument<Boolean>("enabled") ?: true
+                    gl?.requestRender()
+                    result.success(true)
+                }
                 "getDebugInfo" -> result.success(debugInfo())
                 "getPosition" -> result.success(engine?.getPositionUs() ?: 0L)
                 "getDuration" -> result.success(engine?.durationUs ?: 0L)

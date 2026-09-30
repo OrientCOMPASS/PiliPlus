@@ -81,7 +81,15 @@ internal class VrGlPipeline(
             uniform float uCoverageH;
             uniform vec4 uEye;
             uniform float uPassthrough;
+            uniform float uFlipV;
             const float PI = 3.14159265358979;
+
+            // 片源 v 方向要不要翻: SurfaceTexture 给的 transform matrix 各机型
+            // 不统一(有的是单位阵, 有的自带一次翻转), 真机反馈是上下颠倒,
+            // 所以默认翻一次; 诊断面板里可以实时切, 省得为这个再出一版包
+            float fixV(float v) {
+              return mix(v, 1.0 - v, uFlipV);
+            }
 
             vec3 rotX(vec3 v, float a) {
               float c = cos(a);
@@ -100,7 +108,8 @@ internal class VrGlPipeline(
               // 用它区分"解码/纹理这条链路坏了"还是"投影数学坏了":
               //   passthrough 有画面 -> 问题在投影; 仍是纯色 -> 问题在解码/纹理
               if (uPassthrough > 0.5) {
-                vec2 ruv = (uTexMatrix * vec4(vUv.x, 1.0 - vUv.y, 0.0, 1.0)).xy;
+                // vUv.y 在 GL 里向上为正, 图像空间的 v 向下为正, 先换过去再走同一套翻转
+                vec2 ruv = (uTexMatrix * vec4(vUv.x, fixV(1.0 - vUv.y), 0.0, 1.0)).xy;
                 gl_FragColor = texture2D(uVideo, ruv);
                 return;
               }
@@ -125,7 +134,7 @@ internal class VrGlPipeline(
               // 双目片源只取一只眼睛
               u = mix(uEye.x, uEye.y, u);
               v = mix(uEye.z, uEye.w, v);
-              vec2 tuv = (uTexMatrix * vec4(u, v, 0.0, 1.0)).xy;
+              vec2 tuv = (uTexMatrix * vec4(u, fixV(v), 0.0, 1.0)).xy;
               gl_FragColor = texture2D(uVideo, tuv);
             }
         """
@@ -179,6 +188,10 @@ internal class VrGlPipeline(
      */
     @Volatile
     var passthrough: Boolean = false
+
+    /** 片源 v 方向是否翻转。真机反馈默认需要翻(见着色器里的 fixV) */
+    @Volatile
+    var flipV: Boolean = true
 
     // ==================== 诊断计数（排查"纯色画面"用） ====================
 
@@ -237,7 +250,7 @@ internal class VrGlPipeline(
         return "render=$renderSize video=${vw}x$vh " +
             "frames=$renderedFrames texUpd=$textureUpdates " +
             "glErr=0x${Integer.toHexString(lastGlError)} " +
-            "passthrough=$passthrough firstFrame=$gotFirstFrame"
+            "passthrough=$passthrough flipV=$flipV firstFrame=$gotFirstFrame"
     }
 
     // ==================== 内部状态（只在渲染线程上碰） ====================
@@ -263,6 +276,7 @@ internal class VrGlPipeline(
     private var coverageLocation = 0
     private var eyeLocation = 0
     private var passthroughLocation = 0
+    private var flipVLocation = 0
 
     @Volatile
     private var frameAvailable = false
@@ -393,6 +407,7 @@ internal class VrGlPipeline(
         coverageLocation = GLES20.glGetUniformLocation(program, "uCoverageH")
         eyeLocation = GLES20.glGetUniformLocation(program, "uEye")
         passthroughLocation = GLES20.glGetUniformLocation(program, "uPassthrough")
+        flipVLocation = GLES20.glGetUniformLocation(program, "uFlipV")
 
         val quad = floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
         vertexBuffer = ByteBuffer.allocateDirect(quad.size * 4)
@@ -540,6 +555,7 @@ internal class VrGlPipeline(
         GLES20.glUniform1f(
             passthroughLocation, if (passthrough) 1f else 0f,
         )
+        GLES20.glUniform1f(flipVLocation, if (flipV) 1f else 0f)
 
         vertexBuffer?.let { vb ->
             GLES20.glEnableVertexAttribArray(posLocation)

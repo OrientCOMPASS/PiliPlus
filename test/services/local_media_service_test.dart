@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:PiliPlus/models/local_media/local_media_item.dart';
 import 'package:PiliPlus/models/local_media/local_media_sort.dart';
 import 'package:PiliPlus/models/local_media/local_media_source.dart';
@@ -366,6 +368,144 @@ void main() {
         title: '',
       );
       expect(s!.name, device.name);
+    });
+  });
+
+  group('外置字幕同名匹配', () {
+    test('baseNameOf 去扩展名', () {
+      expect(LocalMediaService.baseNameOf('movie.mkv'), 'movie');
+      expect(LocalMediaService.baseNameOf('movie.zh-CN.srt'), 'movie.zh-CN');
+      expect(LocalMediaService.baseNameOf('noext'), 'noext');
+      expect(LocalMediaService.baseNameOf('.hidden'), '.hidden');
+    });
+
+    test('parentDirOf: 三种来源的路径约定', () {
+      LocalMediaItem item(LocalMediaSource src, String uri, String? remote) =>
+          LocalMediaItem(
+            name: 'a.mkv',
+            uri: uri,
+            source: src,
+            remotePath: remote,
+          );
+      expect(
+        LocalMediaService.parentDirOf(
+          item(device, '/storage/emulated/0/Movies/a.mkv', null),
+        ),
+        '/storage/emulated/0/Movies',
+      );
+      // SMB 主机级: remotePath 以共享名打头
+      expect(
+        LocalMediaService.parentDirOf(
+          item(smbHost, 'smb://NAS/pub/2024/a.mkv', r'pub\2024\a.mkv'),
+        ),
+        r'pub\2024',
+      );
+      // SMB 共享级: remotePath 是共享内路径, 根上就是空串
+      expect(
+        LocalMediaService.parentDirOf(
+          item(smbShare, 'smb://NAS/pub/a.mkv', 'a.mkv'),
+        ),
+        '',
+      );
+      expect(
+        LocalMediaService.parentDirOf(
+          item(dav, 'https://h/dav/v/a.mkv', '/v/a.mkv'),
+        ),
+        '/v',
+      );
+      // 直链来源没有目录可列
+      const http = LocalMediaSource(
+        type: LocalMediaSourceType.http,
+        name: 'h',
+        url: 'http://a/b.mp4',
+      );
+      expect(
+        LocalMediaService.parentDirOf(item(http, 'http://a/b.mp4', null)),
+        isNull,
+      );
+    });
+
+    test('真实目录: 同名与 同名.语言 都能匹配, 别的视频的字幕不会串', () async {
+      final dir = Directory.systemTemp.createTempSync('pili_sub_test');
+      try {
+        for (final name in [
+          'movie.mkv',
+          'movie.srt',
+          'movie.zh-CN.ass',
+          'movie.chs.srt',
+          'other.srt',
+          'movie.txt',
+          'MOVIE2.SRT',
+        ]) {
+          File('${dir.path}/$name').writeAsStringSync('x');
+        }
+        final source = LocalMediaSource(
+          type: LocalMediaSourceType.device,
+          name: 'tmp',
+          url: dir.path,
+        );
+        final video = LocalMediaItem(
+          name: 'movie.mkv',
+          uri: '${dir.path}/movie.mkv',
+          source: source,
+        );
+        final found = await LocalMediaService.findMatchingSubtitles(video);
+        // 主名完全相同的排最前, 其后是 movie.<后缀>.xxx
+        expect(found.map((e) => e.name).toList(), [
+          'movie.srt',
+          'movie.chs.srt',
+          'movie.zh-CN.ass',
+        ]);
+        // other.srt / movie.txt / MOVIE2.SRT 都不该被选中
+        expect(found.any((e) => e.name == 'other.srt'), isFalse);
+        expect(found.any((e) => e.name == 'movie.txt'), isFalse);
+      } finally {
+        dir.deleteSync(recursive: true);
+      }
+    });
+
+    test('目录读不到时返回空, 不抛异常(不能因为找字幕影响播放)', () async {
+      const source = LocalMediaSource(
+        type: LocalMediaSourceType.device,
+        name: 'missing',
+        url: '/nonexistent-dir-xyz',
+      );
+      const video = LocalMediaItem(
+        name: 'a.mkv',
+        uri: '/nonexistent-dir-xyz/a.mkv',
+        source: source,
+      );
+      expect(await LocalMediaService.findMatchingSubtitles(video), isEmpty);
+    });
+  });
+
+  group('uniqueFilePath(下载重名不覆盖)', () {
+    test('已存在就加 (1)/(2) 后缀', () {
+      final dir = Directory.systemTemp.createTempSync('pili_dl_test');
+      try {
+        expect(
+          LocalMediaService.uniqueFilePath(dir.path, 'a.mp4'),
+          '${dir.path}/a.mp4',
+        );
+        File('${dir.path}/a.mp4').writeAsStringSync('x');
+        expect(
+          LocalMediaService.uniqueFilePath(dir.path, 'a.mp4'),
+          '${dir.path}/a (1).mp4',
+        );
+        File('${dir.path}/a (1).mp4').writeAsStringSync('x');
+        expect(
+          LocalMediaService.uniqueFilePath(dir.path, 'a.mp4'),
+          '${dir.path}/a (2).mp4',
+        );
+        // 没有扩展名也要能处理
+        File('${dir.path}/noext').writeAsStringSync('x');
+        expect(
+          LocalMediaService.uniqueFilePath(dir.path, 'noext'),
+          '${dir.path}/noext (1)',
+        );
+      } finally {
+        dir.deleteSync(recursive: true);
+      }
     });
   });
 }

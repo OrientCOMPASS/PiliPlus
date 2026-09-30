@@ -12,7 +12,6 @@ import android.net.Uri
 import android.os.Build
 import android.util.Log
 import android.view.Surface
-import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -416,6 +415,49 @@ internal class VrEngine(
         return true
     }
 
+    /**
+     * 把样本喂进解码器, 一次尽量喂满输入缓冲池。
+     *
+     * 第一版每个循环只喂 **一个** 输入缓冲, 而输出侧又要等到帧的显示时间才放行 ——
+     * 等待期间完全不喂输入, 解码器的输入池(通常只有 4~8 个)很快被耗干,
+     * 于是输出侧反复拿到 INFO_TRY_AGAIN_LATER, 表现就是真机反馈的
+     * **"等待缓冲加载频繁"**(本机文件也这样, 因为瓶颈不在 IO 而在喂入节奏)。
+     *
+     * @param blocking 为 true 时用 [DEQUEUE_TIMEOUT_US] 等一次, 否则不等(用于
+     *                 "等显示时间"的间隙里顺手补喂, 不能阻塞)
+     */
+    private fun feedVideoInput(
+        ex: MediaExtractor,
+        codec: MediaCodec,
+        blocking: Boolean,
+        maxBuffers: Int = 8,
+    ) {
+        if (videoInputDone) return
+        var fed = 0
+        while (fed < maxBuffers) {
+            val inIndex = codec.dequeueInputBuffer(
+                if (blocking && fed == 0) DEQUEUE_TIMEOUT_US else 0,
+            )
+            if (inIndex < 0) return
+            fed++
+            val buf = codec.getInputBuffer(inIndex)
+            if (buf == null) {
+                codec.queueInputBuffer(inIndex, 0, 0, 0, 0)
+                continue
+            }
+            val size = ex.readSampleData(buf, 0)
+            if (size < 0) {
+                codec.queueInputBuffer(
+                    inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+                )
+                videoInputDone = true
+                return
+            }
+            codec.queueInputBuffer(inIndex, 0, size, ex.sampleTime, 0)
+            ex.advance()
+        }
+    }
+
     // ==================== 视频循环 ====================
 
     private fun runVideoLoop() {
@@ -430,27 +472,8 @@ internal class VrEngine(
                     Thread.sleep(MAX_SLEEP_MS)
                     continue
                 }
-                // ---- 输入 ----
-                if (!videoInputDone) {
-                    val inIndex = codec.dequeueInputBuffer(DEQUEUE_TIMEOUT_US)
-                    if (inIndex >= 0) {
-                        val buf: ByteBuffer? = codec.getInputBuffer(inIndex)
-                        if (buf == null) {
-                            codec.queueInputBuffer(inIndex, 0, 0, 0, 0)
-                            continue
-                        }
-                        val size = ex.readSampleData(buf, 0)
-                        if (size < 0) {
-                            codec.queueInputBuffer(
-                                inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM,
-                            )
-                            videoInputDone = true
-                        } else {
-                            codec.queueInputBuffer(inIndex, 0, size, ex.sampleTime, 0)
-                            ex.advance()
-                        }
-                    }
-                }
+                // ---- 输入: 一次尽量喂满, 别让解码器饿着 ----
+                feedVideoInput(ex, codec, blocking = true)
                 // ---- 输出 ----
                 val outIndex = codec.dequeueOutputBuffer(info, DEQUEUE_TIMEOUT_US)
                 when {
@@ -473,6 +496,10 @@ internal class VrEngine(
                             while (wait > 3000 && playing && !released &&
                                 seekGeneration.get() == videoSeekGen
                             ) {
+                                // 关键: 等显示时间的这段时间里继续喂输入。
+                                // 第一版在这里纯 sleep, 解码器输入池被耗干 ->
+                                // 下一帧 dequeue 不到输出 -> 频繁"缓冲中"
+                                feedVideoInput(ex, codec, blocking = false)
                                 Thread.sleep(minOf(wait / 1000, MAX_SLEEP_MS))
                                 wait = pts - positionUs()
                             }
@@ -527,6 +554,34 @@ internal class VrEngine(
         }
     }
 
+    /** 音频侧同理: 一次尽量喂满, AudioTrack 的阻塞写才是节奏来源 */
+    private fun feedAudioInput(ex: MediaExtractor, codec: MediaCodec) {
+        if (audioInputDone) return
+        var fed = 0
+        while (fed < 8) {
+            val inIndex = codec.dequeueInputBuffer(
+                if (fed == 0) DEQUEUE_TIMEOUT_US else 0,
+            )
+            if (inIndex < 0) return
+            fed++
+            val buf = codec.getInputBuffer(inIndex)
+            if (buf == null) {
+                codec.queueInputBuffer(inIndex, 0, 0, 0, 0)
+                continue
+            }
+            val size = ex.readSampleData(buf, 0)
+            if (size < 0) {
+                codec.queueInputBuffer(
+                    inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+                )
+                audioInputDone = true
+                return
+            }
+            codec.queueInputBuffer(inIndex, 0, size, ex.sampleTime, 0)
+            ex.advance()
+        }
+    }
+
     // ==================== 音频循环（主时钟） ====================
 
     private fun runAudioLoop() {
@@ -544,26 +599,7 @@ internal class VrEngine(
                     Thread.sleep(MAX_SLEEP_MS)
                     continue
                 }
-                if (!audioInputDone) {
-                    val inIndex = codec.dequeueInputBuffer(DEQUEUE_TIMEOUT_US)
-                    if (inIndex >= 0) {
-                        val buf = codec.getInputBuffer(inIndex)
-                        if (buf == null) {
-                            codec.queueInputBuffer(inIndex, 0, 0, 0, 0)
-                            continue
-                        }
-                        val size = ex.readSampleData(buf, 0)
-                        if (size < 0) {
-                            codec.queueInputBuffer(
-                                inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM,
-                            )
-                            audioInputDone = true
-                        } else {
-                            codec.queueInputBuffer(inIndex, 0, size, ex.sampleTime, 0)
-                            ex.advance()
-                        }
-                    }
-                }
+                feedAudioInput(ex, codec)
                 val outIndex = codec.dequeueOutputBuffer(info, DEQUEUE_TIMEOUT_US)
                 if (outIndex >= 0) {
                     if (info.size > 0 &&

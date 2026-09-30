@@ -59,6 +59,11 @@ class VrNativePlayerController extends GetxController {
   /// 有画面 => 问题在投影；仍是纯色 => 问题在解码/纹理链路。
   final RxBool passthrough = RxBool(false);
 
+  /// 片源 v 方向是否翻转（默认翻：真机反馈不翻就是上下颠倒）。
+  /// SurfaceTexture 给的 transform matrix 各机型不统一，所以做成可实时切换，
+  /// 换机型时不必为了确认方向再出一版包。
+  final RxBool flipV = RxBool(true);
+
   // 视角读数（native 回报，10Hz）
   final RxDouble yaw = RxDouble(0);
   final RxDouble pitch = RxDouble(0);
@@ -206,6 +211,11 @@ class VrNativePlayerController extends GetxController {
   Future<void> setPassthrough(bool value) async {
     passthrough.value = value;
     await _invoke('setPassthrough', {'enabled': value});
+  }
+
+  Future<void> setFlipV(bool value) async {
+    flipV.value = value;
+    await _invoke('setFlipV', {'enabled': value});
   }
 
   // ==================== 视角 ====================

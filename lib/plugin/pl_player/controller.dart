@@ -815,6 +815,36 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     await _videoPlayerController?.setAudioTrack(track);
   }
 
+  /// 按标题选中一条**刚加进去**的外挂字幕轨。
+  ///
+  /// media_kit 的 `setSubtitleTrack(SubtitleTrack.uri(...))` 走的是 mpv 的
+  /// `sub-add <url> cached <title> <lang>`，`cached` 表示只加进列表、不自动选中，
+  /// 所以还要等 mpv 把它报进 `track-list` 后按 id 选一次。
+  /// 返回是否选中成功（超时没等到就放弃，不影响播放）。
+  Future<bool> selectSubtitleByTitle(
+    String title, {
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      for (final t in internalSubtitleTracks) {
+        if (t.title == title) {
+          await setInternalSubtitleTrack(SubtitleTrack(t.id, t.title, t.language));
+          return true;
+        }
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    return false;
+  }
+
+  /// 把外挂字幕加进 mpv 的字幕列表（不选中）
+  Future<void> addExternalSubtitle(String url, {required String title}) async {
+    await _videoPlayerController?.setSubtitleTrack(
+      SubtitleTrack(url, title, 'auto', uri: true),
+    );
+  }
+
   // ==================== VR / 全景 ====================
 
   /// 当前片源的立体布局, [VrProjection.off] 表示普通视频

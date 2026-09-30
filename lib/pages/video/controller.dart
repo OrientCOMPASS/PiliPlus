@@ -78,7 +78,7 @@ import 'package:collection/collection.dart';
 import 'package:dio/dio.dart' show Options;
 import 'package:extended_nested_scroll_view/extended_nested_scroll_view.dart'
     show ExtendedNestedScrollViewState;
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:flutter_volume_controller/flutter_volume_controller.dart';
 import 'package:get/get.dart';
@@ -474,6 +474,62 @@ class VideoDetailController extends GetxController
         onResumeOuter: resumeAfter ? () => plPlayerController.play() : null,
       ),
     );
+  }
+
+  /// 自动加载与视频文件名匹配的外置字幕（本地/局域网媒体）。
+  ///
+  /// 规则（与 VLC / mpv 一致）：同目录下 `movie.srt`、`movie.zh-CN.ass` 这类
+  /// 主名相同的字幕全部加进 mpv 的字幕列表；**如果片源本身没有字幕流**，
+  /// 就自动选中第一个匹配到的外置字幕（有内嵌字幕时不去抢，尊重 sid=auto）。
+  ///
+  /// 全程不能影响播放：找不到、读不到目录、加载失败都只记一条日志。
+  Future<void> _autoloadLocalSubtitles() async {
+    try {
+      final matches = await LocalMediaService.findMatchingSubtitles(localItem);
+      if (matches.isEmpty || isClosed) {
+        return;
+      }
+      // 先看片源自己有没有字幕流(外挂加进去之后这个判断就不准了)
+      final hasInternal = await _waitForInternalSubtitles();
+      final titles = <String>[];
+      for (final item in matches) {
+        if (isClosed) {
+          return;
+        }
+        final url = await LocalMediaService.resolvePlayUrl(item);
+        if (isClosed) {
+          return;
+        }
+        await plPlayerController.addExternalSubtitle(url, title: item.name);
+        // 同时挂到既有的字幕列表上, 顶栏「字幕」面板里就能直接切
+        final index = subtitles.length;
+        vttSubtitles[index] = (isData: false, id: url);
+        subtitles.add(Subtitle(lan: '', lanDoc: item.name));
+        titles.add(item.name);
+      }
+      if (!hasInternal && titles.isNotEmpty) {
+        await plPlayerController.selectSubtitleByTitle(titles.first);
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('autoload local subtitles failed: $e');
+      }
+    }
+  }
+
+  /// 等 mpv 把片源自带的字幕轨报上来（最多 1.5s）。
+  /// 报不上来就当"没有内嵌字幕"，宁可多选一个外挂字幕，也不要没字幕。
+  Future<bool> _waitForInternalSubtitles() async {
+    for (var i = 0; i < 15; i++) {
+      if (isClosed) {
+        return false;
+      }
+      if (plPlayerController.internalSubtitleTracks.isNotEmpty) {
+        return true;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    return plPlayerController.internalSubtitleTracks.isNotEmpty;
   }
 
   /// 本机文件用 [FileSource](关闭缓存); 局域网用 [NetworkSource](保留缓冲策略)
@@ -907,6 +963,9 @@ class VideoDetailController extends GetxController
         // 内嵌字幕交给 mpv 的 sid=auto 自选, 用户可在顶栏「字幕」面板改。
         if (!isLocalMedia) {
           setSubtitle(vttSubtitlesIndex.value);
+        } else {
+          // 本地视频: 自动找同目录里与视频同名的外置字幕
+          unawaited(_autoloadLocalSubtitles());
         }
       },
       width: firstVideo.width,

@@ -1426,7 +1426,8 @@ class HeaderControlState extends State<HeaderControl>
                       ),
                     ),
                     if (biliSubs.isNotEmpty) ...[
-                      _sectionTitle(context, 'B 站字幕'),
+                      // 本地视频这里是"自动匹配到的同目录外置字幕"和手动加载的
+                      _sectionTitle(context, isLocalMedia ? '字幕文件' : 'B 站字幕'),
                       if (!isLocalMedia)
                         _trackTile(
                           context,

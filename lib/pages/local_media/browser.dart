@@ -1,4 +1,4 @@
-import 'dart:async' show Timer;
+import 'dart:async' show Timer, unawaited;
 
 import 'package:PiliPlus/common/widgets/flutter/pop_scope.dart';
 import 'package:PiliPlus/common/widgets/loading_widget/http_error.dart';
@@ -570,6 +570,112 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
     });
   }
 
+  // ==================== 下载到本机 ====================
+
+  StateSetter? _dlSetState;
+  int _dlReceived = 0;
+  int _dlTotal = 0;
+  bool _dlCancelled = false;
+
+  /// 下载一个网络来源的文件到 app 的下载目录。
+  ///
+  /// 进度用对话框展示（可取消）：大文件动辄几个 GB，没有取消按钮的话
+  /// 用户只能干等或者杀进程。
+  Future<void> _download(LocalMediaItem item) async {
+    if (_busy) {
+      return;
+    }
+    _busy = true;
+    _dlCancelled = false;
+    _dlReceived = 0;
+    _dlTotal = item.size ?? 0;
+    BuildContext? dialogContextRef;
+    unawaited(
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) {
+          dialogContextRef = dialogContext;
+          return StatefulBuilder(
+            builder: (dialogContext, setDialogState) {
+              _dlSetState = setDialogState;
+              final known = _dlTotal > 0;
+              final value = known ? (_dlReceived / _dlTotal).clamp(0.0, 1.0) : null;
+              return AlertDialog(
+                title: Text(
+                  '下载 ${item.name}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 15),
+                ),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  spacing: 10,
+                  children: [
+                    LinearProgressIndicator(value: value),
+                    Text(
+                      known
+                          ? '${CacheManager.formatSize(_dlReceived)} / '
+                              '${CacheManager.formatSize(_dlTotal)}'
+                              '  (${(value! * 100).toStringAsFixed(0)}%)'
+                          : '已下载 ${CacheManager.formatSize(_dlReceived)}',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ],
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () {
+                      _dlCancelled = true;
+                      Navigator.of(dialogContext).pop();
+                    },
+                    child: const Text('取消'),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      ),
+    );
+    try {
+      final saved = await LocalMediaService.downloadTo(
+        item,
+        cancelled: () => _dlCancelled,
+        onProgress: (received, total) {
+          _dlReceived = received;
+          if (total > 0) {
+            _dlTotal = total;
+          }
+          _dlSetState?.call(() {});
+        },
+      );
+      if (dialogContextRef?.mounted ?? false) {
+        Navigator.of(dialogContextRef!).pop();
+      }
+      if (!mounted) {
+        return;
+      }
+      if (saved == null) {
+        SmartDialog.showToast(_dlCancelled ? '已取消下载' : '下载失败');
+      } else {
+        SmartDialog.showToast(
+          '已保存到 ${saved.path}',
+          displayTime: const Duration(seconds: 4),
+        );
+      }
+    } on Object catch (err) {
+      if (dialogContextRef?.mounted ?? false) {
+        Navigator.of(dialogContextRef!).pop();
+      }
+      SmartDialog.showToast('下载失败: $err');
+    } finally {
+      _dlSetState = null;
+      _busy = false;
+    }
+  }
+
   // ==================== 快捷方式(书签) ====================
 
   /// 当前层级对应的快捷方式(不可收藏时为 null)
@@ -638,6 +744,21 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
                 SmartDialog.showToast('已复制');
               },
             ),
+            // 局域网文件: 下载一份到本机下载目录(离线也能看/避免每次走网络)
+            if (item.source.type.isNetwork)
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.download_outlined),
+                title: const Text('下载到本机'),
+                subtitle: Text(
+                  '保存到下载目录${item.size == null ? '' : '（${CacheManager.formatSize(item.size!)}）'}',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                onTap: () {
+                  Navigator.of(dialogContext).pop();
+                  _download(item);
+                },
+              ),
             if (_progress.containsKey(item.uri))
               ListTile(
                 dense: true,

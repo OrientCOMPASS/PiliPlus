@@ -1,6 +1,9 @@
 import 'dart:convert' show base64Encode, utf8;
 import 'dart:io';
 
+import 'package:PiliPlus/utils/path_utils.dart' show downloadPath;
+import 'package:dio/dio.dart';
+
 import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/models/local_media/local_media_item.dart';
 import 'package:PiliPlus/models/local_media/local_media_sort.dart';
@@ -167,6 +170,92 @@ abstract final class LocalMediaService {
       _ => <LocalMediaItem>[],
     };
     return onlyMedia ? _filterPlayable(items) : items;
+  }
+
+  // ==================== 外置字幕自动匹配 ====================
+
+  /// 视频所在目录。各来源的路径约定不同(本机=绝对路径, SMB=共享名打头的
+  /// 反斜杠路径, WebDAV=以 / 开头的服务器路径), 直链来源没有目录可列。
+  static String? parentDirOf(LocalMediaItem item) {
+    switch (item.source.type) {
+      case LocalMediaSourceType.device:
+        final dir = p.dirname(item.uri);
+        return dir.isEmpty ? null : dir;
+      case LocalMediaSourceType.smb:
+        final rp = item.remotePath;
+        if (rp == null || rp.isEmpty) {
+          // 共享级来源且文件就在共享根上 -> 空串(共享根);
+          // 主机级来源不可能没有 remotePath, 保险起见返回 null
+          return item.source.isSmbHostRoot ? null : '';
+        }
+        final norm = SmbBrowse.normalizePath(rp);
+        final i = norm.lastIndexOf('\\');
+        if (i < 0) {
+          // 主机级来源里 remotePath 只有共享名一段 -> 那是共享, 不是文件
+          return item.source.isSmbHostRoot ? null : '';
+        }
+        return norm.substring(0, i);
+      case LocalMediaSourceType.webdav:
+        final rp = item.remotePath ?? item.uri;
+        final i = rp.lastIndexOf('/');
+        return i <= 0 ? '/' : rp.substring(0, i);
+      case LocalMediaSourceType.http:
+      case LocalMediaSourceType.ftp:
+        return null;
+    }
+  }
+
+  /// 去掉扩展名(用于同名匹配)
+  static String baseNameOf(String fileName) {
+    final dot = fileName.lastIndexOf('.');
+    return dot <= 0 ? fileName : fileName.substring(0, dot);
+  }
+
+  /// 找出与视频**同目录、文件名匹配**的外置字幕(VLC / mpv 的同名规则)。
+  ///
+  /// 匹配(不区分大小写):
+  ///   * 主名完全相同: `movie.mkv` -> `movie.srt` / `movie.ass` / `movie.vtt` …
+  ///   * 主名 + 语言等后缀: `movie.zh-CN.srt`、`movie.chs.ass`、`movie.中文.srt`
+  /// 排序: 主名完全相同的排前面, 其余按文件名自然序(第2集 在 第10集 前)。
+  ///
+  /// 读不到同目录(无权限/断链)时返回空 —— **绝不能因为找字幕而影响播放**。
+  static Future<List<LocalMediaItem>> findMatchingSubtitles(
+    LocalMediaItem video,
+  ) async {
+    final dir = parentDirOf(video);
+    if (dir == null) {
+      return const [];
+    }
+    final base = baseNameOf(video.name).toLowerCase();
+    if (base.isEmpty) {
+      return const [];
+    }
+    List<LocalMediaItem> siblings;
+    try {
+      siblings = await listOrThrow(
+        source: video.source,
+        path: dir,
+        onlyMedia: false,
+      );
+    } catch (_) {
+      return const [];
+    }
+    final exact = <LocalMediaItem>[];
+    final withSuffix = <LocalMediaItem>[];
+    for (final item in siblings) {
+      if (item.isDirectory || !item.isSubtitle) {
+        continue;
+      }
+      final subBase = baseNameOf(item.name).toLowerCase();
+      if (subBase == base) {
+        exact.add(item);
+      } else if (subBase.startsWith('$base.')) {
+        withSuffix.add(item);
+      }
+    }
+    exact.sort((a, b) => _compareName(a.name, b.name));
+    withSuffix.sort((a, b) => _compareName(a.name, b.name));
+    return [...exact, ...withSuffix];
   }
 
   /// 从「父目录 path + 条目」推出下一层的 path。
@@ -524,6 +613,91 @@ abstract final class LocalMediaService {
   /// 自研 VR 播放器能不能播这个来源(MediaExtractor 不认 ftp://)
   static bool nativePlayerCanPlay(LocalMediaSource source) =>
       source.type != LocalMediaSourceType.ftp;
+
+  // ==================== 下载到本机 ====================
+
+  /// 把网络来源(局域网 SMB/WebDAV/HTTP)的文件下载到本机下载目录。
+  ///
+  /// 目标目录用 app 既有的 [downloadPath]（设置里可改；默认在应用外部存储的
+  /// `download/`），重名自动加 ` (1)`/` (2)` 后缀，绝不覆盖已有文件。
+  ///
+  /// 地址走 [resolvePlayUrl]，因此三种网络来源是**同一条下载路径**：
+  /// SMB 经本机回环 HTTP 代理（支持 Range，dio 能断点/进度），
+  /// WebDAV/HTTP 直接下（URL 里的 userinfo 由 dart:io 自动转成 Basic 认证）。
+  ///
+  /// 返回保存后的文件；用户取消或失败返回 null。
+  static Future<File?> downloadTo(
+    LocalMediaItem item, {
+    void Function(int received, int total)? onProgress,
+    bool Function()? cancelled,
+    String? dirPath,
+  }) async {
+    final url = await resolvePlayUrl(item);
+    final dir = Directory(dirPath ?? downloadPath);
+    if (!dir.existsSync()) {
+      dir.createSync(recursive: true);
+    }
+    final dest = uniqueFilePath(dir.path, item.name);
+    final dio = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 15),
+        // 大文件整体传输时间不设上限, 只约束"多久没收到数据"
+        receiveTimeout: const Duration(seconds: 60),
+        followRedirects: true,
+      ),
+    );
+    final cancelToken = CancelToken();
+    try {
+      await dio.download(
+        url,
+        dest,
+        cancelToken: cancelToken,
+        deleteOnError: true,
+        onReceiveProgress: (received, total) {
+          if (cancelled?.call() ?? false) {
+            if (!cancelToken.isCancelled) {
+              cancelToken.cancel('user cancelled');
+            }
+            return;
+          }
+          onProgress?.call(received, total < 0 ? (item.size ?? -1) : total);
+        },
+      );
+      if (cancelToken.isCancelled) {
+        return null;
+      }
+      final file = File(dest);
+      return file.existsSync() ? file : null;
+    } on DioException catch (e) {
+      if (e.type == DioExceptionType.cancel) {
+        return null;
+      }
+      rethrow;
+    } finally {
+      dio.close(force: true);
+    }
+  }
+
+  /// 重名不覆盖: `a.mp4` -> `a (1).mp4` -> `a (2).mp4` …
+  static String uniqueFilePath(String dir, String fileName) {
+    final dot = fileName.lastIndexOf('.');
+    final stem = dot <= 0 ? fileName : fileName.substring(0, dot);
+    final ext = dot <= 0 ? '' : fileName.substring(dot);
+    var candidate = p.join(dir, fileName);
+    var n = 1;
+    while (File(candidate).existsSync()) {
+      candidate = p.join(dir, '$stem ($n)$ext');
+      n++;
+      if (n > 999) {
+        // 极端情况兜底: 用时间戳, 保证一定能写下去
+        return p.join(
+          dir,
+          '$stem-${DateTime.now().millisecondsSinceEpoch}$ext',
+        );
+      }
+    }
+    return candidate;
+  }
 
   /// 连通性检查(添加/编辑来源时立即验证)
   static Future<LoadingState<int>> testConnection(

@@ -1,16 +1,19 @@
 name: PiliPlayer CI
 
 # CI for the `piliplayer` branch (Android only).
-# The development sandbox cannot build Flutter apps (1 GiB RAM / 2 vCPU),
+# The development sandbox cannot build Flutter apps (2 vCPU / ~10 GiB disk),
 # so every verification (analyze / test / apk build) happens here.
 #
-# 推 `v*` tag 时: debug + release 双模式构建, 产物(APK + SHA256SUMS)
-# 全部上传到该 tag 对应的 GitHub Release(不存在则自动创建 prerelease)。
+# **一次构建即发布**(第六轮改的): 以前分支 push 建一次 debug、打 tag 再建
+# debug+release, 每轮白等一次构建。现在只有 tag 触发 push 构建, 且只出
+# release(arm64-v8a) —— check 或构建任一步失败就不会有产物上传, Release 也
+# 不会被填上半成品; 需要 debug 包时用 workflow_dispatch 手动出。
+#
+# 产物(APK + SHA256SUMS)上传到该 tag 对应的 GitHub Release,
+# Release 不存在时自动创建 prerelease(发布说明由发布脚本随后补上)。
 
 on:
     push:
-        branches:
-            - piliplayer
         tags:
             - "v*"
         paths-ignore:
@@ -133,15 +136,18 @@ jobs:
         needs: check
         runs-on: ubuntu-latest
         timeout-minutes: 70
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_apk }}
+        # 只有 tag(发布)和手动触发才出包; PR 只跑 check, 不浪费构建机时
+        if: >-
+            ${{ (github.event_name != 'workflow_dispatch' || inputs.build_apk)
+            && (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') }}
         permissions:
             # tag 推送时要把构建产物传到对应 Release
             contents: write
         strategy:
             fail-fast: false
             matrix:
-                # tag -> debug + release 都建; 分支 push -> debug; 手动触发 -> 所选模式
-                mode: "${{ fromJSON(github.ref_type == 'tag' && '[\"debug\",\"release\"]' || format('[\"{0}\"]', github.event.inputs.apk_mode || 'debug')) }}"
+                # tag -> 只出 release(装机测试用的就是它); 手动触发 -> 所选模式
+                mode: "${{ fromJSON(github.ref_type == 'tag' && '[\"release\"]' || format('[\"{0}\"]', github.event.inputs.apk_mode || 'debug')) }}"
         steps:
             - name: 代码迁出
               uses: actions/checkout@v7

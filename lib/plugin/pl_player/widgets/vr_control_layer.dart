@@ -82,13 +82,27 @@ class _VrControlLayerState extends State<VrControlLayer> {
             padding: const EdgeInsets.only(top: 10),
             child: Obx(() {
               final view = _c.vrView.value;
-              return _Chip(
-                onTap: () => _c.setVrControlMode(false),
-                icon: Icons.gesture_outlined,
-                label:
-                    '偏航 ${view.yaw.toStringAsFixed(1)}°  '
-                    '俯仰 ${view.pitch.toStringAsFixed(1)}°  '
-                    '视场 ${view.fov.toStringAsFixed(0)}°  ·  点按退出VR操作',
+              final error = _c.vrError.value;
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                spacing: 6,
+                children: [
+                  _Chip(
+                    onTap: () => _c.setVrControlMode(false),
+                    icon: Icons.gesture_outlined,
+                    label:
+                        '偏航 ${view.yaw.toStringAsFixed(1)}°  '
+                        '俯仰 ${view.pitch.toStringAsFixed(1)}°  '
+                        '视场 ${view.fov.toStringAsFixed(0)}°  ·  点按退出VR操作',
+                  ),
+                  // 着色器没生效时把原因摊开, 不要让用户面对"操作没反应"
+                  if (error != null)
+                    _Chip(
+                      icon: Icons.error_outline,
+                      label: error,
+                      danger: true,
+                    ),
+                ],
               );
             }),
           ),
@@ -179,11 +193,17 @@ class _VrControlLayerState extends State<VrControlLayer> {
 }
 
 class _Chip extends StatelessWidget {
-  const _Chip({required this.label, required this.icon, this.onTap});
+  const _Chip({
+    required this.label,
+    required this.icon,
+    this.onTap,
+    this.danger = false,
+  });
 
   final String label;
   final IconData icon;
   final VoidCallback? onTap;
+  final bool danger;
 
   @override
   Widget build(BuildContext context) {
@@ -193,19 +213,28 @@ class _Chip extends StatelessWidget {
         onTap: onTap,
         borderRadius: const BorderRadius.all(Radius.circular(20)),
         child: Container(
+          constraints: const BoxConstraints(maxWidth: 420),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.55),
+            color: Colors.black.withValues(alpha: danger ? 0.75 : 0.55),
             borderRadius: const BorderRadius.all(Radius.circular(20)),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             spacing: 6,
             children: [
-              Icon(icon, size: 15, color: Colors.white),
-              Text(
-                label,
-                style: const TextStyle(color: Colors.white, fontSize: 12),
+              Icon(
+                icon,
+                size: 15,
+                color: danger ? Colors.redAccent : Colors.white,
+              ),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
               ),
             ],
           ),

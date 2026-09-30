@@ -23,6 +23,10 @@ import 'package:path/path.dart' as path;
 abstract final class VrShader {
   static const String fileName = 'piliplus_vr.glsl';
 
+  /// `//!DESC` 里的标识。下发后回读 `vo-passes` 用它确认着色器真的进了渲染管线
+  /// (见 `PlPlayerController._verifyVrShader`)。
+  static const String passDesc = 'PiliPlus-VR';
+
   static String get dirPath => path.join(appSupportDirPath, 'vr_shader');
 
   static String get filePath => path.join(dirPath, fileName);
@@ -43,7 +47,7 @@ abstract final class VrShader {
     final rect = eyeRect(projection, eye);
 
     return '''
-//!DESC PiliPlus-VR ${projection.label} yaw=$yaw pitch=$pitch fov=$fov
+//!DESC $passDesc ${projection.label} yaw=$yaw pitch=$pitch fov=$fov
 //!HOOK MAIN
 //!BIND HOOKED
 //!WIDTH OUTPUT.w

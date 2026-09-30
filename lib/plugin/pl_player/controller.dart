@@ -958,17 +958,62 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (!force && source == _vrShaderSource) {
       return;
     }
+    final firstApply = _vrShaderSource == null;
     _vrShaderSource = source;
     try {
       final file = VrShader.write(source);
       await player.command(['change-list', 'glsl-shaders', 'set', file]);
+      // 只在首次下发时自检(拖拽时每次自检会拖慢手感)
+      if (firstApply || vrError.value != null) {
+        await _verifyVrShader(player);
+      }
     } catch (err) {
       _vrShaderSource = null;
       vrError.value = '下发着色器失败: $err';
+      // 错误要让用户看见, 否则"操作没反应"根本无从判断原因
+      SmartDialog.showToast('VR 着色器下发失败: $err');
       if (kDebugMode) {
         debugPrint('apply vr shader failed: $err');
       }
     }
+  }
+
+  /// 自检: 确认着色器真的进了渲染管线。
+  ///
+  /// mpv 解析/编译用户着色器失败时只会打日志并**静默忽略**, 画面上看不出区别,
+  /// 所以这里回读 `vo-passes`(渲染 pass 列表, 含 //!DESC) 与 `glsl-shaders`,
+  /// 一旦没有我们的 pass 就把原因显示出来, 避免变成"操作没反应"的黑盒。
+  Future<void> _verifyVrShader(NativePlayer player) async {
+    try {
+      final shaders = player.getProperty('glsl-shaders');
+      if (!shaders.contains(VrShader.fileName)) {
+        _reportVrError('glsl-shaders 里没有着色器(mpv 拒绝了下发): $shaders');
+        return;
+      }
+      // `vo-passes` 要等下一帧重建渲染管线后才有内容, 立刻回读基本是空的,
+      // 直接判失败只会误报。所以稍等一下, 并且把「读不到」当成结论不明而非失败。
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      final passes = player.getProperty('vo-passes');
+      if (passes.isNotEmpty && !passes.contains(VrShader.passDesc)) {
+        _reportVrError('着色器已下发但没进渲染管线(mpv 可能编译失败): $passes');
+        return;
+      }
+      // 自检通过: 清掉可能残留的错误提示
+      vrError.value = null;
+    } catch (err) {
+      // 读不到属性不影响播放
+      if (kDebugMode) {
+        debugPrint('verify vr shader failed: $err');
+      }
+    }
+  }
+
+  void _reportVrError(String message) {
+    vrError.value = message;
+    SmartDialog.showToast(
+      'VR 未生效: $message',
+      displayTime: const Duration(seconds: 6),
+    );
   }
 
   /// 最近一次 VR 相关错误, 便于定位"操作没反应"的问题

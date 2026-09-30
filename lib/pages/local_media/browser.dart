@@ -120,12 +120,12 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
     if (_stack.length <= 1) {
       return false;
     }
-    setState(() {
-      _stack.removeLast();
-    });
+    setState(_popLevel);
     _refresh();
     return true;
   }
+
+  void _popLevel() => _stack.removeLast();
 
   Future<void> _play(LocalMediaItem item) async {
     if (_busy) {

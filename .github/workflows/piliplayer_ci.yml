@@ -3,11 +3,16 @@ name: PiliPlayer CI
 # CI for the `piliplayer` branch (Android only).
 # The development sandbox cannot build Flutter apps (1 GiB RAM / 2 vCPU),
 # so every verification (analyze / test / apk build) happens here.
+#
+# 推 `v*` tag 时: debug + release 双模式构建, 产物(APK + SHA256SUMS)
+# 全部上传到该 tag 对应的 GitHub Release(不存在则自动创建 prerelease)。
 
 on:
     push:
         branches:
             - piliplayer
+        tags:
+            - "v*"
         paths-ignore:
             - "**.md"
             - "docs/**"
@@ -116,11 +121,19 @@ jobs:
               run: flutter test --no-pub --reporter expanded
 
     build_android:
-        name: Build Android (${{ github.event.inputs.apk_mode || 'debug' }})
+        name: Build Android (${{ matrix.mode }})
         needs: check
         runs-on: ubuntu-latest
         timeout-minutes: 70
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_apk }}
+        permissions:
+            # tag 推送时要把构建产物传到对应 Release
+            contents: write
+        strategy:
+            fail-fast: false
+            matrix:
+                # tag -> debug + release 都建; 分支 push -> debug; 手动触发 -> 所选模式
+                mode: "${{ fromJSON(github.ref_type == 'tag' && '[\"debug\",\"release\"]' || format('[\"{0}\"]', github.event.inputs.apk_mode || 'debug')) }}"
         steps:
             - name: 代码迁出
               uses: actions/checkout@v7
@@ -161,7 +174,7 @@ jobs:
                   } >> "$GITHUB_ENV"
 
             - name: Build Debug Apk
-              if: ${{ (github.event.inputs.apk_mode || 'debug') == 'debug' }}
+              if: ${{ matrix.mode == 'debug' }}
               run: >-
                   flutter build apk --debug --target-platform android-arm64
                   --dart-define=pili.hash=${{ env.PILI_HASH }}
@@ -170,7 +183,7 @@ jobs:
                   --no-pub
 
             - name: Build Release Apk
-              if: ${{ github.event.inputs.apk_mode == 'release' }}
+              if: ${{ matrix.mode == 'release' }}
               run: >-
                   flutter build apk --release --split-per-abi
                   --android-project-arg dev=1
@@ -186,7 +199,32 @@ jobs:
               if: ${{ github.event_name != 'workflow_dispatch' || inputs.upload_apk }}
               uses: actions/upload-artifact@v7
               with:
-                  name: PiliPlayer-android-${{ github.event.inputs.apk_mode || 'debug' }}-${{ github.sha }}
+                  name: PiliPlayer-android-${{ matrix.mode }}-${{ github.sha }}
                   path: build/app/outputs/flutter-apk/*.apk
                   if-no-files-found: error
                   retention-days: 14
+
+            # tag 推送: 把本 leg 的全部 APK 传到该 tag 的 GitHub Release。
+            # Release 一般已提前建好; 没有就兜底建一个 prerelease
+            # (debug/release 两条腿并发, create 用 || true 兜竞态)。
+            - name: 上传到 tag Release
+              if: ${{ github.ref_type == 'tag' }}
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  tag="$GITHUB_REF_NAME"
+                  mode="${{ matrix.mode }}"
+                  cd build/app/outputs/flutter-apk
+                  ls -la
+                  sums="PiliPlayer-${tag}-${mode}-SHA256SUMS.txt"
+                  sha256sum ./*.apk > "$sums"
+                  cat "$sums"
+                  if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+                    gh release create "$tag" --repo "$GITHUB_REPOSITORY" --prerelease \
+                      --title "PiliPlayer ${tag} (测试构建)" \
+                      --notes "由 CI 自动创建, 构建自 ${GITHUB_SHA}。" || true
+                  fi
+                  gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber ./*.apk "$sums"
+                  echo "::notice::已上传 ${mode} 构建产物到 release ${tag}"

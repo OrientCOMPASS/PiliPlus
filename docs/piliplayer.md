@@ -330,13 +330,27 @@ mpv  --(http, Range)-->  127.0.0.1:<随机端口>/s/<token>  --(SMB2 READ)-->  N
 开发沙盒只有 2 vCPU / 1 GiB 内存，无法构建 Flutter 应用（本地 analyze 也会 OOM），
 所以一切验证都在 GitHub Actions 上跑：`.github/workflows/piliplayer_ci.yml`。
 
-- 触发：push 到 `piliplayer`、面向 `piliplayer` 的 PR、手动 dispatch；
+- 触发：push 到 `piliplayer`、push `v*` tag、面向 `piliplayer` 的 PR、手动 dispatch；
 - 步骤与仓库既有 `build.yml` 对齐（Flutter 版本取自 `pubspec.yaml`，
   构建前执行 `lib/scripts/patch.ps1 android` 给 Flutter SDK 与 material_ui/cupertino_ui 打补丁）；
 - `check` 作业：`flutter analyze`（仓库基线有 37 条 info、0 error，故只把 **error** 视为失败）
   → 对本分支新增路径再做一次 `dart analyze --fatal-infos` **零容忍**检查 → `flutter test`；
-- `build_android` 作业：`flutter build apk --debug --target-platform android-arm64`
-  并上传产物，方便直接装机验证；手动 dispatch 时可切 `release`。
+- `build_android` 作业（矩阵）：分支 push 只建 debug（`--target-platform android-arm64`）；
+  手动 dispatch 可切模式；**推 `v*` tag 时 debug + release 双模式都建**，
+  产物均上传为 workflow artifact（14 天有效）。
+
+### 6.1 tag → GitHub Release
+
+推一个 `v*` tag（如 `v2.1.5-test.1`）即可发布测试版本：
+
+1. `build_android` 每条腿构建完成后，用 `gh release upload --clobber` 把
+   **全部 APK + `PiliPlayer-<tag>-<mode>-SHA256SUMS.txt`** 传到该 tag 对应的 Release；
+2. Release 不存在时 CI 会兜底创建一个 **prerelease**（正常流程是打 tag 后手动建好
+   Release、写清 changelog，CI 只负责传包）；
+3. release 腿沿用上游参数：`--split-per-abi --android-project-arg dev=1`，
+   即包名带 `.dev` 后缀（可与正式版共存）、按 ABI 拆分；
+   仓库没有 `android/key.properties` 时自动回落 debug 签名，装机测试没问题，
+   但要上商店需自行配置签名。
 
 `STRICT_PATHS`（workflow 的 env）列出了本分支新增的目录/文件，新增代码请一并加进去。
 

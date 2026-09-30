@@ -68,6 +68,8 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
 
   @override
   void dispose() {
+    _dlCancelled = true; // 页面都关了, 别让下载继续占着网络
+    _dlDialogContext = null;
     _searchDebounce?.cancel();
     _searchFlushTimer?.cancel();
     _searchGen++; // 让在飞的检索作废, 回调里会因 mounted/gen 不符而直接返回
@@ -620,6 +622,7 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
   // ==================== 下载到本机 ====================
 
   StateSetter? _dlSetState;
+  BuildContext? _dlDialogContext;
   int _dlReceived = 0;
   int _dlTotal = 0;
   bool _dlCancelled = false;
@@ -636,18 +639,21 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
     _dlCancelled = false;
     _dlReceived = 0;
     _dlTotal = item.size ?? 0;
-    BuildContext? dialogContextRef;
     unawaited(
       showDialog<void>(
         context: context,
         barrierDismissible: false,
         builder: (dialogContext) {
-          dialogContextRef = dialogContext;
+          _dlDialogContext = dialogContext;
           return StatefulBuilder(
             builder: (dialogContext, setDialogState) {
               _dlSetState = setDialogState;
               final known = _dlTotal > 0;
-              final value = known ? (_dlReceived / _dlTotal).clamp(0.0, 1.0) : null;
+              // 显式 toDouble: num.clamp 的静态类型在某些组合下会退化成 num,
+              // 直接喂给 LinearProgressIndicator(value: double?) 会编译不过
+              final double? value = known
+                  ? (_dlReceived / _dlTotal).clamp(0.0, 1.0).toDouble()
+                  : null;
               return AlertDialog(
                 title: Text(
                   '下载 ${item.name}',
@@ -698,9 +704,7 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
           _dlSetState?.call(() {});
         },
       );
-      if (dialogContextRef?.mounted ?? false) {
-        Navigator.of(dialogContextRef!).pop();
-      }
+      _closeDownloadDialog();
       if (!mounted) {
         return;
       }
@@ -713,13 +717,19 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
         );
       }
     } on Object catch (err) {
-      if (dialogContextRef?.mounted ?? false) {
-        Navigator.of(dialogContextRef!).pop();
-      }
+      _closeDownloadDialog();
       SmartDialog.showToast('下载失败: $err');
     } finally {
       _dlSetState = null;
       _busy = false;
+    }
+  }
+
+  void _closeDownloadDialog() {
+    final dialogContext = _dlDialogContext;
+    _dlDialogContext = null;
+    if (dialogContext != null && dialogContext.mounted) {
+      Navigator.of(dialogContext).pop();
     }
   }
 

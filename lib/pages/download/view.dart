@@ -93,6 +93,11 @@ class _DownloadPageState extends State<DownloadPage> with GridMixin {
               title: const Text('离线缓存'),
               actions: [
                 IconButton(
+                  tooltip: '本地视频',
+                  onPressed: () => Get.toNamed('/localMedia'),
+                  icon: const Icon(Icons.video_library_outlined),
+                ),
+                IconButton(
                   tooltip: '搜索',
                   onPressed: () async {
                     await _downloadService.waitForInitialization;

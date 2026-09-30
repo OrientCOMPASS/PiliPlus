@@ -242,6 +242,18 @@
 <br/>
 <br/>
 
+## piliplayer 分支新增能力
+
+> 仅针对 Android，设计与取舍详见 [docs/piliplayer.md](docs/piliplayer.md)。
+
+- **本地板块**：播放本机与局域网（WebDAV / HTTP / FTP）里的视频。来源列表 → 目录浏览 →
+  点文件播放，同目录视频自动组成播放列表，支持续播记忆（只存本机）。
+  播放本地内容时不会向 B 站上报任何数据（历史心跳、预览图、弹幕、评论等一律不走）。
+  入口：「我的」→ 本地视频，或「离线缓存」页右上角。
+- **VR / 全景播放**：支持等距柱状 360°/180° 与左右（SBS）/上下（TB）双目片源，
+  由 mpv 的 GPU 用户着色器在渲染管线内单次重投影（零拷贝、输出尺寸只与屏幕分辨率相关，
+  与 4K/8K 片源无关）。单指拖拽环视、双指缩放视场角，可按文件名自动识别片源布局。
+
 ## Star History
 
 <a href="https://star-history.dera.page/#bggRGjQaUbCoE/PiliPlus&Date">

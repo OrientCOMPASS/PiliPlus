@@ -1,3 +1,4 @@
+import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/models/local_media/local_media_item.dart';
 import 'package:PiliPlus/models/local_media/local_media_source.dart';
 import 'package:PiliPlus/pages/local_media/browser.dart';
@@ -49,7 +50,7 @@ class LocalMediaController extends GetxController {
       return;
     }
     await library.scan();
-    if (library.lastError case final err?) {
+    if (library.lastError.value case final err?) {
       SmartDialog.showToast(err);
     }
   }

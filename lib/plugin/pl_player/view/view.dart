@@ -2092,8 +2092,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
               },
             ),
           ),
-        ),
-    );
+        );
   }
 
   Future<void> screenshotWebp() async {

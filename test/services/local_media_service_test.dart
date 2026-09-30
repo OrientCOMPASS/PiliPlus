@@ -61,7 +61,7 @@ void main() {
 
   group('playbackUrl', () {
     test('本机文件直接用绝对路径', () {
-      final item = LocalMediaItem(
+      const item = LocalMediaItem(
         name: 'a.mp4',
         uri: '/storage/emulated/0/a.mp4',
         source: device,
@@ -70,7 +70,7 @@ void main() {
     });
 
     test('网络条目已经是完整 URL 时原样返回', () {
-      final item = LocalMediaItem(
+      const item = LocalMediaItem(
         name: 'a.mp4',
         uri: 'http://127.0.0.1:1234/s/token',
         source: smbHost,
@@ -114,7 +114,7 @@ void main() {
       expect(item('a.txt').isPlayable, isFalse);
       expect(item('noext').extension, '');
       expect(
-        LocalMediaItem(
+        const LocalMediaItem(
           name: 'dir',
           uri: '/dir',
           source: device,
@@ -125,12 +125,12 @@ void main() {
     });
 
     test('cid 只由 uri 决定(用于本机续播进度的 key, 不发接口)', () {
-      final a = LocalMediaItem(
+      const a = LocalMediaItem(
         name: 'x.mp4',
         uri: 'smb://NAS/pub/x.mp4',
         source: smbShare,
       );
-      final b = LocalMediaItem(
+      const b = LocalMediaItem(
         name: '别的名字',
         uri: 'smb://NAS/pub/x.mp4',
         source: smbShare,

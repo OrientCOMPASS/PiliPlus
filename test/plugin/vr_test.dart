@@ -257,8 +257,9 @@ void main() {
     });
 
     test('reset 归零', () {
-      final q = VrQuantizer()..variants = 999;
-      q.reset();
+      final q = VrQuantizer()
+        ..variants = 999
+        ..reset();
       expect(q.variants, 0);
       expect(q.level, 0);
       expect(q.exhausted, isFalse);

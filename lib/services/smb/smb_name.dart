@@ -80,7 +80,7 @@ abstract final class SmbName {
 
   // ==================== NBNS (RFC 1002) ====================
 
-  /// NBNS 名字查询(UDP 137, 广播), 查 <NAME>(0x20 文件服务器服务)。
+  /// NBNS 名字查询(UDP 137, 广播), 查 `NAME`(0x20 文件服务器服务)。
   /// 成功返回 IPv4 字符串, 超时/无应答返回 null。
   static Future<String?> nbnsResolve(
     String name, {

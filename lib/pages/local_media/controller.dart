@@ -232,6 +232,9 @@ class LocalMediaController extends GetxController {
       return;
     }
     if (pick.manual || pick.share == null) {
+      if (!context.mounted) {
+        return;
+      }
       await _manualAddHost(context, host, serverName, user, password, domain);
       return;
     }

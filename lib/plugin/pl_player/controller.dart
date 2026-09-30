@@ -614,6 +614,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     bool isLocalMedia = false,
     // VR/全景片源布局, 为 null 时按设置自动识别
     VrProjection? vrProjection,
+
+    /// 用于 VR 自动识别的"文件名"。
+    ///
+    /// 不能一律拿 `dataSource.videoSource` 去猜: SMB 播放走本机回环代理,
+    /// 地址形如 `http://127.0.0.1:54321/s/<token>`, 里面根本没有原文件名,
+    /// `360`/`sbs` 之类关键词全部丢失, 自动识别必然失效。
+    String? mediaName,
   }) async {
     try {
       _processing = true;
@@ -623,7 +630,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       // 的清晰度字样, 误判会直接把正常视频弄花, 在线内容请手动开启
       _initVrState(
         vrProjection,
-        dataSource.videoSource,
+        mediaName ?? dataSource.videoSource,
         autoDetect: isLocalMedia,
       );
       _videoType = videoType ?? VideoType.ugc;
@@ -772,16 +779,41 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   bool get vrEnabled => vrProjection.value.enabled;
 
-  /// 上一次烘焙的着色器源码, 避免同一视角重复写盘与重复重载
-  String? _vrShaderSource;
+  /// 量化步长 + 变体预算(见 `VrQuantizer`): 每一份不同的着色器源码在 mpv
+  /// 那边都是一次真实的 GLSL 编译和一条永久驻留的程序缓存, 所以必须限量。
+  final VrQuantizer _vrQuantizer = VrQuantizer();
 
-  /// 着色器槽位(0/1 交替): 见 `VrShader` 头部注释, 相同路径的
-  /// `change-list glsl-shaders set` 会被 mpv 忽略, 必须让选项值真的变化
-  int _vrShaderSlot = 0;
+  /// 「着色器源码 -> 已写入的文件路径」。
+  ///
+  /// mpv 的 `vo=gpu` 按**路径**永久缓存用户着色器的文件内容
+  /// (`gpu/video.c: load_cached_file()`), 同一个路径改内容是读不到的,
+  /// 所以一个路径只写一次; 反过来, 同一份源码要复用同一个路径 ——
+  /// 这样回到看过的视角时 mpv 是缓存命中, 不重新编译、不占预算。
+  final Map<String, String> _vrPathBySource = {};
 
-  /// 着色器重载最小间隔: 拖拽时按此节流, 手势结束再强制落一次
-  static const int vrApplyIntervalMs = 45;
+  /// 下一个待用的着色器文件序号
+  int _vrSeq = 0;
+
+  /// mpv 当前实际生效的着色器源码。与它相同就不必再下发一次命令
+  /// (下发本身会触发整条渲染管线重建, 白白重建就是第三轮的卡顿来源)。
+  String? _vrAppliedSource;
+
+  /// 串行化下发: 一次只允许一条 `change-list` 在飞, 期间的更新合并成一次。
+  /// 不这么做的话, 陀螺仪/拖拽会在 mpv 的命令队列里堆积几十条重建请求。
+  bool _vrApplyRunning = false;
+  bool _vrApplyQueued = false;
+  Future<void> _vrApplyFuture = Future<void>.value();
+
+  /// 拖拽/按钮的最小下发间隔(ms)。手势结束时用 force 再补一次。
+  static const int vrApplyIntervalMs = 100;
+
+  /// 陀螺仪的最小下发间隔(ms)。比拖拽更宽松: 头追是连续输入,
+  /// 而每次下发在 mpv 那边都是重建渲染管线, 频率必须压住。
+  static const int vrGyroApplyIntervalMs = 180;
   int _vrLastApplyMs = 0;
+
+  /// 预算耗尽只提示一次
+  bool _vrBudgetWarned = false;
 
   void _initVrState(
     VrProjection? hint,
@@ -798,8 +830,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     vrProjection.value = projection ?? VrProjection.off;
     vrControlMode.value = vrEnabled;
     vrView.value = VrViewState(fov: Pref.vrDefaultFov);
-    _vrShaderSource = null;
     _vrLastApplyMs = 0;
+    // 注意: 这里**不能**清 `_vrAppliedSource`。换视频时播放器是复用的,
+    // mpv 里的着色器还在; 清掉只会导致重复下发同一路径、白白重建一次管线。
     setVrGyro(vrEnabled && Pref.vrGyro, persist: false, toast: false);
     if (vrEnabled) {
       SmartDialog.showToast(
@@ -855,7 +888,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       vrView.value = VrViewState(fov: vrView.value.fov);
     }
     if (projection.enabled) {
-      await _applyVrShader(force: true);
+      await _applyVrShader();
       // 选定布局即进入 VR 操作模式, 可随时退出以使用常规手势
       vrControlMode.value = true;
       setVrGyro(Pref.vrGyro, persist: false, toast: false);
@@ -863,7 +896,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       vrControlMode.value = false;
       setVrGyro(false, persist: false, toast: false);
       // 退出 VR: 恢复超分辨率着色器(未开启时其内部会清空着色器列表)
-      _vrShaderSource = null;
+      _vrAppliedSource = null;
       await setShader();
     }
   }
@@ -874,7 +907,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       return;
     }
     vrEye.value = eye;
-    await _applyVrShader(force: true);
+    await _applyVrShader();
   }
 
   /// 屏幕按钮步进: 偏航/俯仰/视场角
@@ -983,12 +1016,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final next = cur
         .copyWith(yaw: cur.yaw + dyaw, pitch: cur.pitch + dpitch)
         .clamped(vrProjection.value);
-    // 量化后没有变化就不打扰着色器(也避免无意义的重载)
-    if (next.sameRenderState(cur)) {
+    // 量化后没有变化就不打扰着色器(也避免无意义的管线重建)
+    if (next.sameRenderState(
+      cur,
+      angleStep: _vrQuantizer.angleStep,
+      fovStep: _vrQuantizer.fovStep,
+    )) {
       return;
     }
     vrView.value = next;
-    applyVrView();
+    applyVrView(gyro: true);
   }
 
   /// 视角摆正
@@ -997,20 +1034,46 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     applyVrView(force: true);
   }
 
-  /// 节流应用视角; [force] 用于手势结束/按钮步进时保证视角准确
-  void applyVrView({bool force = false}) {
+  /// 节流应用视角; [force] 用于手势结束/按钮步进时保证视角准确,
+  /// [gyro] 表示来自陀螺仪(用更宽松的最小间隔)。
+  void applyVrView({bool force = false, bool gyro = false}) {
     if (!vrEnabled) {
       return;
     }
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (!force && now - _vrLastApplyMs < vrApplyIntervalMs) {
+    final interval = gyro ? vrGyroApplyIntervalMs : vrApplyIntervalMs;
+    if (!force && now - _vrLastApplyMs < interval) {
       return;
     }
     _vrLastApplyMs = now;
-    _applyVrShader(force: force);
+    _applyVrShader();
   }
 
-  Future<void> _applyVrShader({bool force = false}) async {
+  /// 下发着色器。
+  ///
+  /// 三条硬约束(全部来自 mpv v0.41.0 `vo=gpu` 的实现, 见 `VrShader` 类注释):
+  ///   1. 同一份源码只写一个文件, 且**只写一次**(内容按路径永久缓存);
+  ///   2. 源码没变就不下发(下发即触发整条渲染管线重建);
+  ///   3. 一次只允许一条下发在飞, 期间的请求合并成最后一条
+  ///      (否则命令队列里会堆几十次重建, 表现就是"越动越卡")。
+  Future<void> _applyVrShader() {
+    if (_vrApplyRunning) {
+      // 合并: 记下"还要再来一次", 由在飞的那次结束后用**最新视角**补发
+      _vrApplyQueued = true;
+      return _vrApplyFuture;
+    }
+    _vrApplyRunning = true;
+    _vrApplyFuture = _runApplyVrShader().whenComplete(() {
+      _vrApplyRunning = false;
+      if (_vrApplyQueued) {
+        _vrApplyQueued = false;
+        _applyVrShader();
+      }
+    });
+    return _vrApplyFuture;
+  }
+
+  Future<void> _runApplyVrShader() async {
     final player = _videoPlayerController;
     if (player == null || !vrEnabled) {
       return;
@@ -1019,22 +1082,32 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       projection: vrProjection.value,
       eye: vrEye.value,
       view: vrView.value,
+      angleStep: _vrQuantizer.angleStep,
+      fovStep: _vrQuantizer.fovStep,
     );
-    if (!force && source == _vrShaderSource) {
+    if (source == _vrAppliedSource) {
       return;
     }
-    final firstApply = _vrShaderSource == null;
-    _vrShaderSource = source;
+    final firstApply = _vrAppliedSource == null;
     try {
-      _vrShaderSlot ^= 1;
-      final file = VrShader.write(_vrShaderSlot, source);
-      await player.command(['change-list', 'glsl-shaders', 'set', file]);
+      var filePath = _vrPathBySource[source];
+      if (filePath == null) {
+        if (_vrQuantizer.exhausted) {
+          _reportVrBudgetExhausted();
+          return;
+        }
+        // 新变体: 写一个新文件(旧文件绝不能覆盖, mpv 读到的会是缓存的旧内容)
+        filePath = VrShader.writeUnique(_vrSeq++, source);
+        _vrPathBySource[source] = filePath;
+        _vrQuantizer.countVariant();
+      }
+      await player.command(['change-list', 'glsl-shaders', 'set', filePath]);
+      _vrAppliedSource = source;
       // 只在首次下发时自检(拖拽时每次自检会拖慢手感)
       if (firstApply || vrError.value != null) {
         await _verifyVrShader(player);
       }
     } catch (err) {
-      _vrShaderSource = null;
       vrError.value = '下发着色器失败: $err';
       // 错误要让用户看见, 否则"操作没反应"根本无从判断原因
       SmartDialog.showToast('VR 着色器下发失败: $err');
@@ -1042,6 +1115,21 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         debugPrint('apply vr shader failed: $err');
       }
     }
+  }
+
+  void _reportVrBudgetExhausted() {
+    if (_vrBudgetWarned) {
+      return;
+    }
+    _vrBudgetWarned = true;
+    final msg =
+        '视角更新已达本次播放的上限'
+        '（${_vrQuantizer.budget} 个着色器变体），画面停在当前视角；'
+        '重进播放页可继续';
+    vrError.value = msg;
+    SmartDialog.showToast(msg, displayTime: const Duration(seconds: 6));
+    // 头追是消耗预算最快的来源, 预算用尽后自动停掉, 省得白转
+    setVrGyro(false, persist: false, toast: false);
   }
 
   /// 自检: 确认着色器真的进了渲染管线。
@@ -1087,6 +1175,17 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   Future<Player> _initPlayer() async {
     assert(_videoPlayerController == null);
+    // 新播放器实例意味着 mpv 那边的 gl_video 也是全新的(它的"着色器文件
+    // 内容缓存"和 GLSL 程序缓存都随 gl_video 一起没了), 所以这里可以安全地
+    // 清掉上一实例留下的着色器文件, 并把变体预算/映射表重置。
+    // 播放器活着的时候绝不能清(见 VrShader.purge 注释)。
+    VrShader.purge();
+    _vrPathBySource.clear();
+    _vrSeq = 0;
+    _vrQuantizer.reset();
+    _vrAppliedSource = null;
+    _vrBudgetWarned = false;
+
     final opt = {
       'video-sync': Pref.videoSync,
       if (Platform.isAndroid) 'ao': Pref.audioOutput,
@@ -1165,7 +1264,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     // VR 着色器每次装载新源都要重新下发: PlPlayerController 是单例,
     // 切集/换视频时播放器不会重建, 只放在"新建播放器"分支里会漏掉
     if (vrEnabled) {
-      await _applyVrShader(force: true);
+      await _applyVrShader();
     }
 
     final Map<String, String> extras = {

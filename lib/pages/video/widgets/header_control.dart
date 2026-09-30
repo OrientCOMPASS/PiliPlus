@@ -384,25 +384,28 @@ class HeaderControlState extends State<HeaderControl>
             child: ListView(
               padding: const EdgeInsets.symmetric(vertical: 14),
               children: [
-                ListTile(
-                  dense: true,
-                  onTap: () {
-                    Get.back();
-                    introController.viewLater();
-                  },
-                  leading: const Icon(Icons.watch_later_outlined, size: 20),
-                  title: const Text('添加至「稍后再看」', style: titleStyle),
-                ),
-                if (videoDetailCtr.epId == null)
+                // 稍后再看/笔记都是 B 站账号体系下的功能, 本地媒体没有对应实体
+                if (!isLocalMedia) ...[
                   ListTile(
                     dense: true,
                     onTap: () {
                       Get.back();
-                      videoDetailCtr.showNoteList(context);
+                      introController.viewLater();
                     },
-                    leading: const Icon(Icons.note_alt_outlined, size: 20),
-                    title: const Text('查看笔记', style: titleStyle),
+                    leading: const Icon(Icons.watch_later_outlined, size: 20),
+                    title: const Text('添加至「稍后再看」', style: titleStyle),
                   ),
+                  if (videoDetailCtr.epId == null)
+                    ListTile(
+                      dense: true,
+                      onTap: () {
+                        Get.back();
+                        videoDetailCtr.showNoteList(context);
+                      },
+                      leading: const Icon(Icons.note_alt_outlined, size: 20),
+                      title: const Text('查看笔记', style: titleStyle),
+                    ),
+                ],
                 if (!isFileSource)
                   ListTile(
                     dense: true,
@@ -777,24 +780,28 @@ class HeaderControlState extends State<HeaderControl>
                   descPosType: .subtitle,
                   descStyle: subTitleStyle,
                 ),
-                ListTile(
-                  dense: true,
-                  onTap: () {
-                    Get.back();
-                    showDanmakuPool();
-                  },
-                  leading: const Icon(CustomIcons.dm_on, size: 20),
-                  title: const Text('弹幕列表', style: titleStyle),
-                ),
-                ListTile(
-                  dense: true,
-                  onTap: () {
-                    Get.back();
-                    showSetDanmaku();
-                  },
-                  leading: const Icon(CustomIcons.dm_settings, size: 20),
-                  title: const Text('弹幕设置', style: titleStyle),
-                ),
+                // 本地/局域网视频没有弹幕源(B 站弹幕按 cid 拉取, 离线缓存才有
+                // 同目录的 danmaku 文件), 相关入口一律不展示
+                if (!isLocalMedia) ...[
+                  ListTile(
+                    dense: true,
+                    onTap: () {
+                      Get.back();
+                      showDanmakuPool();
+                    },
+                    leading: const Icon(CustomIcons.dm_on, size: 20),
+                    title: const Text('弹幕列表', style: titleStyle),
+                  ),
+                  ListTile(
+                    dense: true,
+                    onTap: () {
+                      Get.back();
+                      showSetDanmaku();
+                    },
+                    leading: const Icon(CustomIcons.dm_settings, size: 20),
+                    title: const Text('弹幕设置', style: titleStyle),
+                  ),
+                ],
                 ListTile(
                   dense: true,
                   onTap: () {
@@ -884,19 +891,21 @@ class HeaderControlState extends State<HeaderControl>
                     leading: const Icon(Icons.info_outline, size: 20),
                     onTap: () => showPlayerInfo(context, player: player),
                   ),
-                ListTile(
-                  dense: true,
-                  onTap: () {
-                    if (!Accounts.main.isLogin) {
-                      SmartDialog.showToast('账号未登录');
-                      return;
-                    }
-                    Get.back();
-                    PageUtils.reportVideo(videoDetailCtr.aid);
-                  },
-                  leading: const Icon(Icons.error_outline, size: 20),
-                  title: const Text('举报', style: titleStyle),
-                ),
+                // 举报需要 aid, 本地媒体没有(传 0 过去只会报错)
+                if (!isLocalMedia)
+                  ListTile(
+                    dense: true,
+                    onTap: () {
+                      if (!Accounts.main.isLogin) {
+                        SmartDialog.showToast('账号未登录');
+                        return;
+                      }
+                      Get.back();
+                      PageUtils.reportVideo(videoDetailCtr.aid);
+                    },
+                    leading: const Icon(Icons.error_outline, size: 20),
+                    title: const Text('举报', style: titleStyle),
+                  ),
               ],
             ),
           ),
@@ -1758,6 +1767,13 @@ class HeaderControlState extends State<HeaderControl>
 
   late final isFileSource = videoDetailCtr.isFileSource;
 
+  /// 「本地」板块的媒体(本机/局域网)。
+  ///
+  /// 它和离线缓存共用 `isFileSource`(离线语义), 但**不是 B 站内容**, 因此
+  /// 一批只对 B 站视频有意义的入口要单独按它关掉: 弹幕(没有弹幕源)、
+  /// 稍后再看/笔记/举报(全是 B 站接口)。
+  late final isLocalMedia = videoDetailCtr.isLocalMedia;
+
   @override
   Widget build(BuildContext context) {
     final isFullScreen = this.isFullScreen;
@@ -1960,7 +1976,8 @@ class HeaderControlState extends State<HeaderControl>
                       : const SizedBox.shrink(),
                 ),
               ],
-              if (!isPortrait || isFullScreen || PlatformUtils.isDesktop) ...[
+              if (!isLocalMedia &&
+                  (!isPortrait || isFullScreen || PlatformUtils.isDesktop)) ...[
                 SizedBox(
                   width: btnWidth,
                   height: btnHeight,
@@ -2011,20 +2028,21 @@ class HeaderControlState extends State<HeaderControl>
                   ),
                 ),
               ],
-              SizedBox(
-                width: btnWidth,
-                height: btnHeight,
-                child: IconButton(
-                  tooltip: '弹幕设置',
-                  style: btnStyle,
-                  onPressed: showSetDanmaku,
-                  icon: const Icon(
-                    size: 20,
-                    CustomIcons.dm_settings,
-                    color: Colors.white,
+              if (!isLocalMedia)
+                SizedBox(
+                  width: btnWidth,
+                  height: btnHeight,
+                  child: IconButton(
+                    tooltip: '弹幕设置',
+                    style: btnStyle,
+                    onPressed: showSetDanmaku,
+                    icon: const Icon(
+                      size: 20,
+                      CustomIcons.dm_settings,
+                      color: Colors.white,
+                    ),
                   ),
                 ),
-              ),
               if (Platform.isAndroid ||
                   (PlatformUtils.isDesktop && !isFullScreen))
                 SizedBox(

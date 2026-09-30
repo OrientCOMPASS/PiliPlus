@@ -1237,7 +1237,12 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                 videoDetailCtr: videoDetailController,
                 heroTag: heroTag,
               ),
-              danmuWidget: isPipMode && pipNoDanmaku
+              // 本地/局域网视频没有弹幕源, 连组件都不挂:
+              // PlDanmaku 的 initState 会走"离线弹幕文件"分支, 而本地媒体的
+              // dataSource 可能是 NetworkSource(SMB 代理/WebDAV/HTTP),
+              // 之前在那里 `as FileSource` 强转直接抛异常。
+              danmuWidget: (isPipMode && pipNoDanmaku) ||
+                      videoDetailController.isLocalMedia
                   ? null
                   : Obx(
                       () => PlDanmaku(
@@ -1402,52 +1407,55 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                   ),
                 ),
               ),
-            SizedBox(
-              height: 32,
-              child: TextButton(
-                style: const ButtonStyle(
-                  padding: WidgetStatePropertyAll(.zero),
-                ),
-                onPressed: videoDetailController.showShootDanmakuSheet,
-                child: Text(
-                  '发弹幕',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: colorScheme.onSurfaceVariant,
+            // 本地/局域网视频没有弹幕源, 发弹幕与弹幕开关都不展示
+            if (!videoDetailController.isLocalMedia) ...[
+              SizedBox(
+                height: 32,
+                child: TextButton(
+                  style: const ButtonStyle(
+                    padding: WidgetStatePropertyAll(.zero),
+                  ),
+                  onPressed: videoDetailController.showShootDanmakuSheet,
+                  child: Text(
+                    '发弹幕',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: colorScheme.onSurfaceVariant,
+                    ),
                   ),
                 ),
               ),
-            ),
-            SizedBox.square(
-              dimension: 38,
-              child: Obx(
-                () {
-                  final ctr = videoDetailController.plPlayerController;
-                  final enableShowDanmaku = ctr.enableShowDanmaku.value;
-                  return IconButton(
-                    onPressed: () {
-                      final newVal = !enableShowDanmaku;
-                      ctr.enableShowDanmaku.value = newVal;
-                      if (!ctr.tempPlayerConf) {
-                        GStorage.setting.put(
-                          SettingBoxKey.enableShowDanmaku,
-                          newVal,
-                        );
-                      }
-                    },
-                    icon: Icon(
-                      size: 22,
-                      enableShowDanmaku
-                          ? CustomIcons.dm_on
-                          : CustomIcons.dm_off,
-                      color: enableShowDanmaku
-                          ? colorScheme.secondary
-                          : colorScheme.outline,
-                    ),
-                  );
-                },
+              SizedBox.square(
+                dimension: 38,
+                child: Obx(
+                  () {
+                    final ctr = videoDetailController.plPlayerController;
+                    final enableShowDanmaku = ctr.enableShowDanmaku.value;
+                    return IconButton(
+                      onPressed: () {
+                        final newVal = !enableShowDanmaku;
+                        ctr.enableShowDanmaku.value = newVal;
+                        if (!ctr.tempPlayerConf) {
+                          GStorage.setting.put(
+                            SettingBoxKey.enableShowDanmaku,
+                            newVal,
+                          );
+                        }
+                      },
+                      icon: Icon(
+                        size: 22,
+                        enableShowDanmaku
+                            ? CustomIcons.dm_on
+                            : CustomIcons.dm_off,
+                        color: enableShowDanmaku
+                            ? colorScheme.secondary
+                            : colorScheme.outline,
+                      ),
+                    );
+                  },
+                ),
               ),
-            ),
+            ],
             const SizedBox(width: 14),
           ],
         ),

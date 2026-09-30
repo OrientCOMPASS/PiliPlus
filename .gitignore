@@ -149,4 +149,8 @@ pili_release.json
 
 dist
 
+# `test*` 是上游留下的规则, 但它会把整个 test/ 目录一起吃掉
+# (git check-ignore -v test/... 会命中这一行), 于是所有单元测试都进不了仓库、
+# CI 的 `flutter test` 也就形同虚设。这里保留原规则, 再把 test/ 目录显式放回来。
 test*
+!/test/

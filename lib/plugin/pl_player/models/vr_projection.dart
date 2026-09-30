@@ -131,10 +131,8 @@ class VrViewState {
   final double pitch;
   final double fov;
 
-  /// 烘焙进着色器的量化步长: 数值没变化就不必重新加载着色器
-  static const double angleStep = 0.2;
-  static const double fovStep = 0.25;
-
+  /// 量化: 步长由 [VrQuantizer](utils/vr_shader.dart) 按变体用量自适应给出,
+  /// 数值量化后没变化就不必重新下发着色器。
   static double quantize(double value, double step) =>
       (value / step).roundToDouble() * step;
 
@@ -159,7 +157,11 @@ class VrViewState {
   }
 
   /// 与另一个状态在量化后是否等价(等价则无需重载着色器)
-  bool sameRenderState(VrViewState other) =>
+  bool sameRenderState(
+    VrViewState other, {
+    required double angleStep,
+    required double fovStep,
+  }) =>
       quantize(yaw, angleStep) == quantize(other.yaw, angleStep) &&
       quantize(pitch, angleStep) == quantize(other.pitch, angleStep) &&
       quantize(fov, fovStep) == quantize(other.fov, fovStep);

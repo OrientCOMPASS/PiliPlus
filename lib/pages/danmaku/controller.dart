@@ -111,15 +111,23 @@ class PlDanmakuController {
     _initFileDm();
   }
 
+  /// 加载离线缓存目录里的弹幕文件。
+  ///
+  /// 只有 B 站离线缓存([FileSource]: 有 `dir` 目录结构, 弹幕与视频同目录)
+  /// 才有这个文件。**不能无条件强转**: 「本地」板块的局域网媒体
+  /// (SMB 走回环代理 / WebDAV / HTTP)是 [NetworkSource], 之前这里写的是
+  /// `dataSource as FileSource`, 打开播放器菜单触发重建时就抛
+  /// `type 'NetworkSource' is not a subtype of type 'FileSource' in type cast`。
+  /// 正常流程下本地媒体根本不会挂弹幕组件(见 `pages/video/view.dart`),
+  /// 这里再兜一层, 保证任何调用路径都不会崩。
   @pragma('vm:notify-debugger-on-exception')
   Future<void> _initFileDm() async {
+    final dataSource = _plPlayerController.dataSource;
+    if (dataSource is! FileSource) {
+      return;
+    }
     try {
-      final file = File(
-        path.join(
-          (_plPlayerController.dataSource as FileSource).dir,
-          PathUtils.danmakuName,
-        ),
-      );
+      final file = File(path.join(dataSource.dir, PathUtils.danmakuName));
       if (!file.existsSync()) return;
       final bytes = await file.readAsBytes();
       if (bytes.isEmpty) return;

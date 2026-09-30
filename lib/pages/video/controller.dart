@@ -843,6 +843,9 @@ class VideoDetailController extends GetxController
       volume: volume,
       autoFullScreenFlag: autoFullScreenFlag,
       isLocalMedia: isLocalMedia,
+      // VR 自动识别要靠文件名里的关键词(360/sbs/tb/全景...), 而 SMB 播放
+      // 走本机回环代理, 播放地址里没有原文件名, 必须把条目名传进去
+      mediaName: isLocalMedia ? localItem.name : null,
     );
 
     if (isClosed) return;

@@ -184,6 +184,24 @@ abstract final class SmbBrowse {
     );
   }
 
+  /// 主机级地址: `smb://host[:port]`(不带共享名)。
+  /// [host] 必须是能安全写进 URL 的形式(主机名或 IP), 调用方负责。
+  static String hostUri({required String host, int port = 445}) {
+    final portPart = port == 445 ? '' : ':$port';
+    return 'smb://$host$portPart';
+  }
+
+  /// 把"主机内路径"拆成 (共享名, 共享内相对路径)。
+  /// 主机级来源浏览时, 路径的第一段就是共享名。
+  static (String, String) splitSharePath(String path) {
+    final p = normalizePath(path);
+    if (p.isEmpty) {
+      return ('', '');
+    }
+    final i = p.indexOf('\\');
+    return i < 0 ? (p, '') : (p.substring(0, i), p.substring(i + 1));
+  }
+
   /// 把路径统一成"共享内相对路径"(反斜杠分隔、无前导分隔符)
   static String normalizePath(String path) {
     var p = path.replaceAll('/', '\\').replaceAll(RegExp(r'\\{2,}'), '\\');

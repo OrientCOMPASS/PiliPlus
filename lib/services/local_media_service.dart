@@ -113,6 +113,7 @@ abstract final class LocalMediaService {
 
   // ==================== 浏览 ====================
 
+  /// 列目录。失败时返回 [Error](带人类可读的原因)。
   static Future<LoadingState<List<LocalMediaItem>>> list({
     required LocalMediaSource source,
     required String path,
@@ -121,32 +122,60 @@ abstract final class LocalMediaService {
     bool onlyMedia = true,
   }) async {
     try {
-      final items = switch (source.type) {
-        LocalMediaSourceType.device => await _listDevice(
-          source,
-          path,
-          showHidden: showHidden,
-          onlyMedia: onlyMedia,
-        ),
-        LocalMediaSourceType.webdav => await _listWebDav(
-          source,
-          path,
-          showHidden: showHidden,
-          onlyMedia: onlyMedia,
-        ),
-        LocalMediaSourceType.smb => await _listSmb(
-          source,
-          path,
-          showHidden: showHidden,
-          onlyMedia: onlyMedia,
-        ),
-        _ => <LocalMediaItem>[],
-      };
+      final items = await listOrThrow(
+        source: source,
+        path: path,
+        showHidden: showHidden,
+        onlyMedia: onlyMedia,
+      );
       return Success(sortItems(items, sort));
     } catch (err) {
       return Error(_humanize(err, source));
     }
   }
+
+  /// 同 [list], 但**原样抛出**底层异常。
+  ///
+  /// 浏览页需要它来区分"SMB 要账号"(`SmbException.isAuthFailure`)和其它错误:
+  /// 前者要弹凭据框重试并把账号存进来源, 后者只需展示原因。
+  /// 排序交给调用方(浏览页有自己的排序状态)。
+  static Future<List<LocalMediaItem>> listOrThrow({
+    required LocalMediaSource source,
+    required String path,
+    bool showHidden = false,
+    bool onlyMedia = true,
+  }) async {
+    final items = switch (source.type) {
+      LocalMediaSourceType.device => await _listDevice(
+        source,
+        path,
+        showHidden: showHidden,
+        onlyMedia: onlyMedia,
+      ),
+      LocalMediaSourceType.webdav => await _listWebDav(
+        source,
+        path,
+        showHidden: showHidden,
+        onlyMedia: onlyMedia,
+      ),
+      LocalMediaSourceType.smb => await _listSmb(
+        source,
+        path,
+        showHidden: showHidden,
+        onlyMedia: onlyMedia,
+      ),
+      _ => <LocalMediaItem>[],
+    };
+    return onlyMedia ? _filterPlayable(items) : items;
+  }
+
+  /// 错误原因的人类可读版本(浏览页自己 catch 时用)
+  static String humanize(Object err, LocalMediaSource source) =>
+      _humanize(err, source);
+
+  /// 是不是"服务端要求账号/密码不对"
+  static bool isAuthFailure(Object err) =>
+      err is SmbException && err.isAuthFailure;
 
   static Future<List<LocalMediaItem>> _listDevice(
     LocalMediaSource source,
@@ -187,7 +216,7 @@ abstract final class LocalMediaService {
         ),
       );
     }
-    return onlyMedia ? _filterPlayable(items) : items;
+    return items;
   }
 
   /// 目录里条目可能很多, 用异步 stat 避免阻塞 UI 线程
@@ -232,7 +261,7 @@ abstract final class LocalMediaService {
         ),
       );
     }
-    return onlyMedia ? _filterPlayable(items) : items;
+    return items;
   }
 
   static webdav.Client _webDavClient(LocalMediaSource source) =>
@@ -245,16 +274,25 @@ abstract final class LocalMediaService {
         ..setReceiveTimeout(20000)
         ..setSendTimeout(20000);
 
-  /// 浏览 SMB 共享(协议实现见 `services/smb/`, 纯 Dart, 可对真实 smbd 联调)
+  /// 浏览 SMB(协议实现见 `services/smb/`, 纯 Dart, 可对真实 smbd 联调)。
+  ///
+  /// 两种来源:
+  ///   * **主机级**(`smb://NAS`): 根目录列共享(SRVSVC NetShareEnum),
+  ///     共享就是一级子目录; 再往下按 `共享\子路径` 列目录。
+  ///   * **共享级**(`smb://NAS/video`): 直接从共享内路径开始列。
   static Future<List<LocalMediaItem>> _listSmb(
     LocalMediaSource source,
     String path, {
     required bool showHidden,
     required bool onlyMedia,
   }) async {
+    if (source.isSmbHostRoot) {
+      return _listSmbHost(source, path, showHidden: showHidden);
+    }
     final ep = source.smbEndpoint;
     if (ep == null) {
-      throw 'SMB 地址格式不正确, 应为 smb://主机/共享名: ${source.url}';
+      throw 'SMB 地址格式不正确, 应为 smb://主机 或 smb://主机/共享名: '
+          '${source.url}';
     }
     final entries = await SmbBrowse.list(
       host: ep.host,
@@ -267,7 +305,7 @@ abstract final class LocalMediaService {
       address: source.address,
       showHidden: showHidden,
     );
-    final items = <LocalMediaItem>[
+    return [
       for (final e in entries)
         LocalMediaItem(
           name: e.name,
@@ -284,7 +322,79 @@ abstract final class LocalMediaService {
           isDirectory: e.isDirectory,
         ),
     ];
-    return onlyMedia ? _filterPlayable(items) : items;
+  }
+
+  /// 主机级浏览: [path] 是"主机内路径"(第一段为共享名), 空串表示列共享
+  static Future<List<LocalMediaItem>> _listSmbHost(
+    LocalMediaSource source,
+    String path, {
+    required bool showHidden,
+  }) async {
+    final h = source.smbHost;
+    if (h == null) {
+      throw 'SMB 地址格式不正确, 应为 smb://主机: ${source.url}';
+    }
+    final rel = SmbBrowse.normalizePath(path);
+    if (rel.isEmpty) {
+      final result = await SmbBrowse.listShares(
+        host: h.host,
+        port: h.port,
+        user: source.username,
+        password: source.password,
+        domain: source.domain ?? '',
+        address: source.address,
+      );
+      // 与 VLC/资源管理器一致: 只展示可浏览的磁盘共享(IPC$/ADMIN$/打印队列不要)
+      return [
+        for (final share in result.browsable)
+          LocalMediaItem(
+            name: share.name,
+            uri: SmbBrowse.uri(
+              host: h.host,
+              port: h.port,
+              share: share.name,
+              remotePath: '',
+            ),
+            source: source,
+            remotePath: share.name,
+            isDirectory: true,
+          ),
+      ];
+    }
+    final (share, inner) = SmbBrowse.splitSharePath(rel);
+    if (share.isEmpty) {
+      throw 'SMB 路径缺少共享名: $path';
+    }
+    final entries = await SmbBrowse.list(
+      host: h.host,
+      port: h.port,
+      share: share,
+      path: inner,
+      user: source.username,
+      password: source.password,
+      domain: source.domain ?? '',
+      address: source.address,
+      showHidden: showHidden,
+    );
+    return [
+      for (final e in entries)
+        LocalMediaItem(
+          name: e.name,
+          uri: SmbBrowse.uri(
+            host: h.host,
+            port: h.port,
+            share: share,
+            remotePath: e.remotePath,
+          ),
+          source: source,
+          // 主机级来源里 remotePath 必须是"主机内路径"(共享名打头),
+          // 浏览页据此继续下钻
+          remotePath: '$share\\${e.remotePath}',
+          size: e.size,
+          modified: e.modified,
+          isDirectory: e.isDirectory,
+        ),
+    ];
   }
 
   /// 交给播放器之前解析出真正可播的地址:
@@ -295,7 +405,9 @@ abstract final class LocalMediaService {
     if (!source.type.needsProxy) {
       return playbackUrl(item);
     }
-    final ep = source.smbEndpoint;
+    // 以**条目自身的 URI** 为准, 而不是来源的 endpoint:
+    // 主机级来源(`smb://NAS`)的 endpoint 是 null, 共享名在条目 URI 里。
+    final ep = SmbBrowse.parseEndpoint(item.uri) ?? source.smbEndpoint;
     if (ep == null) {
       return playbackUrl(item);
     }
@@ -303,7 +415,7 @@ abstract final class LocalMediaService {
       host: ep.host,
       port: ep.port,
       share: ep.share,
-      remotePath: item.remotePath ?? ep.path,
+      remotePath: ep.path.isEmpty ? (item.remotePath ?? '') : ep.path,
       user: source.username,
       password: source.password,
       domain: source.domain ?? '',
@@ -326,11 +438,27 @@ abstract final class LocalMediaService {
   }
 
   static Future<LoadingState<int>> _testSmb(LocalMediaSource source) async {
-    final ep = source.smbEndpoint;
-    if (ep == null) {
-      return Error('SMB 地址格式不正确, 应为 smb://主机/共享名: ${source.url}');
-    }
     try {
+      // 主机级来源没有共享名, "能不能连"用共享枚举来验证(顺带就是浏览根目录)
+      if (source.isSmbHostRoot) {
+        final h = source.smbHost!;
+        final result = await SmbBrowse.listShares(
+          host: h.host,
+          port: h.port,
+          user: source.username,
+          password: source.password,
+          domain: source.domain ?? '',
+          address: source.address,
+        );
+        return Success(result.browsable.length);
+      }
+      final ep = source.smbEndpoint;
+      if (ep == null) {
+        return Error(
+          'SMB 地址格式不正确, 应为 smb://主机 或 smb://主机/共享名: '
+          '${source.url}',
+        );
+      }
       final count = await SmbBrowse.probe(
         host: ep.host,
         port: ep.port,

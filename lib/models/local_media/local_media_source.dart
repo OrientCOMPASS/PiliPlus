@@ -64,7 +64,8 @@ class LocalMediaSource {
 
   bool get canBrowse => type.browsable;
 
-  /// 解析 `smb://host[:port]/share[/子目录]`
+  /// 解析 `smb://host[:port]/share[/子目录]`。
+  /// URL 里没写共享名(主机级来源, 见 [isSmbHostRoot])时返回 null。
   ({String host, int port, String share, String path})? get smbEndpoint {
     if (type != LocalMediaSourceType.smb) {
       return null;
@@ -85,10 +86,34 @@ class LocalMediaSource {
     );
   }
 
+  /// 只解析主机与端口(不要求 URL 里带共享名)
+  ({String host, int port})? get smbHost {
+    if (type != LocalMediaSourceType.smb) {
+      return null;
+    }
+    final uri = Uri.tryParse(url);
+    if (uri == null || uri.host.isEmpty) {
+      return null;
+    }
+    return (host: uri.host, port: uri.hasPort && uri.port > 0 ? uri.port : 445);
+  }
+
+  /// **主机级** SMB 来源: URL 形如 `smb://NAS`(没有共享名)。
+  ///
+  /// 这是第四轮改的交互: 连接一台主机后直接进入它, 主机本身当作一个目录,
+  /// 它共享出来的每个目录是其中的一级子目录(与 VLC/资源管理器一致),
+  /// 而不是弹窗让用户挑一个共享再单独保存成一条快捷方式。
+  /// 浏览到根时列共享(SRVSVC NetShareEnum), 进入某个共享后再按 SMB 目录列。
+  bool get isSmbHostRoot =>
+      type == LocalMediaSourceType.smb &&
+      smbHost != null &&
+      smbEndpoint == null;
+
   /// 浏览的起始路径。
-  /// SMB: 共享名已经在 [smbEndpoint] 里, 这里只能是**共享内**的相对路径
-  /// (此前的 bug: 返回 `/共享名` 会让浏览器在共享里再找一层同名目录,
+  /// SMB 共享级来源: 共享名已经在 [smbEndpoint] 里, 这里只能是**共享内**的
+  /// 相对路径(此前的 bug: 返回 `/共享名` 会让浏览器在共享里再找一层同名目录,
   /// 打开手动填写的共享必然 OBJECT_NAME_NOT_FOUND)。
+  /// SMB 主机级来源: 空串, 由服务层解释为"列共享"。
   String get rootPath {
     if (type == LocalMediaSourceType.device) {
       return url;

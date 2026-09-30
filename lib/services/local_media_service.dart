@@ -264,6 +264,7 @@ abstract final class LocalMediaService {
       user: source.username,
       password: source.password,
       domain: source.domain ?? '',
+      address: source.address,
       showHidden: showHidden,
     );
     final items = <LocalMediaItem>[
@@ -306,6 +307,7 @@ abstract final class LocalMediaService {
       user: source.username,
       password: source.password,
       domain: source.domain ?? '',
+      address: source.address,
     );
   }
 
@@ -337,6 +339,7 @@ abstract final class LocalMediaService {
         user: source.username,
         password: source.password,
         domain: source.domain ?? '',
+        address: source.address,
       );
       return Success(count);
     } on SmbException catch (e) {
@@ -352,8 +355,12 @@ abstract final class LocalMediaService {
     if (e.isAuthFailure) {
       return '$what: 用户名或密码错误';
     }
-    if (e.status == NtStatus.badNetworkName) {
-      return '$what: 共享名不存在';
+    final isTree = e.context.startsWith('tree connect');
+    if (e.status == NtStatus.badNetworkName ||
+        (isTree && e.isNotFound)) {
+      // 不同服务端对"共享不存在"的回码不一样(Samba 回 BAD_NETWORK_NAME,
+      // 部分 NAS 回 OBJECT_NAME_NOT_FOUND), 统一翻译并给出自动枚举的出路
+      return '$what: 共享不存在或无权访问。可在「网络」页点主机名自动获取共享列表';
     }
     if (e.isNotFound) {
       return '$what: 路径不存在';

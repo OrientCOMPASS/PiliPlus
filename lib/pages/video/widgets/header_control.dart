@@ -532,6 +532,34 @@ class HeaderControlState extends State<HeaderControl>
                       style: subTitleStyle,
                     ),
                   ),
+                  Obx(
+                    () => ListTile(
+                      dense: true,
+                      onTap: () => plPlayerController.setVrGyro(
+                        !plPlayerController.vrGyroEnabled.value,
+                      ),
+                      leading: const Icon(
+                        Icons.screen_rotation_outlined,
+                        size: 20,
+                      ),
+                      title: const Text('陀螺仪视角', style: titleStyle),
+                      subtitle: Text(
+                        plPlayerController.vrGyroEnabled.value
+                            ? '已开启：转动设备环视(随 VR 操作模式自动启停)'
+                            : '未开启：开启后转动设备即可环视',
+                        style: subTitleStyle,
+                      ),
+                      trailing: Icon(
+                        plPlayerController.vrGyroEnabled.value
+                            ? Icons.toggle_on
+                            : Icons.toggle_off,
+                        size: 32,
+                        color: plPlayerController.vrGyroEnabled.value
+                            ? theme.colorScheme.primary
+                            : null,
+                      ),
+                    ),
+                  ),
                   if (plPlayerController.vrProjection.value.isStereo)
                     PopupListTile<VrEye>(
                       dense: true,

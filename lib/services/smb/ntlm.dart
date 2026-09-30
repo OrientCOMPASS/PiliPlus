@@ -265,6 +265,42 @@ class NtlmChallenge {
     );
   }
 
+  /// AV_PAIR 类型 (MS-NLMP 2.2.2.1)
+  static const int avNbComputerName = 0x0001;
+  static const int avNbDomainName = 0x0002;
+  static const int avDnsComputerName = 0x0003;
+  static const int avDnsDomainName = 0x0004;
+  static const int avDnsTreeName = 0x0005;
+
+  /// 解析 TargetInfo 里的 AV_PAIR 序列, 返回 类型 -> UTF-16 值。
+  /// 服务端的权威主机名就在这里(MsvAvDnsComputerName / MsvAvNbComputerName),
+  /// 比 NBSTAT 探测可靠, 用于\"尽量以主机名展示/连接\"。
+  Map<int, String> avPairs() {
+    final out = <int, String>{};
+    final info = targetInfo;
+    if (info.length < 4) {
+      return out;
+    }
+    final bd = ByteData.sublistView(info);
+    var offset = 0;
+    while (offset + 4 <= info.length) {
+      final id = bd.getUint16(offset, Endian.little);
+      final len = bd.getUint16(offset + 2, Endian.little);
+      offset += 4;
+      if (id == 0x0000) {
+        break; // MsvAvEOL
+      }
+      if (len < 0 || offset + len > info.length) {
+        break;
+      }
+      if (len > 0) {
+        out[id] = _decodeUtf16(info.sublist(offset, offset + len));
+      }
+      offset += len;
+    }
+    return out;
+  }
+
   @override
   String toString() =>
       'NtlmChallenge(target=$targetName, flags=0x${flags.toRadixString(16)}, '

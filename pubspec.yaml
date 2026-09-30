@@ -17,7 +17,7 @@ publish_to: "none" # Remove this line if you wish to publish to pub.dev
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
 # update when release
-version: 2.1.5+1
+version: 2.1.5+2
 
 environment:
   sdk: ">=3.13.0"
@@ -150,6 +150,8 @@ dependencies:
   saver_gallery: ^5.0.2
   screen_brightness_platform_interface: ^2.1.0
   screen_retriever: ^0.2.0
+  # VR/全景: 陀螺仪视角(见 lib/plugin/pl_player/utils/vr_gyro.dart)
+  sensors_plus: ^7.0.0
   share_plus: ^13.1.0
   stream_transform: ^2.1.1
   super_sliver_list:

@@ -43,6 +43,7 @@ class LocalMediaSource {
     this.username,
     this.password,
     this.domain,
+    this.address,
   });
 
   final LocalMediaSourceType type;
@@ -53,6 +54,10 @@ class LocalMediaSource {
 
   /// SMB 域/工作组(其它类型用不到)
   final String? domain;
+
+  /// SMB: url 里写的是主机名时, 这里记录发现阶段拿到的 IP 作为解析兜底
+  /// (NBNS 广播在个别网络里会被拦, 有它在就永远连得上)
+  final String? address;
 
   bool get hasCredential =>
       (username?.isNotEmpty ?? false) || (password?.isNotEmpty ?? false);
@@ -80,10 +85,16 @@ class LocalMediaSource {
     );
   }
 
-  /// 浏览的起始路径
+  /// 浏览的起始路径。
+  /// SMB: 共享名已经在 [smbEndpoint] 里, 这里只能是**共享内**的相对路径
+  /// (此前的 bug: 返回 `/共享名` 会让浏览器在共享里再找一层同名目录,
+  /// 打开手动填写的共享必然 OBJECT_NAME_NOT_FOUND)。
   String get rootPath {
     if (type == LocalMediaSourceType.device) {
       return url;
+    }
+    if (type == LocalMediaSourceType.smb) {
+      return smbEndpoint?.path ?? '';
     }
     final uri = Uri.tryParse(url);
     final p = uri?.path ?? '';
@@ -129,6 +140,7 @@ class LocalMediaSource {
     if (username != null) 'username': username,
     if (password != null) 'password': password,
     if (domain != null) 'domain': domain,
+    if (address != null) 'address': address,
   };
 
   static LocalMediaSource? fromJson(Object? json) {
@@ -150,6 +162,7 @@ class LocalMediaSource {
       username: json['username'] as String?,
       password: json['password'] as String?,
       domain: json['domain'] as String?,
+      address: json['address'] as String?,
     );
   }
 
@@ -160,6 +173,7 @@ class LocalMediaSource {
     String? username,
     String? password,
     String? domain,
+    String? address,
   }) => LocalMediaSource(
     type: type ?? this.type,
     name: name ?? this.name,
@@ -167,6 +181,7 @@ class LocalMediaSource {
     username: username ?? this.username,
     password: password ?? this.password,
     domain: domain ?? this.domain,
+    address: address ?? this.address,
   );
 
   @override

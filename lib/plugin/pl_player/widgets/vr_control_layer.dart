@@ -7,10 +7,13 @@ import 'package:material_ui/material_ui.dart';
 
 /// VR 控制层。
 ///
-/// 只有进入「VR 控制模式」后才会被挂到控件树上(此时播放器原有的
-/// MouseInteractiveViewer 不在树里), 因此不会与 PiliPlus 的手势争抢:
+/// 只有进入「VR 控制模式」后才会被挂到控件树上; 同时播放器视图的
+/// `_onPointerDown` 在此模式下**不再把指针喂给底层的点击/双击/长按/拖拽
+/// 识别器**(底层 MouseInteractiveViewer 仍是本层的 child, 命中测试还会
+/// 路过它, 只是它的识别器不进竞技场), 因此手势由本层独占:
 ///   * 单指拖拽 = 环视(偏航/俯仰)
 ///   * 双指缩放 = 视场角
+///   * 陀螺仪转动设备环视(见右侧按钮, 参考 xl_player 头追)
 ///   * 常规手势(左右进退、上下亮度/音量、上下滑全屏、双指缩放画面)全部让位
 /// 同时提供屏幕按钮兜底(长按可连续转动), 以及实时视角读数,
 /// 方便确认操作是否生效。方案参考 PiliPlus#364「切换操作模式」。
@@ -170,6 +173,17 @@ class _VrControlLayerState extends State<VrControlLayer> {
                   onStep: _c.resetVrView,
                 ),
                 Obx(
+                  () => _VrStepButton(
+                    icon: Icons.screen_rotation_outlined,
+                    tooltip: _c.vrGyroEnabled.value
+                        ? '陀螺仪环视: 开(点按关闭)'
+                        : '陀螺仪环视: 关(点按开启)',
+                    repeat: false,
+                    active: _c.vrGyroEnabled.value,
+                    onStep: () => _c.setVrGyro(!_c.vrGyroEnabled.value),
+                  ),
+                ),
+                Obx(
                   () => _c.vrProjection.value.isStereo
                       ? _VrStepButton(
                           icon: Icons.visibility_outlined,
@@ -251,12 +265,16 @@ class _VrStepButton extends StatefulWidget {
     required this.tooltip,
     required this.onStep,
     this.repeat = true,
+    this.active = false,
   });
 
   final IconData icon;
   final String tooltip;
   final VoidCallback onStep;
   final bool repeat;
+
+  /// 开关型按钮的"已激活"高亮
+  final bool active;
 
   @override
   State<_VrStepButton> createState() => _VrStepButtonState();
@@ -306,8 +324,13 @@ class _VrStepButtonState extends State<_VrStepButton> {
           width: 38,
           height: 38,
           decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.45),
+            color: widget.active
+                ? Colors.blue.withValues(alpha: 0.65)
+                : Colors.black.withValues(alpha: 0.45),
             shape: BoxShape.circle,
+            border: widget.active
+                ? Border.all(color: Colors.white54, width: 1.5)
+                : null,
           ),
           child: Icon(widget.icon, size: 22, color: Colors.white),
         ),

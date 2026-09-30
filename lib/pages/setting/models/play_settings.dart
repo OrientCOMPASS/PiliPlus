@@ -312,6 +312,13 @@ List<SettingsModel> get playSettings => [
     getSubtitle: () => '当前:「${Pref.vrDefaultFov.toStringAsFixed(0)}°」',
     onTap: _showVrFovDialog,
   ),
+  const SwitchModel(
+    title: 'VR 陀螺仪视角',
+    subtitle: '进入 VR 操作模式后转动设备环视(参考头追), 播放中可随时开关',
+    leading: Icon(Icons.screen_rotation_outlined),
+    setKey: SettingBoxKey.vrGyro,
+    defaultVal: true,
+  ),
   PopupModel(
     title: 'VR 立体片源眼位',
     leading: const Icon(Icons.visibility_outlined),

@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart' show Hmac, sha256;
 
 import 'package:PiliPlus/services/smb/ntlm.dart';
+import 'package:PiliPlus/services/smb/smb_name.dart';
 
 /// SMB2 状态码(只列出会用到的)
 abstract final class NtStatus {
@@ -18,6 +19,7 @@ abstract final class NtStatus {
   static const int moreProcessingRequired = 0xc0000016;
   static const int invalidParameter = 0xc000000d;
   static const int unsuccessful = 0xc0000001;
+  static const int bufferOverflow = 0x80000005;
   static const int noMoreFiles = 0x80000006;
   static const int endOfFile = 0xc0000011;
   static const int objectNameNotFound = 0xc0000034;
@@ -35,6 +37,7 @@ abstract final class NtStatus {
     moreProcessingRequired: 'MORE_PROCESSING_REQUIRED',
     invalidParameter: 'INVALID_PARAMETER',
     unsuccessful: 'UNSUCCESSFUL',
+    bufferOverflow: 'BUFFER_OVERFLOW',
     pending: 'PENDING',
     noMoreFiles: 'NO_MORE_FILES',
     endOfFile: 'END_OF_FILE',
@@ -57,7 +60,7 @@ abstract final class NtStatus {
 }
 
 class SmbException implements Exception {
-  SmbException(this.status, [this.context = '']);
+  const SmbException(this.status, [this.context = '']);
 
   final int status;
   final String context;
@@ -73,6 +76,47 @@ class SmbException implements Exception {
   @override
   String toString() =>
       'SmbException: $statusText${context.isEmpty ? '' : ' [$context]'}';
+}
+
+/// 服务端自报的身份(NTLMSSP CHALLENGE 的 TargetName 与 AV_PAIR)。
+/// 权威主机名来自这里: 优先 DNS 名, 其次 NetBIOS 名, 最后 TargetName。
+class SmbServerInfo {
+  const SmbServerInfo({
+    this.targetName = '',
+    this.netbiosName = '',
+    this.dnsName = '',
+    this.netbiosDomain = '',
+    this.dnsDomain = '',
+  });
+
+  final String targetName;
+  final String netbiosName;
+  final String dnsName;
+  final String netbiosDomain;
+  final String dnsDomain;
+
+  /// 最适合展示/写进 smb:// 地址的名字(不含域前缀)。
+  /// 优先真正的 FQDN(带点), 其次 NetBIOS 名; Samba 在没配 DNS 时会发
+  /// `c-xxxx` 这类合成名, 排在 NetBIOS 名之后。
+  String? get bestName {
+    final candidates = [
+      if (dnsName.contains('.')) dnsName,
+      netbiosName,
+      dnsName,
+      targetName,
+    ];
+    for (final candidate in candidates) {
+      final name = candidate.split('.').first.trim();
+      if (name.isNotEmpty) {
+        return name;
+      }
+    }
+    return null;
+  }
+
+  @override
+  String toString() =>
+      'SmbServerInfo(target=$targetName, nb=$netbiosName, dns=$dnsName)';
 }
 
 /// 目录项
@@ -154,14 +198,19 @@ class Smb2Client {
     this.port = 445,
     this.workstation = 'PILIPLUS',
     this.maxReadSize = 1 << 20,
+    this.fallbackAddress,
   });
 
+  /// 主机名或 IP。主机名在 [connect] 时经 DNS/NBNS 解析(见 `smb_name.dart`)
   final String host;
   final int port;
   final String workstation;
 
   /// 单次 READ 请求的最大字节数(会被服务端 MaxReadSize 再夹一次)
   final int maxReadSize;
+
+  /// 解析失败时的兜底 IP(发现阶段拿到的地址)
+  final String? fallbackAddress;
 
   Socket? _socket;
   StreamSubscription<Uint8List>? _subscription;
@@ -197,6 +246,12 @@ class Smb2Client {
   bool get isSigningActive => _signingEnabled && _sessionKey != null;
   bool get isConnected => _socket != null && !_closed;
 
+  /// 服务端身份(CHALLENGE 解析成功后可用)
+  SmbServerInfo? serverInfo;
+
+  /// 实际解析并连接到的 IP 地址
+  String? resolvedAddress;
+
   // ==================== 连接与协商 ====================
 
   Future<void> connect({
@@ -205,7 +260,10 @@ class Smb2Client {
     String domain = '',
     Duration timeout = const Duration(seconds: 10),
   }) async {
-    final socket = await Socket.connect(host, port, timeout: timeout);
+    // 尽量按主机名连接: IP 字面量直通, 名字走 DNS -> NBNS -> 兜底 IP
+    final address = await SmbName.resolve(host, fallbackAddress: fallbackAddress);
+    resolvedAddress = address;
+    final socket = await Socket.connect(address, port, timeout: timeout);
     socket.setOption(SocketOption.tcpNoDelay, true);
     _socket = socket;
     _attach(socket);
@@ -313,7 +371,12 @@ class Smb2Client {
   }
 
   /// 组装 SMB2 消息: 64 字节头 + body, 必要时签名
-  Uint8List _build(int command, Uint8List body, {int creditCharge = 1}) {
+  Uint8List _build(
+    int command,
+    Uint8List body, {
+    int creditCharge = 1,
+    int? treeId,
+  }) {
     final charge = creditCharge < 1 ? 1 : creditCharge;
     final message = Uint8List(64 + body.length);
     final bd = ByteData.sublistView(message);
@@ -335,7 +398,7 @@ class Smb2Client {
     bd.setUint32(20, 0, Endian.little); // NextCommand
     bd.setUint64(24, _messageId, Endian.little);
     bd.setUint32(32, 0, Endian.little); // ProcessId
-    bd.setUint32(36, _treeId, Endian.little);
+    bd.setUint32(36, treeId ?? _treeId, Endian.little);
     bd.setUint64(40, _sessionId, Endian.little);
     message.setRange(64, message.length, body);
 
@@ -459,6 +522,15 @@ class Smb2Client {
     if (parsed == null) {
       throw const SocketExceptionLike('smb: 无法解析 NTLMSSP Type2');
     }
+    // 服务端身份: 展示与"尽量用主机名"都靠它(AV_PAIR 优先于 TargetName)
+    final av = parsed.avPairs();
+    serverInfo = SmbServerInfo(
+      targetName: parsed.targetName,
+      netbiosName: av[NtlmChallenge.avNbComputerName] ?? '',
+      dnsName: av[NtlmChallenge.avDnsComputerName] ?? '',
+      netbiosDomain: av[NtlmChallenge.avNbDomainName] ?? '',
+      dnsDomain: av[NtlmChallenge.avDnsDomainName] ?? '',
+    );
 
     // ---- Type 3 ----
     Uint8List sessionKey;
@@ -559,9 +631,13 @@ class Smb2Client {
   }
 
   /// 打开一个对象, 返回 (persistentFileId, volatileFileId, endOfFile, attributes)
+  ///
+  /// [pipe] 为 true 时按命名管道打开(读写权限, 不带目录/非目录约束),
+  /// 供 SRVSVC 共享枚举使用。
   Future<({int persistent, int volatile, int size, int attributes})> _create(
     String relativePath, {
     required bool directory,
+    bool pipe = false,
   }) async {
     final name = _utf16(relativePath);
     // StructureSize=57 意味着 body 至少要 57 字节: 打开共享根目录时文件名为空,
@@ -575,24 +651,42 @@ class Smb2Client {
     bd.setUint64(8, 0, Endian.little); // SmbCreateFlags
     bd.setUint64(16, 0, Endian.little); // Reserved
     const fileReadData = 0x00000001;
+    const fileWriteData = 0x00000002;
+    const fileAppendData = 0x00000004;
+    const fileReadEa = 0x00000008;
+    const fileWriteEa = 0x00000010;
     const fileListDirectory = 0x00000001;
     const fileReadAttributes = 0x00000080;
     const readControl = 0x00020000;
     const synchronize = 0x00100000;
+    // 管道的期望访问与 smbclient 打开 \srvsvc 时一致(0x0012019f)
     bd.setUint32(
       24,
-      (directory ? fileListDirectory : fileReadData) |
-          fileReadAttributes |
-          readControl |
-          synchronize,
+      pipe
+          ? fileReadData |
+                fileWriteData |
+                fileAppendData |
+                fileReadEa |
+                fileWriteEa |
+                fileReadAttributes |
+                readControl |
+                synchronize
+          : (directory ? fileListDirectory : fileReadData) |
+                fileReadAttributes |
+                readControl |
+                synchronize,
       Endian.little,
     );
     // 与 smbclient 抓包一致: 目录用 FILE_DIRECTORY_FILE, 文件用
     // FILE_NON_DIRECTORY_FILE(0x40)
-    bd.setUint32(28, directory ? 0x10 : 0, Endian.little); // FileAttributes
+    bd.setUint32(28, pipe ? 0 : (directory ? 0x10 : 0), Endian.little);
     bd.setUint32(32, 0x00000007, Endian.little); // ShareAccess R|W|D
     bd.setUint32(36, 1, Endian.little); // CreateDisposition = FILE_OPEN
-    bd.setUint32(40, directory ? 0x00000001 : 0x00000040, Endian.little);
+    bd.setUint32(
+      40,
+      pipe ? 0 : (directory ? 0x00000001 : 0x00000040),
+      Endian.little,
+    ); // CreateOptions
     bd.setUint16(44, 64 + 56, Endian.little); // NameOffset
     bd.setUint16(46, name.length, Endian.little);
     bd.setUint32(48, 0, Endian.little); // CreateContextsOffset
@@ -617,6 +711,32 @@ class Smb2Client {
       size: size,
       attributes: attributes,
     );
+  }
+
+  /// 在当前树(需先连接 IPC 管理共享)上打开一个命名管道
+  Future<({int persistent, int volatile, int size, int attributes})>
+  createPipe(String pipeName) {
+    return _create(_normalizePath(pipeName), directory: false, pipe: true);
+  }
+
+  Future<void> closeFile(int persistent, int volatile) =>
+      _close(persistent, volatile);
+
+  /// 断开当前树连接(树 ID 清零; 失败忽略)
+  Future<void> treeDisconnect() async {
+    if (_treeId == 0) {
+      return;
+    }
+    final tree = _treeId;
+    _treeId = 0;
+    try {
+      final body = Uint8List(4);
+      ByteData.sublistView(body).setUint16(0, 4, Endian.little);
+      _sendMessage(_build(0x0004, body, treeId: tree));
+      await _readMessage();
+    } catch (_) {
+      // 断开失败无所谓
+    }
   }
 
   Future<void> _close(int persistent, int volatile) async {
@@ -856,6 +976,99 @@ class Smb2Client {
   }
 
   // ==================== 其它 ====================
+
+  /// 向命名管道写入完整数据(SMB2 WRITE, 支持分段与部分写入重试)
+  Future<void> pipeWrite(int persistent, int volatile, Uint8List data) async {
+    var offset = 0;
+    while (offset < data.length) {
+      final chunkLen = data.length - offset;
+      // WRITE body 固定部分 48 字节, DataOffset = 64 + 48
+      final body = Uint8List(48 + chunkLen);
+      final bd = ByteData.sublistView(body);
+      bd.setUint16(0, 49, Endian.little); // StructureSize
+      bd.setUint16(2, 64 + 48, Endian.little); // DataOffset
+      bd.setUint32(4, chunkLen, Endian.little); // Length
+      bd.setUint64(8, 0, Endian.little); // Offset(管道忽略)
+      bd.setUint64(16, persistent, Endian.little);
+      bd.setUint64(24, volatile, Endian.little);
+      bd.setUint32(32, 0, Endian.little); // Channel
+      bd.setUint32(36, 0, Endian.little); // RemainingBytes
+      bd.setUint16(40, 0, Endian.little); // WriteChannelInfoOffset
+      bd.setUint16(42, 0, Endian.little); // WriteChannelInfoLength
+      bd.setUint32(44, 0, Endian.little); // Flags
+      body.setRange(48, body.length, data, offset);
+
+      final charge = (chunkLen + 65535) ~/ 65536;
+      final res = await _request(
+        0x0009,
+        body,
+        creditCharge: charge < 1 ? 1 : charge,
+      );
+      final bd2 = ByteData.sublistView(res);
+      final status = bd2.getUint32(8, Endian.little);
+      if (status != NtStatus.success) {
+        throw SmbException(status, 'pipe write @$offset+$chunkLen');
+      }
+      final count = bd2.getUint32(64 + 4, Endian.little);
+      if (count <= 0) {
+        throw const SocketExceptionLike('smb: 管道写入返回 0 字节');
+      }
+      offset += count;
+    }
+  }
+
+  /// 从命名管道读一次数据。
+  /// STATUS_BUFFER_OVERFLOW 表示"还有更多", 与 SUCCESS 一样返回已读数据;
+  /// 其余状态抛 [SmbException]。
+  Future<Uint8List> pipeRead(int persistent, int volatile, int length) async {
+    if (_creditsAvailable < 1) {
+      await echo();
+    }
+    var want = length < 1 ? 1 : length;
+    final budget = _creditsAvailable * 65536;
+    if (budget > 0 && want > budget) {
+      want = budget;
+    }
+    final body = Uint8List(49);
+    final bd = ByteData.sublistView(body);
+    bd.setUint16(0, 49, Endian.little); // StructureSize
+    body[2] = 0; // Padding
+    body[3] = 0; // Flags
+    bd.setUint32(4, want, Endian.little);
+    bd.setUint64(8, 0, Endian.little); // Offset(管道忽略)
+    bd.setUint64(16, persistent, Endian.little);
+    bd.setUint64(24, volatile, Endian.little);
+    bd.setUint32(32, 1, Endian.little); // MinimumCount = 1
+    bd.setUint32(36, 0, Endian.little); // Channel
+    bd.setUint32(40, 0, Endian.little); // RemainingBytes
+    bd.setUint16(44, 0, Endian.little); // ReadChannelInfoOffset
+    bd.setUint16(46, 0, Endian.little); // ReadChannelInfoLength
+
+    final charge = (want + 65535) ~/ 65536;
+    final res = await _request(
+      0x0008,
+      body,
+      creditCharge: charge < 1 ? 1 : charge,
+    );
+    final bd2 = ByteData.sublistView(res);
+    final status = bd2.getUint32(8, Endian.little);
+    if (status != NtStatus.success && status != NtStatus.bufferOverflow) {
+      if (status == NtStatus.endOfFile) {
+        return Uint8List(0);
+      }
+      throw SmbException(status, 'pipe read');
+    }
+    final dataOffset = bd2.getUint8(64 + 2);
+    final dataLength = bd2.getUint32(64 + 4, Endian.little);
+    if (dataLength == 0) {
+      return Uint8List(0);
+    }
+    final start = dataOffset >= 64 ? dataOffset - 64 : dataOffset;
+    if (start < 0 || start + dataLength > res.length - 64) {
+      throw const SocketExceptionLike('smb: 管道 READ 响应的数据区越界');
+    }
+    return res.sublist(64 + start, 64 + start + dataLength);
+  }
 
   Future<void> echo() async {
     final body = Uint8List(4);

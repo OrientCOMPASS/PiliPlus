@@ -31,6 +31,7 @@ import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/models/video_fit_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/vr_projection.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
+import 'package:PiliPlus/plugin/pl_player/utils/vr_gyro.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/vr_shader.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/accounts.dart';
@@ -774,6 +775,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// 上一次烘焙的着色器源码, 避免同一视角重复写盘与重复重载
   String? _vrShaderSource;
 
+  /// 着色器槽位(0/1 交替): 见 `VrShader` 头部注释, 相同路径的
+  /// `change-list glsl-shaders set` 会被 mpv 忽略, 必须让选项值真的变化
+  int _vrShaderSlot = 0;
+
   /// 着色器重载最小间隔: 拖拽时按此节流, 手势结束再强制落一次
   static const int vrApplyIntervalMs = 45;
   int _vrLastApplyMs = 0;
@@ -795,6 +800,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     vrView.value = VrViewState(fov: Pref.vrDefaultFov);
     _vrShaderSource = null;
     _vrLastApplyMs = 0;
+    setVrGyro(vrEnabled && Pref.vrGyro, persist: false, toast: false);
     if (vrEnabled) {
       SmartDialog.showToast(
         '已识别为${vrProjection.value.label}片源，已进入 VR 操作模式\n'
@@ -828,10 +834,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (value) {
       // 进入时强制下发一次: 单例播放器可能是在着色器应用之前就已创建
       applyVrView(force: true);
+      // 陀螺仪跟随设置项自动启停(退出控制模式即停, 不与常规手势抢方向)
+      setVrGyro(Pref.vrGyro, persist: false, toast: false);
       SmartDialog.showToast(
         'VR 操作模式：单指拖拽环视，双指缩放视场角\n点按顶部提示条可退回常规操作',
         displayTime: const Duration(milliseconds: 3000),
       );
+    } else {
+      setVrGyro(false, persist: false, toast: false);
     }
   }
 
@@ -848,8 +858,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       await _applyVrShader(force: true);
       // 选定布局即进入 VR 操作模式, 可随时退出以使用常规手势
       vrControlMode.value = true;
+      setVrGyro(Pref.vrGyro, persist: false, toast: false);
     } else {
       vrControlMode.value = false;
+      setVrGyro(false, persist: false, toast: false);
       // 退出 VR: 恢复超分辨率着色器(未开启时其内部会清空着色器列表)
       _vrShaderSource = null;
       await setShader();
@@ -885,7 +897,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   }
 
   /// 拖拽改变视角。dx/dy 为像素位移, 手势方向与画面移动方向一致
-  /// (手指右滑 -> 画面右移 -> 视角左转), 与主流 360 播放器手感一致。
+  /// (手指右滑 -> 画面右移 -> 视角左转; 手指下滑 -> 画面下移 -> 看到更高处,
+  /// 俯仰角增大), 与主流 360 播放器手感一致。
   void onVrLook(
     double dx,
     double dy, {
@@ -901,7 +914,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     vrView.value = cur
         .copyWith(
           yaw: cur.yaw - dx * scale / max(width, 1.0),
-          pitch: cur.pitch - dy * scale / max(height, 1.0),
+          pitch: cur.pitch + dy * scale / max(height, 1.0),
         )
         .clamped(vrProjection.value);
     applyVrView();
@@ -924,6 +937,58 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       return;
     }
     setVrFov(vrView.value.fov / factor);
+  }
+
+  // ==================== VR 陀螺仪 ====================
+
+  /// 陀螺仪视角(运行时开关; 新会话的默认值见 `Pref.vrGyro`)。
+  /// 参考 xl_player 的头部追踪: 进入 VR 操作模式后转动设备即可环视,
+  /// 拖拽与按钮仍可微调, 两种输入叠加在同一个 `vrView` 上。
+  final RxBool vrGyroEnabled = RxBool(false);
+
+  VrGyroTracker? _vrGyroTracker;
+
+  void setVrGyro(bool value, {bool persist = true, bool toast = true}) {
+    if (value && !vrEnabled) {
+      if (toast) {
+        SmartDialog.showToast('请先在「播放器设置 → VR/全景」选择片源布局');
+      }
+      return;
+    }
+    if (persist) {
+      GStorage.setting.put(SettingBoxKey.vrGyro, value);
+    }
+    if (vrGyroEnabled.value == value) {
+      return;
+    }
+    vrGyroEnabled.value = value;
+    if (value) {
+      final tracker = _vrGyroTracker ??= VrGyroTracker();
+      tracker.start(onLook: _onVrGyroLook);
+      if (toast) {
+        SmartDialog.showToast(
+          '陀螺仪已开启：转动设备环视\n拖拽/方向按钮仍可微调视角',
+        );
+      }
+    } else {
+      _vrGyroTracker?.stop();
+    }
+  }
+
+  void _onVrGyroLook(double dyaw, double dpitch) {
+    if (!vrEnabled || !vrGyroEnabled.value) {
+      return;
+    }
+    final cur = vrView.value;
+    final next = cur
+        .copyWith(yaw: cur.yaw + dyaw, pitch: cur.pitch + dpitch)
+        .clamped(vrProjection.value);
+    // 量化后没有变化就不打扰着色器(也避免无意义的重载)
+    if (next.sameRenderState(cur)) {
+      return;
+    }
+    vrView.value = next;
+    applyVrView();
   }
 
   /// 视角摆正
@@ -961,7 +1026,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final firstApply = _vrShaderSource == null;
     _vrShaderSource = source;
     try {
-      final file = VrShader.write(source);
+      _vrShaderSlot ^= 1;
+      final file = VrShader.write(_vrShaderSlot, source);
       await player.command(['change-list', 'glsl-shaders', 'set', file]);
       // 只在首次下发时自检(拖拽时每次自检会拖慢手感)
       if (firstApply || vrError.value != null) {
@@ -986,7 +1052,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   Future<void> _verifyVrShader(NativePlayer player) async {
     try {
       final shaders = player.getProperty('glsl-shaders');
-      if (!shaders.contains(VrShader.fileName)) {
+      if (!shaders.contains(VrShader.filePrefix)) {
         _reportVrError('glsl-shaders 里没有着色器(mpv 拒绝了下发): $shaders');
         return;
       }
@@ -1849,6 +1915,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     vrProjection.value = VrProjection.off;
     vrControlMode.value = false;
     vrError.value = null;
+    vrGyroEnabled.value = false;
+    _vrGyroTracker?.stop();
+    _vrGyroTracker = null;
     _vrShaderSource = null;
     isLocalMedia = false;
     _stopOrientationListener();

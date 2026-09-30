@@ -3,9 +3,13 @@ import 'package:PiliPlus/models/local_media/local_media_item.dart';
 import 'package:PiliPlus/models/local_media/local_media_source.dart';
 import 'package:PiliPlus/pages/local_media/browser.dart';
 import 'package:PiliPlus/pages/local_media/library.dart';
+import 'package:PiliPlus/pages/local_media/widgets/smb_dialogs.dart';
 import 'package:PiliPlus/pages/local_media/widgets/source_editor.dart';
 import 'package:PiliPlus/services/local_media_service.dart';
+import 'package:PiliPlus/services/smb/smb2_client.dart';
+import 'package:PiliPlus/services/smb/smb_browse.dart';
 import 'package:PiliPlus/services/smb/smb_discovery.dart';
+import 'package:PiliPlus/services/smb/smb_name.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
 import 'package:material_ui/material_ui.dart';
@@ -147,20 +151,141 @@ class LocalMediaController extends GetxController {
     );
   }
 
-  /// 发现的主机 -> 让用户填共享名与凭据 -> 保存并打开
+  /// 发现的主机 -> 自动枚举共享(SRVSVC, 与 VLC/资源管理器同款行为) ->
+  /// 选共享 -> 保存并打开。
+  /// 匿名被拒时弹凭据框重试; 枚举失败(服务端禁用 RPC 等)退回手动输入。
   Future<void> openDiscoveredHost(
     BuildContext context,
     SmbHost host,
   ) async {
+    // 复用同主机已保存来源的凭据, 免得每次都输
+    final saved = _savedSourceForHost(host);
+    String? user = saved?.username;
+    String? password = saved?.password;
+    var domain = saved?.domain ?? '';
+    var askedForCredentials = false;
+
+    SmbShareListResult? result;
+    String? errorText;
+    while (true) {
+      SmartDialog.showLoading(msg: '正在获取「${host.displayName}」的共享列表…');
+      try {
+        result = await SmbBrowse.listShares(
+          host: host.address,
+          port: host.port,
+          user: user,
+          password: password,
+          domain: domain,
+        );
+        SmartDialog.dismiss();
+        errorText = null;
+        break;
+      } on SmbException catch (e) {
+        SmartDialog.dismiss();
+        if (e.isAuthFailure && !askedForCredentials) {
+          askedForCredentials = true;
+          if (!context.mounted) {
+            return;
+          }
+          final creds = await showSmbCredentialsDialog(
+            context,
+            hostLabel: host.displayName,
+            initialUser: user,
+          );
+          if (creds == null) {
+            return;
+          }
+          user = creds.user.isEmpty ? null : creds.user;
+          password = creds.password;
+          domain = creds.domain;
+          continue;
+        }
+        errorText = '获取共享列表失败: ${e.statusText}';
+        break;
+      } catch (e) {
+        SmartDialog.dismiss();
+        errorText = '获取共享列表失败: $e';
+        break;
+      }
+    }
+    if (!context.mounted) {
+      return;
+    }
+
+    final serverName = result?.serverInfo?.bestName ?? host.name;
+    if (result == null) {
+      // RPC 被禁用/网络异常: 回落到手动输入(旧行为), 但把失败原因告诉用户
+      if (errorText != null) {
+        SmartDialog.showToast(errorText);
+      }
+      await _manualAddHost(context, host, serverName, user, password, domain);
+      return;
+    }
+
+    final pick = await showSmbSharePicker(
+      context,
+      hostLabel: serverName ?? host.address,
+      address: '${host.address}:${host.port}',
+      shares: result.browsable,
+    );
+    if (pick == null) {
+      return;
+    }
+    if (pick.manual || pick.share == null) {
+      await _manualAddHost(context, host, serverName, user, password, domain);
+      return;
+    }
+    final share = pick.share!;
+    // 尽量用主机名: URL 写 smb://<主机名>/<共享>, 同时记录 IP 作为解析兜底
+    final urlHost = _urlSafeHostName(serverName) ?? host.address;
+    final source = LocalMediaSource(
+      type: LocalMediaSourceType.smb,
+      name: share.name,
+      url: SmbBrowse.uri(
+        host: urlHost,
+        port: host.port,
+        share: share.name,
+        remotePath: '',
+      ),
+      username: user,
+      password: (password == null || password.isEmpty) ? null : password,
+      domain: domain.isEmpty ? null : domain,
+      address: SmbName.isIpLiteral(host.address) ? host.address : null,
+    );
+    await _testAndOpen(source);
+  }
+
+  /// 手动输入共享地址(自动枚举失败时的兜底, 预填已知信息)
+  Future<void> _manualAddHost(
+    BuildContext context,
+    SmbHost host,
+    String? serverName,
+    String? user,
+    String? password,
+    String domain,
+  ) async {
     final preset = LocalMediaSource(
       type: LocalMediaSourceType.smb,
       name: host.displayName,
-      url: 'smb://${host.address}/',
+      url: 'smb://${_urlSafeHostName(serverName) ?? host.address}/',
+      username: user,
+      password: (password == null || password.isEmpty) ? null : password,
+      domain: domain.isEmpty ? null : domain,
+      address: SmbName.isIpLiteral(host.address) ? host.address : null,
     );
     final source = await showSourceEditor(context, initial: preset);
     if (source == null) {
       return;
     }
+    // 编辑器里改过 URL 也不丢 IP 兜底
+    await _testAndOpen(
+      source.address == null && preset.address != null
+          ? source.copyWith(address: preset.address)
+          : source,
+    );
+  }
+
+  Future<void> _testAndOpen(LocalMediaSource source) async {
     SmartDialog.showLoading(msg: '连接中');
     final res = await LocalMediaService.testConnection(source);
     SmartDialog.dismiss();
@@ -173,6 +298,33 @@ class LocalMediaController extends GetxController {
       case _:
         break;
     }
+  }
+
+  /// 找到同一台主机上已保存的 SMB 来源(按 IP 或主机名匹配)
+  LocalMediaSource? _savedSourceForHost(SmbHost host) {
+    for (final source in savedSources) {
+      if (source.type != LocalMediaSourceType.smb) {
+        continue;
+      }
+      final ep = source.smbEndpoint;
+      if (ep == null) {
+        continue;
+      }
+      if (ep.host == host.address ||
+          source.address == host.address ||
+          (host.name != null && ep.host == host.name)) {
+        return source;
+      }
+    }
+    return null;
+  }
+
+  /// 主机名能不能安全地写进 URL(否则退回 IP)
+  static String? _urlSafeHostName(String? name) {
+    if (name == null || name.isEmpty) {
+      return null;
+    }
+    return RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(name) ? name : null;
   }
 
   Future<void> addSourceFromDialog(BuildContext context) async {

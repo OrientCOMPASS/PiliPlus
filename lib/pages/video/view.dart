@@ -961,7 +961,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                     child: tabBarView(
                       controller: videoDetailController.tabCtr,
                       children: [
-                        if (videoDetailController.isFileSource)
+                        if (videoDetailController.isLocalMedia)
+                          localMediaIntroPanel()
+                        else if (videoDetailController.isFileSource)
                           localIntroPanel()
                         else if (showIntro)
                           KeepAliveWrapper(

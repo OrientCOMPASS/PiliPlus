@@ -1,5 +1,23 @@
 import 'package:PiliPlus/services/smb/local_media_proxy.dart';
 import 'package:PiliPlus/services/smb/smb2_client.dart';
+import 'package:PiliPlus/services/smb/srvsvc.dart';
+
+/// [SmbBrowse.listShares] 的结果: 共享列表 + 服务端身份 + 实际连上的地址
+class SmbShareListResult {
+  const SmbShareListResult({
+    required this.shares,
+    this.serverInfo,
+    this.resolvedAddress,
+  });
+
+  final List<SmbShare> shares;
+  final SmbServerInfo? serverInfo;
+  final String? resolvedAddress;
+
+  /// 用户视角可浏览的共享(过滤打印/IPC/隐藏共享), 与 VLC 行为一致
+  List<SmbShare> get browsable =>
+      shares.where((s) => s.isBrowsable).toList();
+}
 
 /// SMB 共享里的一条记录(纯 Dart, 不依赖 Flutter, 便于在沙盒里直接联调)
 class SmbBrowseEntry {
@@ -40,9 +58,14 @@ abstract final class SmbBrowse {
     String? password,
     String domain = '',
     bool showHidden = false,
+    String? address,
     Duration timeout = const Duration(seconds: 10),
   }) async {
-    final client = Smb2Client(host: host, port: port);
+    final client = Smb2Client(
+      host: host,
+      port: port,
+      fallbackAddress: address,
+    );
     try {
       await client.connect(
         user: user,
@@ -83,6 +106,7 @@ abstract final class SmbBrowse {
     String? user,
     String? password,
     String domain = '',
+    String? address,
     Duration timeout = const Duration(seconds: 8),
   }) async {
     final entries = await list(
@@ -93,9 +117,46 @@ abstract final class SmbBrowse {
       user: user,
       password: password,
       domain: domain,
+      address: address,
       timeout: timeout,
     );
     return entries.length;
+  }
+
+  /// 枚举一台主机的共享列表(SRVSVC NetShareEnum, 与 VLC/资源管理器同款做法),
+  /// 顺带返回服务端自报的身份(用于"尽量以主机名展示")。
+  ///
+  /// 匿名被拒时会抛 [SmbException](`isAuthFailure`), 上层应引导输入凭据。
+  static Future<SmbShareListResult> listShares({
+    required String host,
+    int port = 445,
+    String? user,
+    String? password,
+    String domain = '',
+    String? address,
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    final client = Smb2Client(
+      host: host,
+      port: port,
+      fallbackAddress: address,
+    );
+    try {
+      await client.connect(
+        user: user,
+        password: password,
+        domain: domain,
+        timeout: timeout,
+      );
+      final shares = await Srvsvc.listShares(client);
+      return SmbShareListResult(
+        shares: shares,
+        serverInfo: client.serverInfo,
+        resolvedAddress: client.resolvedAddress,
+      );
+    } finally {
+      await client.close();
+    }
   }
 
   /// 注册到本机回环代理并返回可交给 mpv 的 http URL
@@ -107,6 +168,7 @@ abstract final class SmbBrowse {
     String? user,
     String? password,
     String domain = '',
+    String? address,
   }) {
     return LocalMediaProxy.instance.serve(
       SmbTarget(
@@ -117,6 +179,7 @@ abstract final class SmbBrowse {
         user: user,
         password: password,
         domain: domain,
+        address: address,
       ),
     );
   }

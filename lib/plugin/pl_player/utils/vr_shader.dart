@@ -21,7 +21,15 @@ import 'package:path/path.dart' as path;
 /// 以 `#define` 的形式烘焙进源码, 视角变化时节流重载(见
 /// `PlPlayerController.applyVrView`)。
 abstract final class VrShader {
-  static const String fileName = 'piliplus_vr.glsl';
+  /// 着色器在 **两个槽位文件之间交替写入**(`piliplus_vr_a.glsl` /
+  /// `piliplus_vr_b.glsl`)。
+  ///
+  /// 这是修一个真机 bug: 之前永远写同一个文件再
+  /// `change-list glsl-shaders set <同一路径>`, 选项值没变化, mpv 判定
+  /// opts 未变更、不会重读文件 —— 于是"方向按钮读数在变、画面却不动"、
+  /// 播放中切换展开格式也不生效。交替文件名让每次下发的选项值都不同,
+  /// 必然触发渲染管线重建; 两个文件循环覆盖, 也不会无限增长。
+  static const String filePrefix = 'piliplus_vr_';
 
   /// `//!DESC` 里的标识。下发后回读 `vo-passes` 用它确认着色器真的进了渲染管线
   /// (见 `PlPlayerController._verifyVrShader`)。
@@ -29,7 +37,10 @@ abstract final class VrShader {
 
   static String get dirPath => path.join(appSupportDirPath, 'vr_shader');
 
-  static String get filePath => path.join(dirPath, fileName);
+  static String fileNameFor(int slot) =>
+      slot.isEven ? '${filePrefix}a.glsl' : '${filePrefix}b.glsl';
+
+  static String filePathFor(int slot) => path.join(dirPath, fileNameFor(slot));
 
   /// 生成着色器源码。相同参数必须生成完全相同的源码, 以便命中 mpv 的程序缓存。
   static String source({
@@ -137,12 +148,12 @@ vec4 hook() {
     );
   }
 
-  /// 把源码写到磁盘并返回路径。
+  /// 把源码写到指定槽位并返回路径。
   ///
   /// 用同步写入: 文件很小(2KB 左右), 但可以保证写入顺序与视角更新顺序一致,
-  /// 避免异步写入乱序导致视角抖动。
-  static String write(String content) {
-    final file = File(filePath);
+  /// 避免异步写入乱序导致视角抖动。槽位交替保证 mpv 每次都看到"新"的文件名。
+  static String write(int slot, String content) {
+    final file = File(filePathFor(slot));
     if (!file.parent.existsSync()) {
       file.parent.createSync(recursive: true);
     }

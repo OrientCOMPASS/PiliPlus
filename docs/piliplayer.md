@@ -142,6 +142,12 @@ mpv 的用户着色器 `//!PARAM` + `--glsl-shader-opts` 才是"改参不重编�
 
 因此本次实现把 yaw/pitch/fov **烘焙成 `#define`** 写进着色器源码，
 视角变化时重写文件并 `change-list glsl-shaders set`。
+
+> **第三轮真机教训（重要）**：不能永远写同一个文件再 set 同一路径 ——
+> 选项值没变化时 mpv 判定 opts 未变更、**不会重读文件**，表现为
+> "视角读数在变、画面纹丝不动，切换展开格式也不生效"。现在着色器在
+> `piliplus_vr_a.glsl` / `piliplus_vr_b.glsl` 两个槽位间**交替写入**，
+> 每次下发的 `glsl-shaders` 值都不同，必然触发渲染链重建（见 `VrShader` 注释）。
 `glsl-shaders` 属于 VO 私有选项，改它触发的是 `VOCTRL_UPDATE_RENDER_OPTS`（重建渲染链），
 不会重建 VO/Surface；再叠加以下措施把开销压到可接受：
 
@@ -176,8 +182,12 @@ mpv 的用户着色器 `//!PARAM` + `--glsl-shader-opts` 才是"改参不重编�
 于是采纳 [PiliPlus#364](https://github.com/bggRGjQaUbCoE/PiliPlus/issues/364)
 提出的"切换操作模式"方案(与 xl_player 的做法一致):
 
-- 选定片源布局后自动进入 **VR 操作模式**; 此时 `MouseInteractiveViewer`
-  **不在控件树里**, 由 `VrControlLayer` 独占手势, 不存在争抢。
+- 选定片源布局后自动进入 **VR 操作模式**。
+  > 第三轮真机教训: 第一版以为"把 `VrControlLayer` 套在外面就独占手势了",
+  > 实际上底层 `MouseInteractiveViewer` 仍是它的 child, 命中测试还会路过其
+  > `Listener`, 底层识别器(touch slop 只有 4px)在竞技场里抢先获胜 ——
+  > 单指拖拽依旧是进度/音量/亮度。现在 `_onPointerDown` 在 VR 模式下
+  > **不再把指针喂给任何底层识别器**, 竞技场里只剩 VR 层, 手势才真正独占。
 - VR 操作模式下的输入:
 
 | 操作 | 行为 |
@@ -188,6 +198,7 @@ mpv 的用户着色器 `//!PARAM` + `--glsl-shader-opts` 才是"改参不重编�
 | 屏幕 🔍± | 视场角每次 8° |
 | 屏幕「视角摆正」 | 回到 yaw=pitch=0 |
 | 屏幕「切换眼位」 | 双目片源切左/右眼 |
+| 屏幕「陀螺仪」 | 开关陀螺仪环视（转动设备看四周，参考 xl_player 头追） |
 | 顶部提示条 | 实时显示 `偏航 / 俯仰 / 视场` 读数，点一下退出 VR 操作模式 |
 | 单击画面 | 显示/隐藏控制栏 |
 
@@ -202,11 +213,23 @@ mpv 的用户着色器 `//!PARAM` + `--glsl-shader-opts` 才是"改参不重编�
 而着色器下发原本只写在"新建播放器"分支里 —— 于是自动识别出的 VR 从来没生效过。
 现在每次装载新源都会重新下发。
 
+### 陀螺仪环视（第三轮新增）
+
+参考 xl_player 的头部追踪，用 `sensors_plus` 实现：
+
+- 陀螺仪 50Hz 采样积分出偏航/俯仰增量，加速度计（重力）判定持握姿态
+  （竖屏 / 横屏顶左 / 横屏顶右 / 倒置），四个姿态的轴向映射各自推导并单测
+  （`vr_gyro_math.dart` 纯数学，零依赖）；
+- 死区（0.03 rad/s）+ 低通滤波抑制静止漂移；不做重滤波，保证头动跟手；
+- 随「VR 操作模式」自动启停（默认值在 设置 → 播放设置 → VR 陀螺仪视角），
+  播放中可用控制层右侧按钮或设置面板随时开关；
+- 与拖拽/按钮共用同一个 `vrView`，量化(0.2°)后没变化不会打扰着色器。
+
+已知限制：纯陀螺仪积分存在慢速漂移（无磁力计/旋转矢量校正），
+长时间观看后视角可能缓慢偏转，用「视角摆正」即可复位。
+
 ### 尚未做的部分
 
-- **陀螺仪/头部追踪**（xl_player 用的是 Cardboard 那套 EKF HeadTracker）：
-  需要新增 `sensors_plus` 依赖，且轴向映射无法在无设备环境下验证，本次未做；
-  目前拖拽 + 屏幕按钮已可完整操作视角。
 - **立体输出（真正的 VR 头显模式，左右分屏）**：目前只输出单眼画面，
   适合手机/平板裸屏观看；
 - 立方体贴图（cubemap）片源。
@@ -278,8 +301,11 @@ smbd 联调**（这一点是决定性的，见下文验证方式）。
 | `smb_browse.dart` | 目录浏览、路径规范化、稳定 URI（不含凭据）、代理注册地址 |
 | `local_media_proxy.dart` | 本机回环 HTTP 代理（Range/206），把 SMB 文件喂给 mpv |
 | `smb_discovery.dart` | 局域网主机发现：IPv4 /24 网段 TCP 445 并发扫描 + NetBIOS NBSTAT 主机名解析 |
+| `dcerpc.dart` | 最小 DCERPC(MS-RPCE) 封帧/解析 + NDR32 读写器（bind / request / response / fault） |
+| `srvsvc.dart` | **SRVSVC NetShareEnum：共享自动枚举**（`\\host\IPC$` → `\srvsvc` 管道 → RPC），与 VLC/资源管理器同款做法 |
+| `smb_name.dart` | 主机名解析：IP 直通 → 系统 DNS → **NBNS 广播查询(UDP 137)** → 发现阶段记录的 IP 兜底，结果缓存 60s |
 
-范围之外（明确不做）：写入、oplock/lease、多通道、SMB3 加密、DFS、共享枚举（SRVSVC RPC）。
+范围之外（明确不做）：写入、oplock/lease、多通道、SMB3 加密、DFS。
 方言只协商 2.0.2/2.1：SMB3 的签名要 AES-CMAC、加密要 AES-CTR，Dart 侧没有现成 AES，
 而家用 NAS/Windows 默认都还接受 SMB2.1（Samba 的 `server min protocol` 默认更低）。
 
@@ -305,8 +331,10 @@ mpv  --(http, Range)-->  127.0.0.1:<随机端口>/s/<token>  --(SMB2 READ)-->  N
 5. **单元测试**（进 CI）：MD4 的 RFC 1320 向量 + Python 独立实现交叉验证的分块边界、
    NTLMv2 的 MS-NLMP 4.2.4 向量、SPNEGO 往返、**真实抓包的 Type2/negTokenResp 原文**
    解析回归、Type3 字段偏移与 MIC、目录项链表解析（中文名）、FILETIME、
-   路径/URI/Range 解析；
-6. **联调测试**（`smb_live_test.dart`）：有 `SMB_TEST_HOST` 才跑，CI 上自动跳过。
+   路径/URI/Range 解析、**SRVSVC NetShareEnum 的 NDR 请求/响应编解码**；
+6. **联调测试**（`smb_live_test.dart` / `smb_share_enum_test.dart`）：有
+   `SMB_TEST_HOST` 才跑，CI 上自动跳过。共享枚举对真实 smbd 验证过匿名/认证
+   两条路径，并覆盖"枚举出来的共享直接能浏览"的端到端链路。
 
 这条路径抓到了 6 个"只看代码/只靠 CI 永远发现不了"的问题：
 
@@ -421,3 +449,64 @@ Scaffold(
 
 `piliplayer_ci.yml` 的构建步骤补上了 `--dart-define=pili.hash/pili.time/pili.code`，
 装机后在「关于」页能看到 Commit Hash 和构建时间，不用再猜手上这个 apk 是哪次提交。
+
+---
+
+## 8. 第三轮真机反馈修复（v2.1.5-test.1 重新构建）
+
+第二轮装机（Lenovo TB-J706F / Android 12）反馈了三类问题，全部修复并回归：
+
+### 8.1 手动填共享名报 `OBJECT_NAME_NOT_FOUND`
+
+真凶不在协议层，而是 `LocalMediaSource.rootPath`：对 SMB 源它返回 `/共享名`，
+浏览器打开后把它当作**共享内**路径再列一层 —— 相当于去找
+`\\host\pub\pub`，必然 `OBJECT_NAME_NOT_FOUND`（"测试连接"用的是
+`ep.path`（空）所以能通过，一打开就炸）。现在 SMB 的 `rootPath` 只返回
+共享内相对路径，并加了回归测试（`test/services/local_media_source_test.dart`）。
+
+### 8.2 SMB：共享自动枚举 + 尽量用主机名（对齐 VLC 行为）
+
+- **不再需要手填共享名**：点发现的主机 → SRVSVC `NetShareEnum` 自动列出共享
+  → 选一个即保存并打开；匿名被拒时弹凭据框重试一次；RPC 被禁用的服务端
+  自动退回手动输入。列表只展示可浏览的磁盘共享（过滤 `IPC$`/`ADMIN$`/打印队列，
+  与 VLC/资源管理器一致）。
+- **opnum 兼容性考据**（踩坑记录）：Windows(MS-SRVS) 与 Samba 的 srvsvc
+  方法编号表**不同** —— Samba 自家 IDL 里 `NetShareEnum=0x24(36)`、
+  `NetShareEnumAll=0x0f(15)`；Windows 的 `NetrShareEnum=15`。两者在
+  **opnum 15 上签名完全同构**，所以统一用 15（libsmb2/VLC 同款选择），
+  对 Samba 实际打到的是 NetShareEnumAll，行为一致。
+- **NDR 布局逐字节对齐真实抓包**：`tcpdump` 抓 `rpcclient -N netshareenum`
+  与自研实现对比，抓出两个必错点：union 判别式在 `level` 之后**还要再发一次**；
+  `TotalEntries` 是 `[out,ref]`（内联 4 字节占位），不是 unique 指针。
+  bind_ack 的 `p_results` 前面还有 `n_results+reserved(4)` 也需要跳过。
+- **主机名优先**：服务端权威名字取自 NTLM CHALLENGE 的 AV_PAIR
+  （MsvAvDnsComputerName / MsvAvNbComputerName，比 NBSTAT 猜测可靠），
+  保存的 URL 写成 `smb://<主机名>/<共享>`；连接时按
+  IP 直通 → DNS → **NBNS 广播查询** → 发现阶段记录的 IP（存在来源的
+  `address` 字段）四级解析，即使路由器拦广播也不会失联。
+- 错误翻译同步更新：tree connect 收到 `OBJECT_NAME_NOT_FOUND`/`BAD_NETWORK_NAME`
+  统一提示"共享不存在或无权访问"，并指路自动枚举。
+
+### 8.3 VR：手势独占、着色器重载、拖拽方向
+
+| 症状 | 根因 | 修复 |
+| --- | --- | --- |
+| 切到 VR 操作模式后单指拖拽仍是进度/音量/亮度 | 底层 `MouseInteractiveViewer` 还在树里，其 `Listener.onPointerDown` 照常把指针喂给底层识别器（slop 4px），在竞技场里抢先获胜 | `_onPointerDown` 在 `vrControlMode` 下直接 return，底层识别器不进竞技场，手势由 `VrControlLayer` 独占 |
+| 方向按钮读数在变、画面不动；播放中切展开格式不生效 | 每次都写同一文件并 `change-list glsl-shaders set <同一路径>`，选项值未变 → mpv 不触发 opts-change → 不重读文件 | 双槽位文件名交替（`piliplus_vr_a/b.glsl`），每次 set 的值必然变化 |
+| （顺手修）拖拽俯仰方向与"画面跟手"约定相反 | `pitch -= dy` 写反 | 改为 `pitch += dy`，与偏航的"画面跟手"约定一致 |
+
+### 8.4 本地媒体播放页崩溃（`LocalIntroController not found`）
+
+横屏宽布局的右侧 TabBarView 只判断了 `isFileSource`（对 localMedia 也为 true），
+无条件构建 `LocalIntroPanel`，而本地媒体注册的是 `LocalMediaIntroController`
+→ `Get.find` 抛错 → 错误组件(RenderErrorBox)被塞进 sliver 槽位，连带
+`'RenderErrorBox' is not a subtype of 'RenderSliver?'`。已按 `isLocalMedia`
+分流到 `localMediaIntroPanel()`。
+
+### 8.5 本轮新增/更新的验证
+
+- `test/services/smb/smb_share_enum_test.dart`：NDR 编解码离线用例 + 对真实
+  smbd 的匿名/认证枚举联调（沙盒 11/11 通过）；
+- `test/services/local_media_source_test.dart`：rootPath / address 序列化回归；
+- `test/plugin/vr_test.dart`：新增槽位命名与陀螺仪轴向映射/姿态判定用例
+  （陀螺仪纯数学在沙盒用 dart:test 先行验证 7/7）。

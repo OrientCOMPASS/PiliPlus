@@ -14,8 +14,10 @@ class SmbTarget {
     this.user,
     this.password,
     this.domain = '',
+    this.address,
   });
 
+  /// 主机名或 IP(主机名会在连接时经 DNS/NBNS 解析)
   final String host;
   final int port;
   final String share;
@@ -25,6 +27,9 @@ class SmbTarget {
   final String? user;
   final String? password;
   final String domain;
+
+  /// 主机名解析失败时的兜底 IP(发现阶段记录的地址)
+  final String? address;
 
   String get displayName => '\\\\$host\\$share\\${path.replaceAll('/', r'\')}';
 
@@ -116,7 +121,11 @@ class LocalMediaProxy {
   }
 
   Future<void> _serve(HttpRequest request, SmbTarget target) async {
-    final client = Smb2Client(host: target.host, port: target.port);
+    final client = Smb2Client(
+      host: target.host,
+      port: target.port,
+      fallbackAddress: target.address,
+    );
     try {
       await client.connect(
         user: target.user,

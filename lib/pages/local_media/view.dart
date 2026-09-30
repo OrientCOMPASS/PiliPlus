@@ -282,7 +282,7 @@ class _LocalMediaPageState extends State<LocalMediaPage>
       title: Text(host.displayName),
       subtitle: Text(
         host.name == null
-            ? '${host.address}:${host.port} · 点击填写共享名与账号'
+            ? '${host.address}:${host.port} · 点击自动获取共享列表'
             : '${host.address}:${host.port}',
       ),
       trailing: const Icon(Icons.chevron_right),

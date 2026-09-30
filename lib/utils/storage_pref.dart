@@ -1091,6 +1091,10 @@ abstract final class Pref {
   static double get vrDefaultFov =>
       _setting.get(SettingBoxKey.vrDefaultFov, defaultValue: 90.0);
 
+  /// 进入 VR 操作模式时默认开启陀螺仪视角
+  static bool get vrGyro =>
+      _setting.get(SettingBoxKey.vrGyro, defaultValue: true);
+
   // 本地板块
 
   /// 列表排序方式

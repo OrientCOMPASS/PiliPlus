@@ -1224,6 +1224,13 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   }
 
   void _onPointerDown(PointerDownEvent event) {
+    // VR 操作模式: 手势全部让位给 VrControlLayer(它在控件树上层)。
+    // 这里的 Listener 仍会收到 pointer down(子节点也参与命中测试),
+    // 只要不再把 pointer 喂给 tap/双击/长按/拖拽识别器, 竞技场里就只剩
+    // VR 层的手势, 单指拖拽不会再被进度/音量/亮度抢走。
+    if (plPlayerController.vrControlMode.value) {
+      return;
+    }
     if (PlatformUtils.isDesktop) {
       final buttons = event.buttons;
       final isSecondaryBtn = buttons == kSecondaryMouseButton;
@@ -2034,9 +2041,10 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       color: widget.fill,
       child: Obx(() {
         final viewer = _buildInteractiveViewer();
-        // VR 操作模式: 换成自带手势与按钮的控制层。
-        // 此时 MouseInteractiveViewer 不在控件树里, 双指缩放不会被
-        // 播放器的"画面缩放"手势占用(参考 PiliPlus#364 的切换操作模式方案)。
+        // VR 操作模式: 套上自带手势与按钮的控制层, 且 _onPointerDown 不再
+        // 把指针喂给底层识别器(见其注释), 手势由 VrControlLayer 独占,
+        // 双指缩放/单指拖拽不会被播放器的进度/音量/亮度/画面缩放抢走
+        // (参考 PiliPlus#364 的切换操作模式方案)。
         if (plPlayerController.vrControlMode.value) {
           return VrControlLayer(
             controller: plPlayerController,

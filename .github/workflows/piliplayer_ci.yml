@@ -60,6 +60,11 @@ env:
         test/utils/local_media_progress_test.dart
         test/services/smb/smb_protocol_test.dart
         test/services/smb/smb_live_test.dart
+        test/services/smb/smb_share_enum_test.dart
+        lib/plugin/pl_player/widgets/vr_control_layer.dart
+        lib/plugin/pl_player/utils/vr_gyro.dart
+        lib/plugin/pl_player/utils/vr_gyro_math.dart
+        test/services/local_media_source_test.dart
 
 jobs:
     check:

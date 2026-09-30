@@ -120,7 +120,9 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
     if (_stack.length <= 1) {
       return false;
     }
-    setState(() => _stack.removeLast());
+    setState(() {
+      _stack.removeLast();
+    });
     _refresh();
     return true;
   }

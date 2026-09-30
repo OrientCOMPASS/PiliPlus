@@ -1,10 +1,12 @@
+// 协议编解码代码按"每行一个字段"书写更直观, 因此不强制级联写法
+// ignore_for_file: cascade_invocations
 
 import 'dart:math' show Random;
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' show Hmac, md5;
 
-import 'md4.dart';
+import 'package:PiliPlus/services/smb/md4.dart';
 
 /// NTLMSSP 协商标志(见 MS-NLMP 2.2.2.5)
 abstract final class NtlmFlags {

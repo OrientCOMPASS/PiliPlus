@@ -1,10 +1,12 @@
+// 协议编解码代码按"每行一个字段"书写更直观, 因此不强制级联写法
+// ignore_for_file: cascade_invocations
 import 'dart:async';
 import 'dart:io' show Socket, SocketOption;
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' show Hmac, sha256;
 
-import 'ntlm.dart';
+import 'package:PiliPlus/services/smb/ntlm.dart';
 
 /// SMB2 状态码(只列出会用到的)
 abstract final class NtStatus {
@@ -126,7 +128,8 @@ DateTime? fileTimeToDateTime(int ticks) {
   // 1601-01-01 到 1970-01-01 的 100ns 计数
   const epochDelta = 11644473600 * 10000000;
   final micros = (ticks - epochDelta) ~/ 10;
-  if (micros <= 0 || micros > 32503680000 * 1000000) {
+  // 早于 1970 或明显超出合理范围的时间戳视为无效(服务端常填 0)
+  if (micros < 0 || micros > 32503680000 * 1000000) {
     return null;
   }
   return DateTime.fromMicrosecondsSinceEpoch(micros, isUtc: true).toLocal();
@@ -466,7 +469,7 @@ class Smb2Client {
     } else {
       final auth = authenticate(
         challenge: parsed,
-        user: user!,
+        user: user,
         password: password ?? '',
         domain: domain,
         workstation: workstation,
@@ -641,7 +644,7 @@ class Smb2Client {
     } on SmbException {
       final d = await _create(path, directory: true);
       await _close(d.persistent, d.volatile);
-      return SmbFileInfo(size: 0, isDirectory: true);
+      return const SmbFileInfo(size: 0, isDirectory: true);
     }
   }
 
@@ -690,7 +693,7 @@ class Smb2Client {
     int persistent,
     int volatile, {
     required bool restart,
-  }) async {
+  }) {
     const pattern = '*';
     final name = _utf16(pattern);
     final body = Uint8List(32 + name.length);

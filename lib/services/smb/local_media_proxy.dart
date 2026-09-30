@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' show min;
 
-import 'smb2_client.dart';
+import 'package:PiliPlus/services/smb/smb2_client.dart';
 
 /// 一个可被代理播放的 SMB 对象
 class SmbTarget {
@@ -188,8 +188,8 @@ class LocalMediaProxy {
       if (response.headers.contentLength < 0) {
         response
           ..statusCode = status
-          ..headers.contentType = ContentType.text;
-        response.write(message);
+          ..headers.contentType = ContentType.text
+          ..write(message);
       }
       await response.close();
     } catch (_) {

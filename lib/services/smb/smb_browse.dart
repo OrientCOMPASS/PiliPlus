@@ -1,5 +1,5 @@
-import 'local_media_proxy.dart';
-import 'smb2_client.dart';
+import 'package:PiliPlus/services/smb/local_media_proxy.dart';
+import 'package:PiliPlus/services/smb/smb2_client.dart';
 
 /// SMB 共享里的一条记录(纯 Dart, 不依赖 Flutter, 便于在沙盒里直接联调)
 class SmbBrowseEntry {
@@ -123,7 +123,7 @@ abstract final class SmbBrowse {
 
   /// 把路径统一成"共享内相对路径"(反斜杠分隔、无前导分隔符)
   static String normalizePath(String path) {
-    var p = path.replaceAll('/', '\\');
+    var p = path.replaceAll('/', '\\').replaceAll(RegExp(r'\\{2,}'), '\\');
     while (p.startsWith('\\')) {
       p = p.substring(1);
     }

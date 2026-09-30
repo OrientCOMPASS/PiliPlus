@@ -223,14 +223,15 @@ class _LocalMediaPageState extends State<LocalMediaPage>
         children.add(_buildHost(context, host));
       }
 
-      children.add(const Divider(height: 24));
-      children.add(
-        ListTile(
-          leading: const Icon(Icons.cloud_outlined),
-          title: const Text('已保存的共享'),
-          subtitle: const Text('SMB / WebDAV 可浏览目录，HTTP / FTP 为直链播放'),
-        ),
-      );
+      children
+        ..add(const Divider(height: 24))
+        ..add(
+          const ListTile(
+            leading: Icon(Icons.cloud_outlined),
+            title: Text('已保存的共享'),
+            subtitle: Text('SMB / WebDAV 可浏览目录，HTTP / FTP 为直链播放'),
+          ),
+        );
       for (final source in _controller.savedSources) {
         children.add(_buildSource(context, source));
       }

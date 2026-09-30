@@ -1,3 +1,5 @@
+// 协议编解码代码按"每行一个字段"书写更直观, 因此不强制级联写法
+// ignore_for_file: cascade_invocations
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';

@@ -1,4 +1,7 @@
 import 'package:PiliPlus/services/smb/local_media_proxy.dart';
+// SmbServerInfo(NTLM CHALLENGE 里解析出的服务端身份)定义在 smb2_client.dart;
+// 池化之后本文件不再直接构造 Smb2Client, 所以只 show 用到的这一个符号
+import 'package:PiliPlus/services/smb/smb2_client.dart' show SmbServerInfo;
 import 'package:PiliPlus/services/smb/smb_session_pool.dart';
 import 'package:PiliPlus/services/smb/srvsvc.dart';
 

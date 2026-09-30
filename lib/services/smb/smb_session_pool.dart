@@ -32,7 +32,9 @@ typedef SmbTask<T> = Future<T> Function(Smb2Client client);
 /// * 空闲超过 [idleTimeout] 自动关闭（Samba 默认也会踢掉长时间静默的会话，
 ///   自己先关比被服务端踢了再发现要好）；
 /// * 借出去的会话用完必须归还（[run] 内部已用 try/finally 保证）。
-abstract final class SmbSessionPool {
+/// 用 `interface` 而不是 `final`: Dart 3 里 `final class` 不允许被
+/// implements/extends, 而实现类 `_SmbSessionPool` 需要 implements 它。
+abstract interface class SmbSessionPool {
   static final SmbSessionPool instance = _SmbSessionPool();
 
   /// 每个 (主机, 共享, 账号) 最多同时保留几条会话

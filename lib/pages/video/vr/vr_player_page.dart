@@ -65,6 +65,10 @@ class _VrPlayerPageState extends State<VrPlayerPage> {
   Timer? _hideTimer;
   double _scaleBase = 90;
 
+  /// 进来时系统栏是否可见: 只有这种情况下退出才需要恢复,
+  /// 否则会把外层(全屏播放中)刻意隐藏的状态栏放出来
+  late final bool _restoreSystemBar = showSystemBar_;
+
   @override
   void initState() {
     super.initState();
@@ -94,7 +98,9 @@ class _VrPlayerPageState extends State<VrPlayerPage> {
   void dispose() {
     _hideTimer?.cancel();
     Get.delete<VrNativePlayerController>(tag: _tag);
-    showSystemBar();
+    if (_restoreSystemBar) {
+      showSystemBar();
+    }
     super.dispose();
   }
 
@@ -165,20 +171,27 @@ class _VrPlayerPageState extends State<VrPlayerPage> {
   }
 
   Widget _buildVideo() {
-    final id = _c.textureId;
-    if (id == null) {
-      return const Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          spacing: 12,
-          children: [
-            CircularProgressIndicator(color: Colors.white),
-            Text('正在准备 VR 播放器…', style: TextStyle(color: Colors.white)),
-          ],
-        ),
-      );
-    }
-    return Texture(textureId: id);
+    // 必须包在 Obx 里读 ready: textureId 是普通字段, 直接在 build 里读的话
+    // open() 完成后不会触发重建, 页面会一直停在"正在准备"
+    return Obx(() {
+      final id = _c.textureId;
+      if (id == null || !_c.ready.value) {
+        return const Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            spacing: 12,
+            children: [
+              CircularProgressIndicator(color: Colors.white),
+              Text(
+                '正在准备 VR 播放器…',
+                style: TextStyle(color: Colors.white),
+              ),
+            ],
+          ),
+        );
+      }
+      return Texture(textureId: id);
+    });
   }
 
   List<Widget> _buildControls(BuildContext context) {

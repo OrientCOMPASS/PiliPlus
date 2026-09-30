@@ -261,8 +261,32 @@ abstract final class Srvsvc {
     final buffer = BytesBuilder(copy: true);
     Uint8List? complete; // 已凑齐 frag_length 的当前 PDU
 
+    // 先在缓冲区里找完整 PDU, 找不到才去读管道 —— 顺序不能反:
+    // 多分片/多条 PDU 可能一次 READ 就全到了, 先读会永久阻塞在管道上
+    bool tryCompleteFromBuffer() {
+      final data = buffer.toBytes();
+      if (data.length < 16) {
+        return false;
+      }
+      final fragLength =
+          ByteData.sublistView(data).getUint16(8, Endian.little);
+      if (fragLength < 16 || data.length < fragLength) {
+        return false;
+      }
+      complete = Uint8List.fromList(data.sublist(0, fragLength));
+      buffer.clear();
+      if (data.length > fragLength) {
+        // 多余字节留给下一次(多分片响应或管道里还有下一条 PDU)
+        buffer.add(data.sublist(fragLength));
+      }
+      return true;
+    }
+
     Future<void> pump() async {
       while (complete == null) {
+        if (tryCompleteFromBuffer()) {
+          return;
+        }
         final chunk = await readMore();
         if (chunk.isEmpty) {
           if (buffer.isEmpty) {
@@ -271,19 +295,6 @@ abstract final class Srvsvc {
           break; // 数据已读尽, 用现有内容解析(容错)
         }
         buffer.add(chunk);
-        final data = buffer.toBytes();
-        if (data.length >= 16) {
-          final fragLength =
-              ByteData.sublistView(data).getUint16(8, Endian.little);
-          if (fragLength >= 16 && data.length >= fragLength) {
-            complete = Uint8List.fromList(data.sublist(0, fragLength));
-            // 把超出当前 PDU 的多余字节留在缓冲区(管道可能一次给多条)
-            buffer.clear();
-            if (data.length > fragLength) {
-              buffer.add(data.sublist(fragLength));
-            }
-          }
-        }
       }
     }
 

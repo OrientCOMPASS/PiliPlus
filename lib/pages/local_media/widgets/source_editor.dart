@@ -57,7 +57,7 @@ class _SourceEditorDialogState extends State<SourceEditorDialog> {
   }
 
   String get _hint => switch (_type) {
-    LocalMediaSourceType.smb => 'smb://192.168.1.10/video',
+    LocalMediaSourceType.smb => 'smb://NAS/video 或 smb://192.168.1.10/video',
     LocalMediaSourceType.webdav => 'http://192.168.1.10:5005/dav',
     LocalMediaSourceType.http => 'http://192.168.1.10:8080/video.mp4',
     LocalMediaSourceType.ftp => 'ftp://192.168.1.10/media/video.mkv',

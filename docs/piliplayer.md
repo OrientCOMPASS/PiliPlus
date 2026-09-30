@@ -692,7 +692,43 @@ CI 的 `flutter test` 一直在空跑（`STRICT_PATHS` 里那些测试路径也�
 `[ -e "$p" ]` 判断而被跳过）。保留原规则、补一行 `!/test/` 把目录放回来，
 本轮的 4 个测试文件是真正进了 CI 的第一批。
 
-### 9.7 本轮验证
+### 9.7 补：节流要"带尾随下发"，方向键长按不能绕过节流
+
+改完 9.1 之后又自查出两处会让"卡顿"复发的地方：
+
+1. `vrStep`（屏幕方向键 / 🔍±）原来调 `applyVrView(force: true)`，而长按连续转动
+   是 110ms 一次 → `force` 绕过节流 → 每秒约 9 次渲染管线重建 + 9 个新着色器变体，
+   和第三轮那个 45ms/22 次是同一类问题。改为走节流路径；
+2. 原来的节流是"窗口内直接丢弃"，于是按住方向键的最后一下、拖拽结束前的最后一段
+   位移可能不落地，表现成"画面差一点点没跟上手指"。改为**尾随下发**：窗口内的更新
+   排一个定时器在窗口末尾补发，最终视角一定准确。
+
+手势结束（`_onScaleEnd`）、视角摆正、进入 VR 操作模式仍然 `force` —— 这些是离散动作，
+需要立刻生效。`dispose()` 里取消尾随定时器。
+
+### 9.8 单元测试第一次真的跑起来，立刻抓到一个 bug
+
+`.gitignore` 修好之后（9.6），本轮 4 个测试文件是仓库里第一批真正进 CI 的测试。
+它们当场抓到一个只看代码很难发现的真 bug：
+
+> **Dart 的 `Uri.host` 会按 RFC 3986 把主机名规范化成小写**
+> （`Uri.parse('smb://NAS/pub').host == 'nas'`）。
+
+于是 `smb://NAS` 一经解析就变成 `smb://nas`：收藏出来的快捷方式地址、界面上展示的
+地址都会与发现阶段（NBSTAT / SRVSVC AV_PAIR）拿到的大写 NetBIOS 名对不上，
+"这是不是同一台主机"的匹配也会失效 —— 同一台主机会被认成两台。
+
+修法：`LocalMediaSource.rawHostOf()` 自己从 authority 里截主机名（处理 userinfo、
+端口、IPv6 方括号、path/query/fragment），`smbHost` / `smbEndpoint` 都改用它。
+连接不受影响：DNS 与 NetBIOS 都大小写不敏感（NBNS 查询本来就会 `toUpperCase()`）。
+`SmbBrowse.parseEndpoint` 保持用 `Uri.host`（其结果只用于建连接），
+测试里把这个差异显式记录下来，避免以后有人"顺手统一"反而改坏展示。
+
+CI 那一轮的输出正好说明了这批测试的价值：`flutter analyze` errors=0 / warnings=0，
+新增路径 `dart analyze --fatal-infos` 报 `No issues found!`，
+而 `flutter test` 是 **68 passed / 7 failed —— 7 条失败全部指向这一个根因**。
+
+### 9.9 本轮验证
 
 - CI（`.github/workflows/piliplayer_ci.yml`）：`flutter analyze`（error 视为失败）
   → 新增路径 `dart analyze --fatal-infos` 零容忍 → `flutter test` → 构建 arm64-v8a；
@@ -700,4 +736,8 @@ CI 的 `flutter test` 一直在空跑（`STRICT_PATHS` 里那些测试路径也�
   `test/services/local_media_source_test.dart`、`test/services/local_media_service_test.dart`；
 - 沙盒里用 Dart SDK 3.13.5 的 `dart format` 做了全量语法解析校验
   （沙盒装不下 Flutter，无法本地 analyze/test，一切以 CI 为准）；
-- release 腿加 `--target-platform android-arm64`，测试包只出 arm64-v8a。
+- release 腿加 `--target-platform android-arm64`，测试包只出 arm64-v8a；
+- 发布：tag `v2.1.6-test.1`（版本 2.1.5+2 → **2.1.6+3**，按 0.0.1 步进），
+  Release 里只有 `app-arm64-v8a-release.apk` + `app-debug.apk` 与各自的
+  SHA256SUMS；旧的 `v2.1.5-test.1` release 与 tag 已在新包产出并校验之后删除。
+  tag 那条 workflow run 三个 job（Analyze & Test / Build debug / Build release）全绿。

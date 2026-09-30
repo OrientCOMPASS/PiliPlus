@@ -59,10 +59,17 @@ class VrNativePlayerController extends GetxController {
   /// 有画面 => 问题在投影；仍是纯色 => 问题在解码/纹理链路。
   final RxBool passthrough = RxBool(false);
 
-  /// 片源 v 方向是否翻转（默认翻：真机反馈不翻就是上下颠倒）。
-  /// SurfaceTexture 给的 transform matrix 各机型不统一，所以做成可实时切换，
-  /// 换机型时不必为了确认方向再出一版包。
-  final RxBool flipV = RxBool(true);
+  /// 片源 v 方向是否额外翻转。
+  /// **默认关**：渲染层换成移植的 xl_player 之后，贴图坐标直接用
+  /// `SurfaceTexture.getTransformMatrix()` 的结果（上游 `bind_texture_oes` 就是这么做的），
+  /// 方向本来就对。手写渲染器时代默认是 true —— 那是我们自己算 uv 才需要的补偿。
+  /// 各机型的 transform matrix 偶有差异，所以保留成可实时切换的开关。
+  final RxBool flipV = RxBool(false);
+
+  /// 手动拖动的轴向符号（诊断用）。真机上如果拖动方向反了，当场切一下就能确认，
+  /// 不必为这个再出一版包。
+  final RxDouble axisYawSign = RxDouble(1);
+  final RxDouble axisPitchSign = RxDouble(1);
 
   // 视角读数（native 回报，10Hz）
   final RxDouble yaw = RxDouble(0);
@@ -102,6 +109,14 @@ class VrNativePlayerController extends GetxController {
         'fov': _fov,
       });
       await _channel.invokeMethod<bool>('setGyro', {'enabled': gyro.value});
+      // native 每次 create 都是全新的一份状态，把诊断开关按 Dart 侧的现值补推一次，
+      // 否则重开一个视频后 UI 显示"开"而 native 其实是"关"。
+      await _invoke('setFlipV', {'enabled': flipV.value});
+      await _invoke('setPassthrough', {'enabled': passthrough.value});
+      await _invoke('setAxisSign', {
+        'yaw': axisYawSign.value,
+        'pitch': axisPitchSign.value,
+      });
       ready.value = true;
       _firstFrameWatchdog?.cancel();
       _firstFrameWatchdog = Timer(const Duration(seconds: 10), () {
@@ -109,7 +124,9 @@ class VrNativePlayerController extends GetxController {
           return;
         }
         final info = debug.value;
-        if (info.contains('firstFrame=false') || info.contains('texUpd=0')) {
+        // 移植 xl_player 后 debugInfo 的字段变了：native 每画一帧 frames++,
+        // 一帧都没画说明 EGL/纹理/解码其中一环没通。
+        if (RegExp(r'frames=0(\s|$)').hasMatch(info)) {
           error.value = '10 秒内没有解出任何画面。\n$info';
         }
       });
@@ -216,6 +233,15 @@ class VrNativePlayerController extends GetxController {
   Future<void> setFlipV(bool value) async {
     flipV.value = value;
     await _invoke('setFlipV', {'enabled': value});
+  }
+
+  Future<void> setAxisSign({double? yaw, double? pitch}) async {
+    if (yaw != null) axisYawSign.value = yaw;
+    if (pitch != null) axisPitchSign.value = pitch;
+    await _invoke('setAxisSign', {
+      'yaw': axisYawSign.value,
+      'pitch': axisPitchSign.value,
+    });
   }
 
   // ==================== 视角 ====================

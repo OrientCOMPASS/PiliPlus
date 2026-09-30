@@ -1162,3 +1162,139 @@ moov 在尾部的 MP4 连起播都做不到）。会话复用之后，那条 HTT
 - 新增 `test/services/smb/smb_session_pool_test.dart`：错误分诊（会话级 vs 文件级 vs
   socket 级）与容量/空闲策略常量；
 - CI 仍是"一次构建即发布"（只有 tag 触发，只出 arm64-v8a release）。
+
+## 14. 第九轮：VR 渲染层改为移植 xl_player
+
+### 14.1 决策依据
+
+第八轮把投影从"全屏四边形 + 逐像素反投影"换成手写球面网格后，真机反馈仍是
+「问题太多」。既然 VR 已经是独立播放窗口（等于接受了第二套播放栈），继续自己维护
+一套 GL 渲染器的收益不高，于是按需求改为移植
+[xl_player](https://github.com/xl-player-developers/xl_player)（2017 年的 Android
+VR 播放器，Cardboard 系）。
+
+移植范围经过一次事实核查后收窄。上游 `xl-player-armv7a/build.gradle` 写死
+`abiFilters 'armeabi-v7a'`，`ff_libs/` 里只带 **v7a 预编译**的
+`libavcodec-57 / libavformat-57 / libavutil-55 / libavfilter-6 / libswresample-2`
+（≈9 MB，avcodec 57 = FFmpeg 3.2~3.4）。本项目是 arm64-v8a，64 位进程加载不了 32 位
+`.so`；而上游 C 代码用的是 FFmpeg 3.x API（`avcodec_decode_video2`、`av_register_all`、
+老 avfilter graph），这些在 FFmpeg 4~7 已删除。也就是说"连解码链一起移植"要么把
+9 年前的 FFmpeg 用现代 NDK 交叉编译到 arm64，要么把 ~60 KB 的 FFmpeg 相关 C 代码改写到
+新 API（那就不叫移植了）。
+
+逐个文件核查后确认：**出问题的那两块（投影渲染、头追）完全不依赖 FFmpeg**。
+
+| 上游文件 | 行数 | FFmpeg 引用 |
+| --- | --- | --- |
+| `xl_glsl_program.c` | 483 | 0 |
+| `xl_mesh_factory.c` | 294 | 0 |
+| `xl_mat4.c` | 271 | 0 |
+| `xl_tracker.c` | 162 | 0 |
+| `xl_video_render.c` | 55 | 0 |
+| `xl_head_tracker/*`（Cardboard OrientationEKF，C++） | ~500 | 0（上游 CMake 里 `ekf` 就是不链任何库的独立 target） |
+| `xl_model_vr.c` / `xl_texture.c` / `xl_model_ball.c` | ~800 | 只把 `AVFrame*` 当**不透明指针**传参；OES 路径那个参数还标了 `__attribute__((unused))` |
+
+所以最终方案（已与需求方确认）：**移植渲染器 + 头追，解码保留 MediaCodec**。
+上游 `xl_texture.c` 的 `bind_texture_oes()` 期望的正是一个 OES 纹理，
+而 MediaCodec + SurfaceTexture 产出的就是它 —— 对接点是天然吻合的。
+
+### 14.2 代码布局
+
+```
+android/app/src/main/cpp/
+├── CMakeLists.txt              新增：只编渲染相关源文件，不链接任何 FFmpeg
+├── compat/libavutil/frame.h    新增：FFmpeg 同名类型垫片
+├── xl_vr_jni.c                 新增：EGL + 渲染循环 + JNI（替代上游 xl_player_gl_thread.c）
+└── xl/                         vendored 上游源码
+    ├── xl_types/{xl_macro.h, xl_video_render_types.h}   逐字不动
+    ├── xl_types/xl_player_types.h                       裁剪（见下）
+    ├── xl_video/{xl_mat4, xl_mesh_factory*, xl_glsl_program, xl_model, xl_model_ball*,
+    │            xl_model_rect, xl_model_vr, xl_texture, xl_tracker, xl_video_render}.c/h
+    └── xl_head_tracker/{Vector3d, SO3Util, Matrix3x3d, OrientationEKF, HeadTracker}.cpp/h
+```
+
+未移植：`xl_player.c`、`xl_playerCore.c`、`xl_player_read_thread.c`、
+`xl_player_gl_thread.c`、`xl_container/`、`xl_decoders/`、`xl_audio/`、`xl_utils/`
+—— 全是 FFmpeg 解封装/解码/音频链，按上面的决策由 Kotlin 侧
+`MediaExtractor + MediaCodec + AudioTrack`（`VrEngine.kt`）承担。
+
+### 14.3 对上游代码的三处改动
+
+原则是"能不改就不改"，改动都带注释标明原因：
+
+1. **`compat/libavutil/frame.h`（新增，不改上游）**
+   上游渲染层只在签名里传 `AVFrame*`、只把 `enum AVPixelFormat` 当标记用；真正解引用
+   字段的只有软解路径（`data/linesize/height`）和 `update_frame_*` 里的
+   `format/width/linesize[0]`。垫片给出同名类型的最小定义，并把 `compat/` 放在 include
+   搜索路径前面，于是 `#include <libavutil/frame.h>` 命中垫片，**上游源文件一行都不用改**。
+
+2. **`xl_types/xl_player_types.h`（裁剪）**
+   上游这个头把整个播放器状态都定义在此，并 include 了 avformat/avcodec/avfilter/
+   imgutils/NdkMediaCodec。渲染层实际只用到 `xl_play_data` 的两个字段
+   （`video_render_ctx`、`is_sw_decode`，见 `xl_texture.c`），所以只保留这两个，
+   其余连同 FFmpeg 的 include 一起删掉。
+
+3. **`xl_video/xl_mesh_factory.c`（扩展）+ `xl_video/xl_model_ball.c`（加一个导出口）**
+   - 上游 `get_ball_mesh()` 只能生成"整幅 360° 单目"网格：经度固定 0..360、uv 固定
+     [0,1]。而片源还有 180° 覆盖和 左右(SBS)/上下(TB) 立体布局，差别**只在经度范围与
+     uv 区间**，顶点/索引生成方式完全一样，于是参数化为
+     `xl_mesh_set_projection(coverage, u0,u1,v0,v1)`；默认值 (360,0,1,0,1) 与上游逐字一致，
+     不调用时行为不变。
+     唯一的语义差别：经度起点从"i=0 落在 +X"改成"贴图 u 的中点落在镜头正前方(-Z)"。
+     上游那个起点是任意的，而 180° 片源**必须**让画面中心朝前，否则开机看到的是接缝。
+   - 上游 `updateFov()` 是 static，只能经 `update_distance` 间接设置，而 Architecture
+     那条路径把 distance 夹在 [0.5,2] ⇒ 垂直 fov 被限死在 [30,120]。加了一个
+     `xl_model_set_fovy()` 直接转发给上游的 `updateFov`，语义不变，只是放开范围。
+
+另外用 CMake 的 `-include sys/time.h -include pthread.h -include stdint.h` 补上游
+依赖的间接包含（2017 年的 NDK 头文件会带进来，新 NDK 不一定），同样是为了不动上游文件。
+
+### 14.4 `xl_vr_jni.c`：为什么必须有这一层
+
+上游用 `xl_player_gl_thread.c` 驱动渲染，但那个循环深度绑定 `xl_play_data` 的
+FFmpeg 帧队列 / 时钟 / `xl_mediacodec` / `send_message`。保留 MediaCodec 解码就必须
+重写这层驱动，但**除驱动逻辑外全部调用上游函数**：
+
+| 环节 | 来源 |
+| --- | --- |
+| EGL 初始化 | 照搬上游 `init_egl()`（去掉 `xl_play_data` 依赖） |
+| OES 纹理 | 直接调上游 `initTexture()` 的硬解分支 |
+| 视频 SurfaceTexture | 照搬上游：GL 线程内经 JNI 让 Java 侧 `SurfaceTextureBridge.getSurface(texName)` 创建，于是 `updateTexImage()` 在同一线程调用才合法（`VrSurfaceBridge.kt` 是它的对等实现） |
+| 每帧 `updateTexImage` + `getTransformMatrix` | 照搬上游 `draw_video_frame()` 的硬解分支 |
+| 头追 | 直接调上游 `xl_tracker_get_last_view()`（NDK 传感器线程 + Cardboard OrientationEKF，自带 33 ms 前视补偿与横屏校正矩阵 `ekf_to_head_tracker`） |
+| 网格 / 着色器 / 矩阵 / 模型 | 全部上游原码 |
+| 释放 | 照搬上游 `release_egl()` 的顺序，**含 `xl_glsl_program_clear_all()`** —— 上游用静态变量缓存 GL program，不清的话第二次进 VR 页面会复用已销毁上下文里的 id，直接黑屏 |
+
+与上游唯一的行为差别：开启陀螺仪时手动俯仰依然生效。上游 `updateHead()` 只做
+`modelMatrix = head; rotateY(_ry)`（手动只保留偏航），我们在组装矩阵时补一个
+`rotateX`，用的仍是上游 `xl_mat4` 的函数，没有自己写矩阵运算。
+
+「重置视角」不再调 EKF 的 reset（那是 EKF 线程持锁的内部状态，跨线程改会撕裂），
+改成在 GL 线程采样当前头姿作为参考、组合矩阵时右乘它的逆（旋转矩阵的逆 = 转置），
+`head == ref` 时结果就是单位阵。
+
+### 14.5 Kotlin / Dart 侧
+
+- `VrGlPipeline.kt` 从 797 行手写 GLES2 缩到 ~300 行转发层，**公开接口保持不变**，
+  所以 `VrEngine.kt` 一行未改。属性 setter 把"绝对值"换算成增量下发（native 侧是累加的）。
+- `VrHeadTracker.kt` 删除 —— 头追整个搬到 native 的上游 EKF。
+  `VrPlayerBridge` 原先在每帧回调里 `tracker.drain()` 累加视角，现在改成一个 10 Hz
+  主线程定时器只做读数回报（native 的 GL 循环不再有回调 Kotlin 的钩子）。
+- **`flipV` 默认值从 `true` 改成 `false`**：手写渲染器自己算 uv 才需要那个补偿；
+  上游直接把 `SurfaceTexture.getTransformMatrix()` 喂给着色器，方向本来就对。
+  开关仍在诊断面板里，各机型 transform matrix 有差异时可以当场切。
+- 诊断面板新增「左右反向 / 上下反向」两个开关（`setAxisSign`），拖动方向若反了
+  不必重新打包即可确认。
+- 「原画直通」改用上游的 `Rect` 模型（平面四边形），用途不变：直通有画面 ⇒ 解码与
+  纹理链路是好的、问题在投影；直通仍纯色 ⇒ 问题在解码/纹理。
+- `System.loadLibrary("xl_vr")` 失败时不崩，退化成"VR 不可用"并给出原因。
+
+### 14.6 已知限制
+
+- 180° 片源在**陀螺仪模式**下不限制偏航（手动拖动仍按 `±(coverage-fov)/2` 夹）：
+  头姿是 native 里的一个旋转矩阵，要夹就得先分解出偏航角，代价与收益不匹配。
+  转出覆盖范围会看到网格边缘的黑。
+- 上游只有单目球面（Ball）与 Cardboard 双眼（VR，带畸变网格）两种全景模型，
+  SBS/TB 是靠 14.3 的网格参数化补的，不是上游原生能力。
+- 移植后**尚未经真机验证**。CI 只能证明它编得过。画面方向、投影正确性、性能
+  都要靠真机 + 诊断面板确认。

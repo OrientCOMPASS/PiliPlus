@@ -17,15 +17,17 @@ import io.flutter.view.TextureRegistry
  * Dart: VrPlayerPage(Texture(textureId))  +  手势/按钮/设置
  *   │  MethodChannel
  *   ▼
- * VrPlayerBridge ── VrEngine(MediaCodec/AudioTrack, 主时钟)
- *                ├─ VrGlPipeline(EGL/GLES2, 视角是 uniform, 逐帧改)
- *                └─ VrHeadTracker(旋转矢量传感器, 无漂移)
+ * VrPlayerBridge ── VrEngine(MediaExtractor/MediaCodec/AudioTrack, 主时钟)
+ *                └─ VrGlPipeline → cpp/xl_vr_jni.c → 移植自 xl_player 的 C 渲染层
+ *                     · 网格/着色器/矩阵/模型 = 上游原码 (cpp/xl/xl_video/)
+ *                     · 头追 = 上游 xl_tracker + Cardboard OrientationEKF (cpp/xl/xl_head_tracker/)
  * ```
  *
- * 视角状态（yaw/pitch/fov）以 **native 为准**：Dart 只发增量指令
- * （`lookBy` / `setFov` / `resetView`），native 每帧把头追增量叠加上去，
- * 再按 10Hz 把读数回报给 Dart 显示。这样头追不经过 Flutter 往返，
- * 才能做到逐帧跟手（这正是 mpv 用户着色器方案做不到的）。
+ * 视角状态以 **native 为准**：Dart 只发增量指令（`lookBy` / `setFov` / `resetView`），
+ * Kotlin 侧的 yawDeg/pitchDeg 只是**手动偏移**的镜像，陀螺仪姿态由 native 每帧用
+ * OrientationEKF 叠加，不经过 Flutter 往返（这正是 mpv 用户着色器方案做不到的）。
+ * 读数按 10Hz 由一个主线程定时器回报给 Dart 显示 —— 上游的 GL 循环绑死了 FFmpeg 帧队列，
+ * 我们改成 MediaCodec 驱动后不再有"每帧回调 Kotlin"的钩子，用定时器更简单也不会掉帧。
  */
 class VrPlayerBridge(
     private val activity: Activity,
@@ -50,7 +52,6 @@ class VrPlayerBridge(
 
     private var gl: VrGlPipeline? = null
     private var engine: VrEngine? = null
-    private var tracker: VrHeadTracker? = null
     private var textureEntry: TextureRegistry.SurfaceTextureEntry? = null
 
     private var stereo = false
@@ -126,14 +127,22 @@ class VrPlayerBridge(
                 // 诊断: 跳过球面投影, 把解码帧原样贴出来
                 "setPassthrough" -> {
                     gl?.passthrough = call.argument<Boolean>("enabled") ?: false
-                    gl?.requestRender()
                     result.success(true)
                 }
                 // 诊断: 片源 v 方向翻不翻(SurfaceTexture 的 transform matrix
                 // 各机型不统一, 真机可以当场切, 不用为这个再出一版包)
                 "setFlipV" -> {
-                    gl?.flipV = call.argument<Boolean>("enabled") ?: true
-                    gl?.requestRender()
+                    // 默认 false: 上游直接把 SurfaceTexture 的 transform matrix 喂给着色器,
+                    // 不需要额外翻转(手写渲染器时代才需要, 那时默认是 true)
+                    gl?.flipV = call.argument<Boolean>("enabled") ?: false
+                    result.success(true)
+                }
+                // 诊断: 手动拖动的轴向反了可以当场切, 不用为这个再出一版包
+                "setAxisSign" -> {
+                    gl?.axisSign = Pair(
+                        call.argument<Number>("yaw")?.toFloat() ?: 1f,
+                        call.argument<Number>("pitch")?.toFloat() ?: 1f,
+                    )
                     result.success(true)
                 }
                 "getDebugInfo" -> result.success(debugInfo())
@@ -156,11 +165,13 @@ class VrPlayerBridge(
         textureEntry = entry
         val pipeline = VrGlPipeline(entry.surfaceTexture())
         gl = pipeline
-        val tracker = VrHeadTracker(activity.applicationContext)
-        this.tracker = tracker
-        pipeline.onBeforeFrame = { onGlFrame() }
+        pipeline.trackerEnabled = gyroEnabled
         pipeline.onError = { msg -> post("error", mapOf("message" to msg)) }
-        pipeline.start()
+        // start() 会阻塞等 GL 线程就绪（最多 3s），不能占着 platform channel 的主线程
+        Thread({
+            pipeline.start()
+            main.post { startReporter() }
+        }, "pili-vr-gl-start").start()
         return entry.id()
     }
 
@@ -197,13 +208,11 @@ class VrPlayerBridge(
     private fun releaseInternal() {
         val e = engine
         val g = gl
-        val t = tracker
         val te = textureEntry
         engine = null
         gl = null
-        tracker = null
         textureEntry = null
-        t?.stop()
+        stopReporter()
         // TextureRegistry 的 entry 必须在主线程释放
         if (te != null) {
             main.post {
@@ -233,23 +242,30 @@ class VrPlayerBridge(
 
     // ==================== 视角 ====================
 
-    /** 每帧（vsync）：先叠头追增量，再按 10Hz 把读数回报给 Dart */
-    private fun onGlFrame() {
-        val g = gl ?: return
-        if (gyroEnabled) {
-            tracker?.let { t ->
-                val (dyaw, dpitch) = t.drain()
-                if (dyaw != 0f || dpitch != 0f) {
-                    g.yawDeg = wrapOrClampYaw(g.yawDeg + dyaw, g.fovDeg)
-                    g.pitchDeg = (g.pitchDeg + dpitch).coerceIn(-MAX_PITCH, MAX_PITCH)
-                    // 渲染是"脏了才画", 头追改变了视角必须标脏, 否则画面不更新
-                    g.markDirty()
-                }
+    private val reporter = object : Runnable {
+        override fun run() {
+            try {
+                reportView()
+            } catch (e: Throwable) {
+                Log.w(TAG, "reportView: ${e.message}")
             }
+            main.postDelayed(this, REPORT_INTERVAL_MS)
         }
-        val now = System.currentTimeMillis()
-        if (now - lastReportMs < REPORT_INTERVAL_MS) return
-        lastReportMs = now
+    }
+
+    private fun startReporter() {
+        stopReporter()
+        main.postDelayed(reporter, REPORT_INTERVAL_MS)
+    }
+
+    private fun stopReporter() {
+        main.removeCallbacks(reporter)
+        lastReportMs = 0L
+    }
+
+    /** 按 10Hz 把视角读数 + 一行诊断信息回报给 Dart（陀螺仪姿态在 native，这里只有手动偏移） */
+    private fun reportView() {
+        val g = gl ?: return
         val e = engine
         val info = debugInfo()
         main.post {
@@ -280,7 +296,7 @@ class VrPlayerBridge(
         val g = gl ?: return
         g.yawDeg = wrapOrClampYaw(g.yawDeg + dyaw, g.fovDeg)
         g.pitchDeg = (g.pitchDeg + dpitch).coerceIn(-MAX_PITCH, MAX_PITCH)
-        g.requestRender()
+        g.markDirty()
     }
 
     private fun setFov(fov: Float) {
@@ -288,15 +304,15 @@ class VrPlayerBridge(
         g.fovDeg = fov.coerceIn(MIN_FOV, MAX_FOV)
         // 180° 片源的偏航范围依赖 fov，改了 fov 要重新夹一次
         g.yawDeg = wrapOrClampYaw(g.yawDeg, g.fovDeg)
-        g.requestRender()
+        g.markDirty()
     }
 
     private fun resetView() {
         val g = gl ?: return
         g.yawDeg = 0f
         g.pitchDeg = 0f
-        tracker?.drain()
-        g.requestRender()
+        // 陀螺仪开启时，native 会把当前 EKF 姿态记为新的正前方
+        g.resetView()
     }
 
     /** 360° 片源回绕，180° 片源夹到 ±(coverage - fov)/2（转出画面会露黑边） */
@@ -324,13 +340,13 @@ class VrPlayerBridge(
         }
         applyEyeRect()
         g.yawDeg = wrapOrClampYaw(g.yawDeg, g.fovDeg)
-        g.requestRender()
+        g.markDirty()
     }
 
     private fun applyEye(eye: String) {
         leftEye = eye != "right"
         applyEyeRect()
-        gl?.requestRender()
+        gl?.markDirty()
     }
 
     private fun applyEyeRect() {
@@ -346,12 +362,9 @@ class VrPlayerBridge(
 
     private fun setGyro(enabled: Boolean) {
         gyroEnabled = enabled
-        if (enabled) {
-            tracker?.drain()
-            tracker?.start()
-        } else {
-            tracker?.stop()
-        }
+        // 头追整个在 native（上游 xl_tracker.c：NDK 传感器 + Cardboard OrientationEKF，
+        // 自带线程、33ms 前视补偿和横屏校正矩阵），Kotlin 侧只负责开关。
+        gl?.trackerEnabled = enabled
     }
 
     private fun post(event: String, args: Map<String, Any>) {

@@ -439,6 +439,32 @@ class _VrPlayerPageState extends State<VrPlayerPage> {
                   onPressed: () => _c.setFlipV(!_c.flipV.value),
                 ),
               ),
+              // 移植 xl_player 后手动拖动的轴向由 native 组合，方向若反了
+              // 这里当场翻，不用为这个再出一版包
+              Obx(
+                () => ActionChip(
+                  label: Text(
+                    _c.axisYawSign.value < 0 ? '左右反向: 开' : '左右反向: 关',
+                  ),
+                  avatar: const Icon(Icons.swap_horiz, size: 16),
+                  onPressed: () => _c.setAxisSign(
+                    yaw: _c.axisYawSign.value < 0 ? 1 : -1,
+                  ),
+                ),
+              ),
+              Obx(
+                () => ActionChip(
+                  label: Text(
+                    _c.axisPitchSign.value < 0
+                        ? '上下反向: 开'
+                        : '上下反向: 关',
+                  ),
+                  avatar: const Icon(Icons.swap_vert, size: 16),
+                  onPressed: () => _c.setAxisSign(
+                    pitch: _c.axisPitchSign.value < 0 ? 1 : -1,
+                  ),
+                ),
+              ),
             ],
           ),
         ],

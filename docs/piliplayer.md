@@ -143,11 +143,12 @@ mpv 的用户着色器 `//!PARAM` + `--glsl-shader-opts` 才是"改参不重编�
 因此本次实现把 yaw/pitch/fov **烘焙成 `#define`** 写进着色器源码，
 视角变化时重写文件并 `change-list glsl-shaders set`。
 
-> **第三轮真机教训（重要）**：不能永远写同一个文件再 set 同一路径 ——
-> 选项值没变化时 mpv 判定 opts 未变更、**不会重读文件**，表现为
-> "视角读数在变、画面纹丝不动，切换展开格式也不生效"。现在着色器在
-> `piliplus_vr_a.glsl` / `piliplus_vr_b.glsl` 两个槽位间**交替写入**，
-> 每次下发的 `glsl-shaders` 值都不同，必然触发渲染链重建（见 `VrShader` 注释）。
+> **第三轮的结论是错的，已在第四轮推翻**（见 9.1）：当时以为"两个槽位轮流写"
+> 就能让 mpv 重读文件。实际上 `vo=gpu` 是**按路径永久缓存文件内容**
+> （`gpu/video.c: load_cached_file()`），两个槽位各自只在第一次被读走，
+> 之后无论怎么改写都无效 —— 画面停在 VR 初始化那一刻，而每 45ms 一次的
+> `change-list` 还在空转重建整条渲染管线（这就是"变卡顿"）。
+> 现在的做法是**一份源码一个文件、只写一次**，Dart 侧维护「源码 → 路径」映射。
 `glsl-shaders` 属于 VO 私有选项，改它触发的是 `VOCTRL_UPDATE_RENDER_OPTS`（重建渲染链），
 不会重建 VO/Surface；再叠加以下措施把开销压到可接受：
 
@@ -492,7 +493,7 @@ Scaffold(
 | 症状 | 根因 | 修复 |
 | --- | --- | --- |
 | 切到 VR 操作模式后单指拖拽仍是进度/音量/亮度 | 底层 `MouseInteractiveViewer` 还在树里，其 `Listener.onPointerDown` 照常把指针喂给底层识别器（slop 4px），在竞技场里抢先获胜 | `_onPointerDown` 在 `vrControlMode` 下直接 return，底层识别器不进竞技场，手势由 `VrControlLayer` 独占 |
-| 方向按钮读数在变、画面不动；播放中切展开格式不生效 | 每次都写同一文件并 `change-list glsl-shaders set <同一路径>`，选项值未变 → mpv 不触发 opts-change → 不重读文件 | 双槽位文件名交替（`piliplus_vr_a/b.glsl`），每次 set 的值必然变化 |
+| 方向按钮读数在变、画面不动；播放中切展开格式不生效 | 每次都写同一文件并 `change-list glsl-shaders set <同一路径>`，选项值未变 → mpv 不触发 opts-change → 不重读文件 | 双槽位文件名交替（`piliplus_vr_a/b.glsl`），每次 set 的值必然变化。**该修法在第四轮被证明无效**：mpv 按路径永久缓存文件内容，两个槽位各自只被读一次；正确做法见 9.1 |
 | （顺手修）拖拽俯仰方向与"画面跟手"约定相反 | `pitch -= dy` 写反 | 改为 `pitch += dy`，与偏航的"画面跟手"约定一致 |
 
 ### 8.4 本地媒体播放页崩溃（`LocalIntroController not found`）
@@ -510,3 +511,193 @@ Scaffold(
 - `test/services/local_media_source_test.dart`：rootPath / address 序列化回归；
 - `test/plugin/vr_test.dart`：新增槽位命名与陀螺仪轴向映射/姿态判定用例
   （陀螺仪纯数学在沙盒用 dart:test 先行验证 7/7）。
+
+---
+
+## 9. 第四轮真机反馈修复（v2.1.6-test.1）
+
+第三轮的包（Lenovo TB-J706F / Android 12）反馈了三类问题：VR 变卡且切展开格式不生效、
+连接远程主机的交互不对、打开播放器三点菜单崩溃。逐条给出根因与修法。
+
+### 9.1 VR：为什么"读数在变、画面不变"，以及和 xl_player 的管线差异
+
+先把 mpv v0.41.0 的源码读了一遍（`video/out/gpu/video.c`、`user_shaders.c`、
+`shader_cache.c`、`player/command.c`、`options/m_option.c`），三条事实决定了这个方案的上限：
+
+| 事实 | 源码位置 | 后果 |
+| --- | --- | --- |
+| 用户着色器的**文件内容按路径永久缓存** | `gpu/video.c: load_cached_file()` —— `p->files[]` 只增不减，`strcmp(path)` 命中就直接返回**第一次读到的内容**，直到 `gl_video` 销毁 | 反复改写同一个文件再 `change-list glsl-shaders set <同一路径>`，mpv 永远看不到新内容 |
+| 改 `glsl-shaders` 会**重建整条渲染管线** | `gl_video_render_frame()` 开头调 `gl_video_update_options()` → `m_config_cache_update()` 发现选项变了 → `reinit_from_options()` → `uninit_rendering()` + `gl_video_setup_hooks()` + 重新解析着色器 | 每次下发都是"拆掉再搭一遍"，源码变了还要真的编译一次 GLSL |
+| `vo=gpu` 的用户着色器**不支持 `//!PARAM`** | `user_shaders.c` 只解析 HOOK/BIND/SAVE/DESC/OFFSET/WIDTH/HEIGHT/WHEN/COMPONENTS/TEXTURE/SIZE/FORMAT/FILTER/BORDER；`glsl-shader-opts`（`gpu/video.c:548`）声明了但 `vo=gpu` 根本不读，只有 `vo_gpu_next.c: update_hook_opts()` 会把它灌进 hook 的 param | 参数只能以 `#define` 烘焙进源码，"改参数"就等于"换源码" |
+
+于是第三轮那个"两个槽位轮流写"的修法是**错的**：`piliplus_vr_a.glsl` /
+`piliplus_vr_b.glsl` 各自在第一次被 mpv 读走之后内容就冻结了，之后再怎么写都无效。
+真机现象因此完全对得上：
+
+- 读数在变（Dart 侧的 `vrView` 确实在动）；
+- 画面停在 VR 初始化那一刻（mpv 拿到的还是那两个文件的旧内容）；
+- **变卡顿**：选项值每 45ms 变一次 → 每秒 22 次 `reinit_from_options()`，
+  拆建整条渲染管线，却一点画面变化都没有 —— 纯亏。
+
+另外补一个只有 SMB 才会踩的坑：VR 自动识别原来拿 `dataSource.videoSource`
+去猜文件名，而 SMB 播放走本机回环代理（`http://127.0.0.1:<port>/s/<token>`），
+地址里根本没有原文件名，`360`/`sbs`/`tb` 全丢，自动识别必然失效。
+`setDataSource` 新增 `mediaName` 参数，本地媒体传条目名。
+
+#### 与 xl_player 的管线对比（用户问的重点）
+
+[xl_player](https://github.com/xl-player-developers/xl_player) 是**自研 native 播放器**：
+ffmpeg 解封装 + MediaCodec 硬解（`xl_decoders/xl_mediacodec.c`）→ 输出到
+SurfaceTexture/OES 纹理 → **自己的 GLES 渲染器**把纹理贴到球面网格上 →
+`xl_head_tracker/`（`HeadTracker.cpp` + `OrientationEKF.cpp` + `SO3Util.cpp`，
+就是 Cardboard 那套 EKF 姿态估计）每帧算出一个旋转矩阵。
+
+关键差别只有一句：**它的投影参数是 per-frame uniform（MVP 矩阵），改视角 = 一次
+`glUniformMatrix4fv`，不重编译、不重建管线**，所以头追能做到逐帧跟手。
+
+| | xl_player | PiliPlus(本分支) |
+| --- | --- | --- |
+| 播放器 | 自研 C 播放器，自己拥有 GL 上下文 | 复用 media_kit → libmpv，渲染在 mpv 的 `vo=gpu` 里 |
+| 解码 | MediaCodec（`xl_mediacodec.c`） | mpv 的 hwdec（同样是 MediaCodec） |
+| 投影 | 自己的球面网格 + 顶点/片元着色器，**参数是 uniform** | mpv 用户着色器（`//!HOOK MAIN`），**参数只能烘焙进源码** |
+| 姿态 | Cardboard OrientationEKF（陀螺仪+加速度计融合，抗漂移） | `sensors_plus` 陀螺仪积分 + 重力定姿态（会慢漂） |
+| 改视角的代价 | ~0（每帧设 uniform） | 重建渲染管线 + 编译一份新 GLSL + mpv 进程内永久留一份程序缓存 |
+| 弹幕/字幕/截图/画中画 | 没有 | 全部沿用 PiliPlus 既有能力 |
+
+也就是说，卡顿与"参数不生效"不是实现细节写错了，而是**把 xl_player 那种
+"uniform 逐帧更新"的交互，塞进了一个只接受"换源码"的接口**。
+
+#### 现在的做法（在 `vo=gpu` 的约束内做到最好）
+
+`lib/plugin/pl_player/utils/vr_shader.dart` + `PlPlayerController._runApplyVrShader`：
+
+1. **一个文件只写一次**：内容变了就换新文件名（`writeUnique(seq)`），
+   Dart 侧维护「源码 → 路径」映射；同一份源码复用同一路径，
+   于是"回到看过的视角"在 mpv 那边是缓存命中 —— 不编译、不占预算；
+2. **源码没变就不下发命令**（下发即重建管线，这是第三轮卡顿的直接来源）；
+3. **串行 + 合并**：一次只允许一条 `change-list` 在飞，期间的更新合并成
+   "用最新视角再发一次"，不会在 mpv 命令队列里堆几十次重建；
+4. **节流**：拖拽 100ms、陀螺仪 180ms，手势结束 `force` 补一次；
+5. **变体预算 + 自适应降档**（`VrQuantizer`）：每份新源码都是 mpv 进程里一条
+   永久驻留的 GLSL 程序（`shader_cache.c` 的 `sc_flush_cache()` 只在
+   `gl_sc_destroy()` 时调用）外加一个磁盘缓存文件，所以必须有上限。
+   用量越大自动放大量化步长（0.5° → 1° → 2° → 4°），预算（1500）耗尽就
+   停陀螺仪并明确告知，而不是悄悄罢工；
+6. 播放器重建时 `purge()` 旧文件并重置预算（此时 mpv 侧的 `gl_video`
+   连同它的两个缓存也确实没了）。**播放器活着的时候绝不能删这些文件**：
+   media_kit 在 surface 尺寸变化时会重设 `vo=gpu`，那会重建 `gl_video`
+   并从磁盘重新读取当前 `glsl-shaders` 指向的文件。
+
+**诚实的结论**：`vo=gpu` + 用户着色器这条路做不到 xl_player 那种逐帧头追。
+现在的实现下，切展开格式/切眼位/按钮步进是即时且正确的，拖拽与陀螺仪是
+"量化 + 节流"的跟手（精度随用量下降）。要真正做到逐帧，只有两条路，
+都不在本轮 scope 内，但已经留好了接口：
+
+- 换 `vo=gpu-next` + `//!PARAM`（libplacebo 已随包构建，`buildscripts/scripts/libplacebo.sh`；
+  media_kit 的 `VideoControllerConfiguration.vo` 也支持传）。**没有直接切**的原因：
+  ① gpu-next 改渲染选项时 `update_render_options()` 结尾会置 `want_reset`，
+  下一帧就 `pl_renderer_flush_cache()` + `pl_queue_reset()`（丢帧队列），
+  高频改参数同样是灾难；② media_kit 的安卓 surface 流程对 `vo=gpu` 有专门处理
+  （先 `vo=null` 再在拿到 videoParams 后设 `vo=gpu`、按分辨率重设 surface），
+  换 VO 会波及**全部**视频播放，无设备环境下不敢动；
+- 自己写 native GL 层（等于把 xl_player 的渲染器搬过来），代价是丢掉
+  弹幕/字幕/截图/画中画等既有能力。
+
+升级时只需把 `VrShader.source()` 里的 `#define` 换成 `//!PARAM` 块、
+把下发命令换成 `setProperty('glsl-shader-opts', ...)`，投影数学与控制层都不用动。
+
+### 9.2 SMB：主机即目录 + VLC 式手动快捷方式
+
+第三轮的行为是"点主机 → 枚举共享 → **弹窗让用户挑一个** → 存成一条快捷路径 → 打开"，
+两个共享就弹两次、快捷路径越攒越长，想换共享还得退回来重选。改成：
+
+- **连接后直接进入这台主机**：主机本身是一级目录，它共享出来的目录是其中的子目录
+  （VLC / Windows 资源管理器同款）。新增"主机级来源" `smb://<主机名>`（不带共享名）：
+  `LocalMediaSource.isSmbHostRoot`，服务层把根目录解释为 SRVSVC `NetShareEnum`
+  列共享（过滤 `IPC$`/`ADMIN$`/打印队列），往下按 `共享\子路径` 列目录；
+  `showSmbSharePicker` 对话框已删除；
+- 连接时仍然先枚举一次共享，但目的只是：拿服务端权威主机名（NTLM CHALLENGE 的
+  AV_PAIR，存成 `smb://<主机名>` 而不是会变的 IP）、提前知道要不要账号、
+  以及把共享列表当浏览页根目录的 `initialItems`（省一次往返）。
+  枚举不可用（服务端禁用 RPC）才退回"手动输入共享地址"；
+- 同一台主机只保存一条来源，已收藏过就直接进入，不再重新枚举；
+- **快捷方式改为用户手动收藏**：浏览页右上角新增书签按钮，把当前目录存进
+  「本地 → 媒体库」（本机目录）或「本地 → 网络」（网络来源）；
+  已在收藏中时按钮变灰。地址推导（`LocalMediaController.shortcutFor`，静态纯函数）
+  对三种来源分别处理：本机 = 绝对路径；SMB 主机级 = 路径第一段当共享名；
+  SMB 共享级 = 共享名取自来源；WebDAV = 基址 + 路径；直链来源不可收藏；
+- 浏览中服务端拒绝匿名 → 弹一次凭据框，账号写回来源并持久化，
+  页面栈里同源的层级一起替换（否则每进一层都要重输）。
+
+### 9.3 崩溃：`type 'NetworkSource' is not a subtype of type 'FileSource'`
+
+`PlDanmakuController._initFileDm()` 里写的是 `dataSource as FileSource`，
+而本地媒体的**局域网**来源是 `NetworkSource`（SMB 走回环代理、WebDAV/HTTP 直连）。
+`isFileSource`（页面控制器那个）对本地媒体是 true，于是弹幕控制器走了
+"读离线缓存目录里的 danmaku.pb"分支，一强转就炸 —— 打开三点菜单触发重建时必现。
+
+修法有两层：
+
+1. **本地媒体根本不挂弹幕组件**（`pages/video/view.dart` 的 `danmuWidget` 传 null）：
+   B 站弹幕按 cid 拉取，离线缓存才有同目录的弹幕文件，本地/局域网视频两者都没有；
+2. `_initFileDm()` 改成 `is! FileSource` 直接返回，任何调用路径都不会再崩。
+
+### 9.4 本地视频播放器功能审查（不再照搬在线/缓存播放器）
+
+按用户要求过了一遍播放器里"哪些功能对本地视频没有意义"。除了弹幕，还发现一个
+**判据用错**的系统性问题：`PlPlayerController.isFileSource` 只看
+`dataSource is FileSource`，而本地媒体的局域网来源是 `NetworkSource`，
+于是一批只对 B 站在线视频成立的行为被错误打开。新增语义明确的
+`isOfflinePlayback = isFileSource || isLocalMedia`，并按它重新判定：
+
+| 功能 | 依赖 | 本地媒体 |
+| --- | --- | --- |
+| 弹幕组件 / 发弹幕 / 弹幕开关 / 弹幕列表 / 弹幕设置 | B 站 cid 或离线缓存目录 | **全部隐藏** |
+| 底栏「弹幕趋势图」`dmChart` | `videoshot`/弹幕趋势接口 | 隐藏（`isOfflinePlayback`） |
+| 底栏「看点」`viewPoints`、「选集」`episode`、「AI 字幕翻译」`aiTranslate`、「画质」`qa` | B 站播放地址/剧集/字幕接口 | 隐藏（`isOfflinePlayback`） |
+| 拖动进度条 / 拖动缩略图时的**预览图** | `videoshot` 接口 | 关闭（`isOfflinePlayback`），不再无谓地调 `updatePreviewIndex` |
+| 「稍后再看」「查看笔记」「举报」 | B 站账号体系（举报还要 aid） | 隐藏 |
+| 「解码格式」 | 读 `supportFormats` 并会重新请求播放地址 | 仍只对 B 站视频开放（本地媒体点了必崩，故不放开） |
+| 「选择画质/音质」「CDN 设置」「离线缓存」「投屏」「听音频」 | 同上 | 原本就按 `!isFileSource` 隐藏，本地媒体同样隐藏 |
+| 上一个/下一个、播放顺序、倍速、字幕（含加载外挂字幕）、截图、画中画、画面比例、VR、定时关闭、播放信息 | 纯本地能力 | **保留** |
+| 播放历史上报 / 进度预览图请求 | B 站接口 | 早已有 `isLocalMedia` 闸门，保留 |
+
+### 9.5 那两条 `SocketException: Connection timed out ... port = 526xx`
+
+报告里 `STACK TRACE: null` 说明它是**未捕获的异步错误**（zone 兜到的），
+不是某条调用栈上的同步失败。排查了本分支所有会开 socket 的代码：
+
+- SMB 的 TCP 一律连 445（`smb2_client.dart: Socket.connect(address, port)`），
+  UDP 只发 137（NBNS/NBSTAT），且都挂了 `onError`；
+- 回环代理只听 `127.0.0.1`，`_handle` 外面包了 `catch (_)`；
+- 全仓搜不到任何"连局域网 IP + 随机高端口"的 Dart 代码。
+
+而 `192.168.2.2:52612` / `:52616` 这种**同一 IP、相邻高端口、同一毫秒超时**的组合，
+最符合"SSDP 发现设备后去 `http://<设备IP>:<随机端口>/...` 拉设备描述"的行为
+（Windows/多数 DLNA 渲染器的描述地址就是随机高端口）。`lib/pages/dlna/view.dart`
+恰好有这个隐患：`_onSearch()` 是从 `initState` 里**不 await** 调起来的，
+里面又用 `await for` 消费 `devices.stream` —— 插件抛出的 SocketException
+无人接收，直接冒到 zone 外面被当崩溃上报。已改为显式订阅 + `onError` +
+整体 `try`，`dispose` 里取消订阅并 `_searcher.stop()`，投屏失败也给 toast。
+
+> 说明：这条只能定位到"最可能"，因为报告里没有 Dart 栈。若换机复现，
+> 抓一份 `adb logcat` 就能确认是不是 `dlna_dart`。本分支自己的 socket 路径
+> 已经全部有错误归属，不会再产生这类无栈报告。
+
+### 9.6 顺手修掉的仓库问题：`test*` 把整个测试目录吃掉了
+
+`.gitignore` 里有一行上游留下的 `test*`，`git check-ignore -v test/plugin/vr_test.dart`
+命中它 —— 也就是说**前三轮写在 `test/` 下的单元测试一个都没进仓库**，
+CI 的 `flutter test` 一直在空跑（`STRICT_PATHS` 里那些测试路径也因为
+`[ -e "$p" ]` 判断而被跳过）。保留原规则、补一行 `!/test/` 把目录放回来，
+本轮的 4 个测试文件是真正进了 CI 的第一批。
+
+### 9.7 本轮验证
+
+- CI（`.github/workflows/piliplayer_ci.yml`）：`flutter analyze`（error 视为失败）
+  → 新增路径 `dart analyze --fatal-infos` 零容忍 → `flutter test` → 构建 arm64-v8a；
+- 新增测试：`test/plugin/vr_test.dart`、`test/services/smb/smb_browse_test.dart`、
+  `test/services/local_media_source_test.dart`、`test/services/local_media_service_test.dart`；
+- 沙盒里用 Dart SDK 3.13.5 的 `dart format` 做了全量语法解析校验
+  （沙盒装不下 Flutter，无法本地 analyze/test，一切以 CI 为准）；
+- release 腿加 `--target-platform android-arm64`，测试包只出 arm64-v8a。

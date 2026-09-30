@@ -559,9 +559,12 @@ internal class VrGlPipeline(
             1f
         }
         val fovH = fovDeg.coerceIn(5f, 170f)
-        val fovy = 2.0 * Math.toDegrees(
+        // 全程用 Double 算, 最后一次性 toFloat:
+        // 写成 `2.0 * ...toFloat()` 会被提升成 Double, 再 coerceIn(1f,179f)
+        // 就是 Double/Float 混用, Kotlin 直接编译不过(上一版就是这么挂的)
+        val fovy = (2.0 * Math.toDegrees(
             atan(tan(Math.toRadians(fovH.toDouble()) / 2.0) / aspect.toDouble()),
-        ).toFloat()
+        )).toFloat()
         Matrix.perspectiveM(projM, 0, fovy.coerceIn(1f, 179f), aspect, 0.1f, 10f)
         Matrix.setIdentityM(viewM, 0)
         Matrix.rotateM(viewM, 0, -pitchDeg, 1f, 0f, 0f)

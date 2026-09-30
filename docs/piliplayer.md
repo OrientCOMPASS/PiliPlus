@@ -875,3 +875,100 @@ MediaExtractor ─┬─ video → MediaCodec ──→ SurfaceTexture(OES 纹�
 - tag 固定为 **`v2.1.5-test`**：每次新构建先删掉旧的 release 与同名 tag，
   再在新提交上重建 —— 下载链接永远不变，Release 页永远只有一个测试包；
 - CI 的 release 腿仍然只出 `arm64-v8a`。
+
+---
+
+## 11. 第六轮真机反馈（VR 播放器首版）
+
+首版自研 VR 播放器装机后反馈两件事：**控件全挤在屏幕中间**、**解码出来的画面是纯色**。
+两个都能定位到具体原因，不是"玄学渲染问题"。
+
+### 11.1 纯色画面：Flutter 不会替你设输出缓冲区尺寸
+
+`TextureRegistry.createSurfaceTexture()` 给的 SurfaceTexture，**Flutter 不会替插件调用
+`setDefaultBufferSize`**（这点和 `createSurfaceProducer`/ImageReader 不一样），默认就是 0x0。
+而我的时序是：`create` → native 立刻起 GL 线程开始渲染 → Dart 那边 `open()` 返回后
+才重建出 `Texture(textureId)` 组件并完成布局。于是 EGL 交换出来的缓冲只有 1 个像素、
+`glViewport` 也只有 1x1，Flutter 把这 1 个像素**拉伸铺满全屏** → 整屏一个纯色。
+
+修法（四层，缺一不可）：
+
+1. `initGl` 里主动 `setDefaultBufferSize(1280, 720)` 兜底，绝不留 0x0；
+2. Dart 侧 `LayoutBuilder` 拿到真实尺寸后按 `devicePixelRatio` 换算成**设备像素**，
+   通过新增的 `setRenderSize` 报给 native；
+3. native 收到后重设缓冲区尺寸并**重建 EGL window surface** —— 个别实现会把
+   创建时的几何信息缓存住，只改 `setDefaultBufferSize` 不一定生效；
+4. `eglQuerySurface` 查不到尺寸（返回 0）时退回我们自己设的值，
+   绝不让 `glViewport` 变成 0/1。
+
+顺带把 `eglCreateWindowSurface` 的 native window 从 `SurfaceTexture` 换成
+`Surface(surfaceTexture)`：EGL14 对前者各版本处理不完全一致，后者是所有实现都认的。
+
+### 11.2 还有一个只有 VR 播放器会踩的坑：明文 HTTP
+
+`MediaExtractor` 走的是**系统 HTTP 栈**（MediaHTTPService），受安卓明文流量策略约束
+（Android 9+ 默认禁止 `http://`）；而 mpv/FFmpeg 自己做 socket，**不受这个策略管** ——
+所以 SMB 播放在 mpv 路径下一直是好的，换到 VR 播放器就必挂（SMB 恰恰是走
+`127.0.0.1` 上的回环 HTTP 代理，见第 5 节）。
+
+新增 `android/app/src/main/res/xml/network_security_config.xml` 放开明文。
+说明一下影响面：这只是"允许"明文，不会把任何 https 请求降级；B 站接口全是 https，
+行为不变。而这个 app 本身就是局域网播放器（WebDAV/HTTP/SMB 直链是一等公民），
+mpv 路径早就在做任意明文 HTTP 了，这里只是让两条路径行为一致。
+
+### 11.3 控件挤在屏幕中间：Stack 的非定位子项是 tight 约束
+
+`Stack(fit: StackFit.expand)` 的**非定位**子项拿到的是**全屏 tight 约束**。
+我直接往里塞了 `SafeArea > Padding > Row` 的顶栏，Row 被拉满整屏，
+内容按 `crossAxisAlignment: center` 垂直居中 → 顶栏就出现在屏幕正中间。
+改为全部用 `Positioned` 明确定位（顶/左/右/底各一个），侧边按钮拆成左右两列各自
+`Center`，不再用一个占满全屏的 `Row`（那样还会把整屏的点击都吃掉）。
+
+### 11.4 加诊断能力：没有设备时，让真机一次把话说清
+
+沙盒里没有 Android SDK 也没有设备，"改一版→出包→装机→看现象"一轮就是二三十分钟，
+所以这轮把可观测性做进去了，下一轮不用再猜：
+
+- 顶栏「诊断信息」按钮：屏幕上直接显示 native 每 100ms 回报的一行
+  `render=<EGL 实际尺寸> video=<解码尺寸> frames=<渲染帧> texUpd=<updateTexImage 次数>
+  decoded=<解码帧> rendered=<送显帧> glErr pos playing dur`；
+- 「原画直通」开关：跳过球面投影，把解码帧原样贴出来。
+  **直通有画面 → 问题在投影；直通仍纯色 → 问题在解码/纹理链路**；
+- 一帧视频都没到时清成**深蓝**而不是黑：深蓝 = GL 在跑但没有解码帧，
+  纯黑 = 连 GL 输出都没到 Flutter，两者修法完全不同；
+- 打开后 10 秒仍无画面 → 明确报错并附上那行诊断。
+
+### 11.5 关于"用 xl_player 的管线解码再传给 view"
+
+现在这套 native 管线与 xl_player **结构同构**：
+
+```
+xl_player : ffmpeg 解封装 → MediaCodec 硬解 → OES 纹理 → 自己的 GLES 球面渲染 → SurfaceView
+本实现    : MediaExtractor → MediaCodec 硬解 → OES 纹理 → 自己的 GLES2 投影   → Flutter Texture
+```
+
+参数同样是**每帧 uniform**（不重编译、不重建管线），头追同样在渲染线程里逐帧叠加。
+唯一区别是最后一步呈现到 Flutter 的 `Texture` 而不是自己的 `SurfaceView` ——
+因为控制层是 Flutter 画的，必须能叠在画面上面（用 SurfaceView 就得走 PlatformView
+混合合成，还要处理 z-order）。
+
+**如果诊断显示 `decoded/frames/texUpd` 都在涨而画面仍然不对**，那问题就锁定在最后
+这一步呈现上，下一轮改成 PlatformView + SurfaceView（`initExpensiveAndroidView`
+混合合成，Flutter 控件照样能叠在上面）即可，解码与投影代码一行都不用动。
+
+### 11.6 目录检索（本目录 + 所有子目录）
+
+浏览页顶栏新增检索按钮，`LocalMediaService.search()`：
+
+- 广度优先递归**当前目录及其所有子目录**，按文件名（不区分大小写）匹配可播放媒体，
+  结果保持 BFS 顺序 —— 要搜的东西多半就在附近，就近排前面比按名称排序更有用；
+- 输入 400ms 去抖；改词/退出/销毁页面用「检索代数」让在飞的那次结果直接作废；
+- `maxResults=500` / `maxDirs=1500` 硬上限：整卡递归动辄上万个目录，SMB 更是
+  **每个目录一次网络往返**，不设上限会把 UI 和连接一起拖死；扫描中实时显示
+  「已扫描 N 个目录，找到 M 个」；
+- 单个目录读不出来（无权限/断链/服务端拒绝）跳过，不影响整体；
+- 结果直接可播，播放列表就是结果集；检索态下隐藏书签/排序/隐藏文件/刷新，
+  返回键先退出检索；
+- 下钻路径的推导抽成 `LocalMediaService.childPath()`，浏览与检索共用同一套约定
+  （本机 = 绝对路径，网络 = 服务器相对路径，SMB 主机级 = 共享名打头），
+  避免又出现"多套一层共享名"那类错，并补了单测。

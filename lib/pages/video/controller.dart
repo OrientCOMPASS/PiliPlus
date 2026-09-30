@@ -453,6 +453,10 @@ class VideoDetailController extends GetxController
     isFileSource = sourceType == SourceType.file || isLocalMedia;
     isPlayAll = sourceType != SourceType.normal && !isFileSource;
     if (isLocalMedia) {
+      // 本地视频强制自动播放: 关掉"自动播放"设置时, 播放页会停在封面占位状态,
+      // 那里挂的是**在线视频**的顶栏菜单(分享/举报/稍后再看...), 对本地文件
+      // 全都不成立。本地点开就是要看, 没有"先不播"的语义。
+      _autoPlay.value = true;
       initLocalMediaSource(
         args['localMedia'] as LocalMediaItem,
         // SMB 之类需要先在本机代理上注册, 由「本地」板块解析好后传进来
@@ -836,7 +840,13 @@ class VideoDetailController extends GetxController
       videoType: videoType,
       onInit: () {
         videoState.value = true;
-        setSubtitle(vttSubtitlesIndex.value);
+        // 本地/局域网媒体没有 B 站字幕, 这里一调 setSubtitle(-1) 就会
+        // `setSubtitleTrack(no)` -> mpv `sid=no`, 把片源里**内嵌**的字幕
+        // 一起关掉(表现为"明明有内嵌字幕却看不到")。
+        // 内嵌字幕交给 mpv 的 sid=auto 自选, 用户可在顶栏「字幕」面板改。
+        if (!isLocalMedia) {
+          setSubtitle(vttSubtitlesIndex.value);
+        }
       },
       width: firstVideo.width,
       height: firstVideo.height,

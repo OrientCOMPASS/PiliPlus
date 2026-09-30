@@ -761,6 +761,58 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
   }
 
+  // ==================== 内嵌字幕 / 音轨(mpv 自己的轨道) ====================
+
+  /// mpv 报告的全部轨道。
+  ///
+  /// media_kit 会在每个列表最前面塞 `auto` / `no` 两个伪轨道
+  /// (见 media_kit `real.dart` 里 `track-list` 的处理), 展示时要过滤掉,
+  /// 见 [internalSubtitleTracks] / [internalAudioTracks]。
+  final Rx<Tracks> mpvTracks = Rx<Tracks>(const Tracks());
+
+  /// 当前**实际生效**的轨道。直接来自 mpv(`stream.track`), 不是这边记的,
+  /// 所以面板上显示的"当前字幕流"一定与画面一致。
+  final Rx<Track> currentTrack = Rx<Track>(const Track());
+
+  static bool _isPseudoTrack(String id) => id == 'auto' || id == 'no';
+
+  /// 真正可选的内嵌字幕轨道(MKV/MP4 里封进去的 ass/srt/pgs...)
+  List<SubtitleTrack> get internalSubtitleTracks => [
+    for (final t in mpvTracks.value.subtitle)
+      if (!_isPseudoTrack(t.id)) t,
+  ];
+
+  /// 真正可选的内嵌音轨(国配/原声之类)
+  List<AudioTrack> get internalAudioTracks => [
+    for (final t in mpvTracks.value.audio)
+      if (!_isPseudoTrack(t.id)) t,
+  ];
+
+  /// 轨道展示名: 标题 > 语言 > 序号, 末尾附编码(VLC 的轨道菜单就是这个信息量)
+  static String trackLabel({
+    required String id,
+    String? title,
+    String? language,
+    String? codec,
+  }) {
+    final name = title != null && title.isNotEmpty
+        ? title
+        : language != null && language.isNotEmpty
+        ? language
+        : '轨道 $id';
+    return codec == null || codec.isEmpty ? name : '$name ($codec)';
+  }
+
+  /// 切换内嵌字幕轨道。传 [SubtitleTrack.no] 关闭, [SubtitleTrack.auto] 交给 mpv 自选。
+  Future<void> setInternalSubtitleTrack(SubtitleTrack track) async {
+    await _videoPlayerController?.setSubtitleTrack(track);
+  }
+
+  /// 切换内嵌音轨
+  Future<void> setInternalAudioTrack(AudioTrack track) async {
+    await _videoPlayerController?.setAudioTrack(track);
+  }
+
   // ==================== VR / 全景 ====================
 
   /// 当前片源的立体布局, [VrProjection.off] 表示普通视频
@@ -1382,6 +1434,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     assert(_subscriptions == null);
     final stream = player.stream;
     _subscriptions = [
+      /// mpv 自己的轨道表: 内嵌字幕/音轨要靠它才能列给用户
+      /// (B 站视频没有内嵌轨, 本地/局域网片源经常有)
+      stream.tracks.listen((tracks) => mpvTracks.value = tracks),
+
+      /// 当前实际选中的轨道, 面板上"当前字幕流"以此为准
+      stream.track.listen((track) => currentTrack.value = track),
+
       /// playing
       stream.playing.listen((bool playing) {
         WakelockPlus.toggle(enable: playing);
@@ -2038,6 +2097,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       showSystemBar();
     }
     danmakuController = null;
+    mpvTracks.value = const Tracks();
+    currentTrack.value = const Track();
     // VR 状态是单次播放会话的, 播放器销毁后复位
     vrProjection.value = VrProjection.off;
     vrControlMode.value = false;

@@ -72,7 +72,8 @@ import 'package:hive_ce/hive.dart';
 import 'package:intl/intl.dart' show DateFormat;
 import 'package:material_design_icons_flutter/material_design_icons_flutter.dart';
 import 'package:material_ui/material_ui.dart' hide showBottomSheet;
-import 'package:media_kit/media_kit.dart' show NativePlayer;
+import 'package:media_kit/media_kit.dart'
+    show AudioTrack, NativePlayer, SubtitleTrack;
 
 mixin TimeBatteryMixin<T extends StatefulWidget> on State<T> {
   PlPlayerController get plPlayerController;
@@ -675,11 +676,14 @@ class HeaderControlState extends State<HeaderControl>
                           );
                         },
                       ),
-                      if ((isFileSource &&
-                              !(plPlayerController.dataSource as FileSource)
-                                  .isMp4) ||
-                          (!isFileSource &&
-                              videoDetailCtr.audioUrl?.isNotEmpty == true))
+                      // "只听音频"只在视频/音频是两条独立流时才有意义:
+                      // 离线缓存(dash, 非 mp4)或在线视频(有独立 audioUrl)。
+                      // 必须按 dataSource 的**真实类型**判断, 不能用页面的
+                      // isFileSource 去强转 —— 本地/局域网媒体的 dataSource 是
+                      // NetworkSource(SMB 回环代理 / WebDAV / HTTP),
+                      // 之前 `as FileSource` 在这里必崩(打开三点菜单就报
+                      // type 'NetworkSource' is not a subtype of type 'FileSource')。
+                      if (_canOnlyPlayAudio)
                         Obx(
                           () {
                             final onlyPlayAudio =
@@ -802,77 +806,8 @@ class HeaderControlState extends State<HeaderControl>
                     title: const Text('弹幕设置', style: titleStyle),
                   ),
                 ],
-                ListTile(
-                  dense: true,
-                  onTap: () {
-                    Get.back();
-                    showSetSubtitle();
-                  },
-                  leading: const Icon(Icons.subtitles_outlined, size: 20),
-                  title: const Text('字幕设置', style: titleStyle),
-                ),
-                ListTile(
-                  dense: true,
-                  onTap: () async {
-                    Get.back();
-                    try {
-                      final result = await FilePicker.pickFile(
-                        type: .custom,
-                        allowedExtensions: const [
-                          'json',
-                          'vtt',
-                          'srt',
-                          'ass',
-                          'bcc',
-                        ],
-                      );
-                      if (result != null) {
-                        final file = result.xFile;
-                        final path = file.path;
-                        final name = file.name;
-                        final length = videoDetailCtr.subtitles.length;
-                        if (name.endsWith('.json') || name.endsWith('.bcc')) {
-                          final file = File(path);
-                          final stream = file.openRead().transform(
-                            utf8.decoder,
-                          );
-                          final buffer = StringBuffer();
-                          await for (final chunk in stream) {
-                            if (!mounted) return;
-                            buffer.write(chunk);
-                          }
-                          if (!mounted) return;
-                          String sub = buffer.toString();
-                          sub = await compute<List, String>(
-                            SubtitleUtils.json2Vtt,
-                            jsonDecode(sub)['body'],
-                          );
-                          if (!mounted) return;
-                          videoDetailCtr.vttSubtitles[length] = (
-                            isData: true,
-                            id: sub,
-                          );
-                        } else {
-                          videoDetailCtr.vttSubtitles[length] = (
-                            isData: false,
-                            id: path,
-                          );
-                        }
-                        videoDetailCtr.subtitles.add(
-                          Subtitle(
-                            lan: '',
-                            lanDoc: name.split('.').firstOrNull ?? name,
-                          ),
-                        );
-                        await videoDetailCtr.setSubtitle(length + 1);
-                      }
-                    } catch (e) {
-                      SmartDialog.showToast('加载失败: $e');
-                    }
-                  },
-                  leading: const Icon(Icons.file_open_outlined, size: 20),
-                  title: const Text('加载字幕', style: titleStyle),
-                ),
+                // 字幕设置 / 加载字幕 已移到播放器顶栏的「字幕」按钮里
+                // (与 VLC 一致: 字幕是一个独立入口, 里面能看到当前用的是哪条流)
                 if (!videoDetailCtr.isFileSource &&
                     videoDetailCtr.subtitles.isNotEmpty)
                   ListTile(
@@ -976,6 +911,25 @@ class HeaderControlState extends State<HeaderControl>
                       subtitle: Text(state.track.video.toString()),
                       onTap: () =>
                           Utils.copyText('VideoTrack\n${state.track.video}'),
+                    ),
+                    // 原来只列 video/audio, 内嵌字幕有没有被选上根本看不出来
+                    ListTile(
+                      dense: true,
+                      title: const Text("SubtitleTrack"),
+                      subtitle: Text(state.track.subtitle.toString()),
+                      onTap: () => Utils.copyText(
+                        'SubtitleTrack\n${state.track.subtitle}',
+                      ),
+                    ),
+                    ListTile(
+                      dense: true,
+                      title: const Text("Tracks(可用轨道数)"),
+                      subtitle: Text(
+                        'video=${state.tracks.video.length} '
+                        'audio=${state.tracks.audio.length} '
+                        'subtitle=${state.tracks.subtitle.length}',
+                      ),
+                      onTap: () => Utils.copyText('Tracks\n${state.tracks}'),
                     ),
                     ListTile(
                       dense: true,
@@ -1401,6 +1355,296 @@ class HeaderControlState extends State<HeaderControl>
   int get subtitleFontWeight => plPlayerController.subtitleFontWeight;
 
   /// 字幕设置
+  /// 字幕面板(顶栏「字幕」按钮)。
+  ///
+  /// 三合一: **当前正在用的字幕流** + 可选轨道(B 站字幕 / mpv 内嵌轨道) +
+  /// 加载外挂字幕 + 字幕设置。参照 VLC 的字幕菜单。
+  ///
+  /// 为什么要单独立一个入口: 内嵌字幕以前完全没有暴露给用户
+  /// (底栏那个字幕按钮只在有 B 站字幕时才出现), 而且本地视频启动时会
+  /// `setSubtitleTrack(no)` 把内嵌字幕一起关掉 —— 于是"有内嵌字幕却看不到"。
+  void showSubtitlePanel() {
+    showBottomSheet(
+      (context, setState) {
+        final theme = Theme.of(context);
+        final colorScheme = theme.colorScheme;
+        return Padding(
+          padding: const EdgeInsets.all(12),
+          child: Material(
+            clipBehavior: Clip.hardEdge,
+            color: colorScheme.surface,
+            borderRadius: const BorderRadius.all(Radius.circular(12)),
+            child: Obx(
+              () {
+                final biliSubs = videoDetailCtr.subtitles;
+                final vttIndex = videoDetailCtr.vttSubtitlesIndex.value;
+                final inner = plPlayerController.internalSubtitleTracks;
+                final audios = plPlayerController.internalAudioTracks;
+                final current = plPlayerController.currentTrack.value;
+                final currentSubId = current.subtitle.id;
+                final currentAudioId = current.audio.id;
+                return ListView(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  children: [
+                    ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.subtitles_outlined, size: 20),
+                      title: const Text('字幕', style: titleStyle),
+                      subtitle: Text(
+                        '当前: ${_currentSubtitleLabel(
+                          biliSubs,
+                          vttIndex,
+                          inner,
+                          currentSubId,
+                        )}',
+                        style: subTitleStyle,
+                      ),
+                    ),
+                    if (biliSubs.isNotEmpty) ...[
+                      _sectionTitle(context, 'B 站字幕'),
+                      if (!isLocalMedia)
+                        _trackTile(
+                          context,
+                          label: '关闭',
+                          selected: vttIndex <= 0,
+                          onTap: () {
+                            Get.back();
+                            videoDetailCtr.setSubtitle(0);
+                          },
+                        ),
+                      for (var i = 0; i < biliSubs.length; i++)
+                        _trackTile(
+                          context,
+                          label: biliSubs[i].lanDoc ?? biliSubs[i].lan,
+                          selected: vttIndex == i + 1,
+                          onTap: () {
+                            Get.back();
+                            videoDetailCtr.setSubtitle(i + 1);
+                          },
+                        ),
+                    ],
+                    if (inner.isNotEmpty) ...[
+                      _sectionTitle(context, '内嵌字幕轨道'),
+                      _trackTile(
+                        context,
+                        label: '自动',
+                        selected: currentSubId == 'auto',
+                        onTap: () {
+                          Get.back();
+                          plPlayerController.setInternalSubtitleTrack(
+                            SubtitleTrack.auto(),
+                          );
+                        },
+                      ),
+                      _trackTile(
+                        context,
+                        label: '关闭',
+                        selected: currentSubId == 'no',
+                        onTap: () {
+                          Get.back();
+                          plPlayerController.setInternalSubtitleTrack(
+                            SubtitleTrack.no(),
+                          );
+                        },
+                      ),
+                      for (final t in inner)
+                        _trackTile(
+                          context,
+                          label: PlPlayerController.trackLabel(
+                            id: t.id,
+                            title: t.title,
+                            language: t.language,
+                            codec: t.codec,
+                          ),
+                          selected: currentSubId == t.id,
+                          onTap: () {
+                            Get.back();
+                            plPlayerController.setInternalSubtitleTrack(
+                              SubtitleTrack(t.id, t.title, t.language),
+                            );
+                          },
+                        ),
+                    ],
+                    // 多音轨的本地片源很常见(国配/原声), 顺手一起给出来
+                    if (audios.length > 1) ...[
+                      _sectionTitle(context, '音轨'),
+                      for (final t in audios)
+                        _trackTile(
+                          context,
+                          label: PlPlayerController.trackLabel(
+                            id: t.id,
+                            title: t.title,
+                            language: t.language,
+                            codec: t.codec,
+                          ),
+                          selected: currentAudioId == t.id,
+                          onTap: () {
+                            Get.back();
+                            plPlayerController.setInternalAudioTrack(
+                              AudioTrack(t.id, t.title, t.language),
+                            );
+                          },
+                        ),
+                    ],
+                    if (biliSubs.isEmpty && inner.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 8,
+                        ),
+                        child: Text(
+                          '这个视频没有字幕轨，可以在下面手动加载外挂字幕',
+                          style: subTitleStyle.copyWith(
+                            color: colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    const Divider(height: 20),
+                    ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.file_open_outlined, size: 20),
+                      title: const Text('加载字幕…', style: titleStyle),
+                      subtitle: const Text(
+                        'srt / ass / vtt / json / bcc',
+                        style: subTitleStyle,
+                      ),
+                      onTap: () {
+                        Get.back();
+                        loadExternalSubtitle();
+                      },
+                    ),
+                    ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.tune, size: 20),
+                      title: const Text('字幕设置', style: titleStyle),
+                      subtitle: Text(
+                        '字号 / 颜色 / 描边 / 位置 / 延迟',
+                        style: subTitleStyle.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      onTap: () {
+                        Get.back();
+                        showSetSubtitle();
+                      },
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _sectionTitle(BuildContext context, String text) => Padding(
+    padding: const EdgeInsets.fromLTRB(20, 10, 20, 2),
+    child: Text(
+      text,
+      style: subTitleStyle.copyWith(
+        color: ColorScheme.of(context).primary,
+        fontWeight: FontWeight.w600,
+      ),
+    ),
+  );
+
+  Widget _trackTile(
+    BuildContext context, {
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    final colorScheme = ColorScheme.of(context);
+    return ListTile(
+      dense: true,
+      onTap: onTap,
+      leading: Icon(
+        selected ? Icons.radio_button_checked : Icons.radio_button_off,
+        size: 18,
+        color: selected ? colorScheme.primary : colorScheme.outline,
+      ),
+      title: Text(
+        label,
+        style: titleStyle.copyWith(
+          color: selected ? colorScheme.primary : null,
+        ),
+      ),
+    );
+  }
+
+  /// 当前字幕流的展示名: B 站字幕优先(它是显式选出来的), 其次看 mpv 实际选中的轨
+  String _currentSubtitleLabel(
+    List<Subtitle> biliSubs,
+    int vttIndex,
+    List<SubtitleTrack> inner,
+    String currentSubId,
+  ) {
+    if (vttIndex > 0 && vttIndex <= biliSubs.length) {
+      final s = biliSubs[vttIndex - 1];
+      return '${s.lanDoc ?? s.lan}(外挂)';
+    }
+    if (currentSubId == 'no') {
+      return '关闭';
+    }
+    if (currentSubId == 'auto') {
+      return inner.isEmpty ? '自动(无可用轨道)' : '自动';
+    }
+    for (final t in inner) {
+      if (t.id == currentSubId) {
+        return PlPlayerController.trackLabel(
+          id: t.id,
+          title: t.title,
+          language: t.language,
+          codec: t.codec,
+        );
+      }
+    }
+    return currentSubId.isEmpty ? '无' : currentSubId;
+  }
+
+  /// 加载外挂字幕(原来挂在三点菜单里, 现在从字幕面板进)。
+  /// 逻辑与原菜单项一致: json/bcc 转成 vtt 数据内联加载, 其它按文件路径加载。
+  Future<void> loadExternalSubtitle() async {
+    try {
+      final result = await FilePicker.pickFile(
+        type: .custom,
+        allowedExtensions: const ['json', 'vtt', 'srt', 'ass', 'bcc'],
+      );
+      if (result == null) {
+        return;
+      }
+      final file = result.xFile;
+      final path = file.path;
+      final name = file.name;
+      final length = videoDetailCtr.subtitles.length;
+      if (name.endsWith('.json') || name.endsWith('.bcc')) {
+        final stream = File(path).openRead().transform(utf8.decoder);
+        final buffer = StringBuffer();
+        await for (final chunk in stream) {
+          if (!mounted) return;
+          buffer.write(chunk);
+        }
+        if (!mounted) return;
+        String sub = buffer.toString();
+        sub = await compute<List, String>(
+          SubtitleUtils.json2Vtt,
+          jsonDecode(sub)['body'],
+        );
+        if (!mounted) return;
+        videoDetailCtr.vttSubtitles[length] = (isData: true, id: sub);
+      } else {
+        videoDetailCtr.vttSubtitles[length] = (isData: false, id: path);
+      }
+      videoDetailCtr.subtitles.add(
+        Subtitle(lan: '', lanDoc: name.split('.').firstOrNull ?? name),
+      );
+      await videoDetailCtr.setSubtitle(length + 1);
+    } catch (e) {
+      SmartDialog.showToast('加载失败: $e');
+    }
+  }
+
   void showSetSubtitle() {
     showBottomSheet(
       padding: () => isFullScreen ? const .only(bottom: 70) : .zero,
@@ -1774,6 +2018,21 @@ class HeaderControlState extends State<HeaderControl>
   /// 稍后再看/笔记/举报(全是 B 站接口)。
   late final isLocalMedia = videoDetailCtr.isLocalMedia;
 
+  /// 「只听音频」是否可用: 只有视频与音频是**两条独立流**时才有意义。
+  ///
+  /// 这里以前写的是 `isFileSource && !(dataSource as FileSource).isMp4`,
+  /// 而本地/局域网媒体的 dataSource 是 [NetworkSource](SMB 回环代理 /
+  /// WebDAV / HTTP), 页面的 `isFileSource` 却是 true —— 一强转就崩
+  /// (打开三点菜单必现)。改成先判类型再用, 不做任何强转。
+  bool get _canOnlyPlayAudio {
+    if (isFileSource) {
+      final dataSource = plPlayerController.dataSource;
+      // 离线缓存的 dash(非 mp4)才是双流; 本机文件是单文件, 没有独立音轨
+      return dataSource is FileSource && !dataSource.isMp4;
+    }
+    return videoDetailCtr.audioUrl?.isNotEmpty == true;
+  }
+
   @override
   Widget build(BuildContext context) {
     final isFullScreen = this.isFullScreen;
@@ -2043,6 +2302,21 @@ class HeaderControlState extends State<HeaderControl>
                     ),
                   ),
                 ),
+              // 字幕: 从三点菜单提到顶栏, 面板里能看到当前用的是哪条流
+              SizedBox(
+                width: btnWidth,
+                height: btnHeight,
+                child: IconButton(
+                  tooltip: '字幕',
+                  style: btnStyle,
+                  onPressed: showSubtitlePanel,
+                  icon: const Icon(
+                    Icons.subtitles_outlined,
+                    size: 19,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
               if (Platform.isAndroid ||
                   (PlatformUtils.isDesktop && !isFullScreen))
                 SizedBox(

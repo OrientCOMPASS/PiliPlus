@@ -69,7 +69,10 @@ void main() {
     test('共享 + 子路径', () {
       final ep = SmbBrowse.parseEndpoint('smb://NAS/pub/videos/a.mkv');
       expect(ep, isNotNull);
-      expect(ep!.host, 'NAS');
+      // Dart 的 Uri.host 会按 RFC 3986 规范化成小写; 连接不受影响
+      // (DNS/NetBIOS 都大小写不敏感), 需要保留原样的地方走
+      // LocalMediaSource.rawHostOf
+      expect(ep!.host, 'nas');
       expect(ep.port, 445);
       expect(ep.share, 'pub');
       expect(ep.path, r'videos\a.mkv');
@@ -93,12 +96,14 @@ void main() {
       expect(SmbBrowse.parseEndpoint('smb:///only-share'), isNull);
     });
 
-    test('uri 与 parseEndpoint 往返一致', () {
+    test('uri 与 parseEndpoint 往返一致(主机名除大小写外不变)', () {
       const share = '影片 库';
       const remote = r'剧集\第 1集.mkv';
       final url = SmbBrowse.uri(host: 'NAS', share: share, remotePath: remote);
+      expect(url, 'smb://NAS/%E5%BD%B1%E7%89%87%20%E5%BA%93/'
+          '%E5%89%A7%E9%9B%86/%E7%AC%AC%201%E9%9B%86.mkv');
       final ep = SmbBrowse.parseEndpoint(url)!;
-      expect(ep.host, 'NAS');
+      expect(ep.host.toLowerCase(), 'nas');
       expect(ep.share, share);
       expect(ep.path, remote);
     });

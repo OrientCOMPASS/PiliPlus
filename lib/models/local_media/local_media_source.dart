@@ -79,11 +79,49 @@ class LocalMediaSource {
       return null;
     }
     return (
-      host: uri.host,
+      host: rawHostOf(url) ?? uri.host,
       port: uri.hasPort && uri.port > 0 ? uri.port : 445,
       share: segments.first,
       path: segments.length > 1 ? segments.sublist(1).join(r'\') : '',
     );
+  }
+
+  /// 从 URL 里取出**保留原始大小写**的主机名。
+  ///
+  /// Dart 的 [Uri.host] 会按 RFC 3986 把主机名规范化成小写
+  /// (`Uri.parse('smb://NAS/pub').host == 'nas'`), 而 NetBIOS 名习惯是大写
+  /// (发现阶段 NBSTAT/SRVSVC 拿到的就是大写), 展示、以及"这是不是同一台主机"
+  /// 的匹配都想保留原样。连接本身不受影响: DNS 与 NetBIOS 都大小写不敏感。
+  static String? rawHostOf(String url) {
+    final schemeEnd = url.indexOf('://');
+    if (schemeEnd < 0) {
+      return null;
+    }
+    var authority = url.substring(schemeEnd + 3);
+    // 截掉 path / query / fragment
+    var end = authority.length;
+    for (final c in const ['/', '?', '#']) {
+      final i = authority.indexOf(c);
+      if (i >= 0 && i < end) {
+        end = i;
+      }
+    }
+    authority = authority.substring(0, end);
+    // 截掉 userinfo(百分号编码后的 %40 不会与分隔符 '@' 混淆)
+    final at = authority.lastIndexOf('@');
+    if (at >= 0) {
+      authority = authority.substring(at + 1);
+    }
+    // IPv6 字面量带方括号, 里面的冒号不是端口分隔符
+    if (authority.startsWith('[')) {
+      final close = authority.indexOf(']');
+      return close < 0 ? null : authority.substring(0, close + 1);
+    }
+    final colon = authority.indexOf(':');
+    if (colon >= 0) {
+      authority = authority.substring(0, colon);
+    }
+    return authority.isEmpty ? null : authority;
   }
 
   /// 只解析主机与端口(不要求 URL 里带共享名)
@@ -95,7 +133,10 @@ class LocalMediaSource {
     if (uri == null || uri.host.isEmpty) {
       return null;
     }
-    return (host: uri.host, port: uri.hasPort && uri.port > 0 ? uri.port : 445);
+    return (
+      host: rawHostOf(url) ?? uri.host,
+      port: uri.hasPort && uri.port > 0 ? uri.port : 445,
+    );
   }
 
   /// **主机级** SMB 来源: URL 形如 `smb://NAS`(没有共享名)。

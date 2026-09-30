@@ -183,6 +183,33 @@ void main() {
     });
   });
 
+  group('rawHostOf(保留主机名原始大小写)', () {
+    test('Uri.host 会把主机名小写, 这里必须保留原样', () {
+      // 回归: Dart 的 Uri.parse('smb://NAS/pub').host == 'nas',
+      // 于是收藏/展示的地址会变成 smb://nas, 与发现阶段拿到的
+      // 大写 NetBIOS 名对不上(同一台主机被认成两台)
+      expect(Uri.parse('smb://NAS/pub').host, 'nas');
+      expect(LocalMediaSource.rawHostOf('smb://NAS/pub'), 'NAS');
+    });
+
+    test('带端口/userinfo/路径/查询/片段', () {
+      expect(LocalMediaSource.rawHostOf('smb://MyNAS:1445/pub'), 'MyNAS');
+      expect(LocalMediaSource.rawHostOf('smb://u:p@MyNAS/pub'), 'MyNAS');
+      expect(LocalMediaSource.rawHostOf('https://U:P@MyNAS/x?a=1#f'), 'MyNAS');
+      expect(LocalMediaSource.rawHostOf('smb://MyNAS'), 'MyNAS');
+    });
+
+    test('IPv6 字面量里的冒号不是端口分隔符', () {
+      expect(LocalMediaSource.rawHostOf('smb://[fe80::1]:445/x'), '[fe80::1]');
+    });
+
+    test('非法输入返回 null', () {
+      expect(LocalMediaSource.rawHostOf('smb://'), null);
+      expect(LocalMediaSource.rawHostOf('/storage/emulated/0'), null);
+      expect(LocalMediaSource.rawHostOf('smb:///share'), null);
+    });
+  });
+
   group('defaultPortFor', () {
     test('常见协议', () {
       expect(LocalMediaSource.defaultPortFor('http'), 80);

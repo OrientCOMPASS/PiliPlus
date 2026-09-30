@@ -176,10 +176,7 @@ class _LocalMediaPageState extends State<LocalMediaPage> {
               title: const Text('编辑'),
               onTap: () async {
                 Navigator.of(dialogContext).pop();
-                final updated = await showSourceEditor(
-                  this.context,
-                  initial: source,
-                );
+                final updated = await showSourceEditor(context, initial: source);
                 if (updated != null) {
                   await _controller.replaceSource(source, updated);
                 }

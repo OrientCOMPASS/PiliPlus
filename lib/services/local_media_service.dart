@@ -163,15 +163,9 @@ abstract final class LocalMediaService {
       if (!isDir && entity is! File) {
         continue;
       }
-      FileStat? stat;
-      try {
-        stat = await entity.stat();
-      } catch (_) {
-        // 读不到属性就跳过, 不影响整个目录
-        continue;
-      }
-      final fileStat = stat;
-      if (fileStat == null) {
+      // 单个条目读不到属性就跳过, 不影响整个目录
+      final stat = await _statOrNull(entity);
+      if (stat == null) {
         continue;
       }
       items.add(
@@ -179,13 +173,24 @@ abstract final class LocalMediaService {
           name: name,
           uri: entity.path,
           source: source,
-          size: isDir ? null : fileStat.size,
-          modified: fileStat.modified,
+          size: isDir ? null : stat.size,
+          modified: stat.modified,
           isDirectory: isDir,
         ),
       );
     }
     return onlyMedia ? _filterPlayable(items) : items;
+  }
+
+  /// 目录里条目可能很多, 用异步 stat 避免阻塞 UI 线程
+  /// (avoid_slow_async_io 建议同步版本, 这里刻意不用)
+  static Future<FileStat?> _statOrNull(FileSystemEntity entity) async {
+    try {
+      // ignore: avoid_slow_async_io
+      return await entity.stat();
+    } catch (_) {
+      return null;
+    }
   }
 
   static Future<List<LocalMediaItem>> _listWebDav(
@@ -252,8 +257,7 @@ abstract final class LocalMediaService {
     List<LocalMediaItem> items,
     LocalMediaSort sort,
   ) {
-    final sorted = [...items];
-    sorted.sort((a, b) {
+    return [...items]..sort((a, b) {
       // 目录永远在前
       if (a.isDirectory != b.isDirectory) {
         return a.isDirectory ? -1 : 1;
@@ -268,7 +272,6 @@ abstract final class LocalMediaService {
       };
       return bySort != 0 ? bySort : _compareName(a.name, b.name);
     });
-    return sorted;
   }
 
   /// 自然排序: 让 `第2集` 排在 `第10集` 前面

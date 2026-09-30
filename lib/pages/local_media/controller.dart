@@ -71,10 +71,11 @@ class LocalMediaController extends GetxController {
     }
   }
 
+  @override
   Future<void> refresh() async {
     final cur = current;
     if (cur == null) {
-      state.value = Success(const <LocalMediaItem>[]);
+      state.value = const Success(<LocalMediaItem>[]);
       return;
     }
     state.value = LoadingState.loading();

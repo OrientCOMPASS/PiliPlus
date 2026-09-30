@@ -65,6 +65,8 @@ env:
         test/services/smb/smb_live_test.dart
         test/services/smb/smb_share_enum_test.dart
         test/services/smb/smb_browse_test.dart
+        test/services/smb/smb_session_pool_test.dart
+        lib/services/smb/smb_session_pool.dart
         lib/plugin/pl_player/widgets/vr_control_layer.dart
         lib/plugin/pl_player/utils/vr_gyro.dart
         lib/plugin/pl_player/utils/vr_gyro_math.dart

@@ -242,6 +242,8 @@ class VrPlayerBridge(
                 if (dyaw != 0f || dpitch != 0f) {
                     g.yawDeg = wrapOrClampYaw(g.yawDeg + dyaw, g.fovDeg)
                     g.pitchDeg = (g.pitchDeg + dpitch).coerceIn(-MAX_PITCH, MAX_PITCH)
+                    // 渲染是"脏了才画", 头追改变了视角必须标脏, 否则画面不更新
+                    g.markDirty()
                 }
             }
         }

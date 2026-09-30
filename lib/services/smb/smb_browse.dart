@@ -1,5 +1,5 @@
 import 'package:PiliPlus/services/smb/local_media_proxy.dart';
-import 'package:PiliPlus/services/smb/smb2_client.dart';
+import 'package:PiliPlus/services/smb/smb_session_pool.dart';
 import 'package:PiliPlus/services/smb/srvsvc.dart';
 
 /// [SmbBrowse.listShares] 的结果: 共享列表 + 服务端身份 + 实际连上的地址
@@ -47,8 +47,11 @@ class SmbBrowseEntry {
 /// 这里刻意不引入 Flutter 依赖: 沙盒里可以用真实的 smbd 直接跑
 /// (`~/.ci/smb_testbed.sh`), 而不必依赖只能在 CI 上验证的 Flutter 构建。
 abstract final class SmbBrowse {
-  /// 列出 `\\host\share\path` 的内容。每次调用新建一条连接(局域网握手 ~50ms),
-  /// 好处是无状态: 不会因会话过期/服务端重启留下坏连接。
+  /// 列出 `\\host\share\path` 的内容。
+  ///
+  /// 会话走 [SmbSessionPool] 复用: 以前每次列目录都要重新
+  /// NEGOTIATE + NTLM 握手 + TREE_CONNECT(局域网里 100~300ms), 逐层点目录、
+  /// 以及递归检索(一个目录一次)时体感非常明显。VLC/libsmb2 也是复用会话的。
   static Future<List<SmbBrowseEntry>> list({
     required String host,
     int port = 445,
@@ -61,43 +64,37 @@ abstract final class SmbBrowse {
     String? address,
     Duration timeout = const Duration(seconds: 10),
   }) async {
-    final client = Smb2Client(
+    final entries = await SmbSessionPool.instance.run(
       host: host,
       port: port,
-      fallbackAddress: address,
+      share: share,
+      user: user,
+      password: password,
+      domain: domain,
+      address: address,
+      timeout: timeout,
+      body: (client) => client.listDirectory(path),
     );
-    try {
-      await client.connect(
-        user: user,
-        password: password,
-        domain: domain,
-        timeout: timeout,
-      );
-      await client.treeConnect(share);
-      final entries = await client.listDirectory(path);
-      final base = normalizePath(path);
-      final result = <SmbBrowseEntry>[];
-      for (final e in entries) {
-        if (!showHidden && e.name.startsWith('.')) {
-          continue;
-        }
-        result.add(
-          SmbBrowseEntry(
-            name: e.name,
-            remotePath: base.isEmpty ? e.name : '$base\\${e.name}',
-            isDirectory: e.isDirectory,
-            size: e.isDirectory ? null : e.size,
-            modified: e.modified,
-          ),
-        );
+    final base = normalizePath(path);
+    final result = <SmbBrowseEntry>[];
+    for (final e in entries) {
+      if (!showHidden && e.name.startsWith('.')) {
+        continue;
       }
-      return result;
-    } finally {
-      await client.close();
+      result.add(
+        SmbBrowseEntry(
+          name: e.name,
+          remotePath: base.isEmpty ? e.name : '$base\\${e.name}',
+          isDirectory: e.isDirectory,
+          size: e.isDirectory ? null : e.size,
+          modified: e.modified,
+        ),
+      );
     }
+    return result;
   }
 
-  /// 连通性检查, 返回该目录下的条目数; 失败时抛出 [SmbException]
+  /// 连通性检查, 返回该目录下的条目数; 失败时抛出 SmbException(见 smb2_client.dart)
   static Future<int> probe({
     required String host,
     int port = 445,
@@ -126,7 +123,7 @@ abstract final class SmbBrowse {
   /// 枚举一台主机的共享列表(SRVSVC NetShareEnum, 与 VLC/资源管理器同款做法),
   /// 顺带返回服务端自报的身份(用于"尽量以主机名展示")。
   ///
-  /// 匿名被拒时会抛 [SmbException](`isAuthFailure`), 上层应引导输入凭据。
+  /// 匿名被拒时会抛 SmbException(`isAuthFailure`), 上层应引导输入凭据。
   static Future<SmbShareListResult> listShares({
     required String host,
     int port = 445,
@@ -135,28 +132,27 @@ abstract final class SmbBrowse {
     String domain = '',
     String? address,
     Duration timeout = const Duration(seconds: 10),
-  }) async {
-    final client = Smb2Client(
+  }) {
+    // 共享枚举走 IPC$ 这条 tree, 所以池的 key 用 IPC$, 与磁盘共享的会话互不干扰。
+    // 主机根目录每次进来都要枚举一遍, 复用它省掉一整套握手。
+    return SmbSessionPool.instance.run(
       host: host,
       port: port,
-      fallbackAddress: address,
+      share: 'IPC\$',
+      user: user,
+      password: password,
+      domain: domain,
+      address: address,
+      timeout: timeout,
+      body: (client) async {
+        final shares = await Srvsvc.listShares(client);
+        return SmbShareListResult(
+          shares: shares,
+          serverInfo: client.serverInfo,
+          resolvedAddress: client.resolvedAddress,
+        );
+      },
     );
-    try {
-      await client.connect(
-        user: user,
-        password: password,
-        domain: domain,
-        timeout: timeout,
-      );
-      final shares = await Srvsvc.listShares(client);
-      return SmbShareListResult(
-        shares: shares,
-        serverInfo: client.serverInfo,
-        resolvedAddress: client.resolvedAddress,
-      );
-    } finally {
-      await client.close();
-    }
   }
 
   /// 注册到本机回环代理并返回可交给 mpv 的 http URL

@@ -40,6 +40,13 @@ internal class VrEngine(
         private const val DEQUEUE_TIMEOUT_US = 10_000L
         private const val DROP_LATE_US = 60_000L
         private const val MAX_SLEEP_MS = 10L
+
+        /**
+         * 预读窗口。第七轮真机反馈"卡顿更严重了": 一次喂满输入之后解码器会
+         * 尽可能往前解, 在弱 SoC 上与渲染线程抢 CPU, 反而更卡; seek 时也会
+         * 白解一大堆用不上的帧。限制成"最多领先时钟 0.8 秒"就够吸收 IO 抖动了。
+         */
+        private const val READ_AHEAD_US = 800_000L
     }
 
     var onPrepared: ((durationUs: Long, hasAudio: Boolean, width: Int, height: Int) -> Unit)? = null
@@ -435,6 +442,9 @@ internal class VrEngine(
         if (videoInputDone) return
         var fed = 0
         while (fed < maxBuffers) {
+            // 预读窗口: 已经超过时钟 READ_AHEAD_US 就先不喂
+            val nextPts = ex.sampleTime
+            if (nextPts >= 0 && nextPts - positionUs() > READ_AHEAD_US) return
             val inIndex = codec.dequeueInputBuffer(
                 if (blocking && fed == 0) DEQUEUE_TIMEOUT_US else 0,
             )

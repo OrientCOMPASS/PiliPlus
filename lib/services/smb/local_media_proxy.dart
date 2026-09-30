@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' show min;
 
 import 'package:PiliPlus/services/smb/smb2_client.dart';
+import 'package:PiliPlus/services/smb/smb_session_pool.dart';
 
 /// 一个可被代理播放的 SMB 对象
 class SmbTarget {
@@ -120,22 +121,38 @@ class LocalMediaProxy {
     }
   }
 
-  Future<void> _serve(HttpRequest request, SmbTarget target) async {
-    final client = Smb2Client(
+  /// 把一次 HTTP 请求翻译成 SMB READ 流。
+  ///
+  /// 会话走 [SmbSessionPool] 复用: 以前**每个 HTTP 请求都新建一条连接**
+  /// (NEGOTIATE + NTLM 握手 + TREE_CONNECT + CREATE, 局域网里 100~300ms),
+  /// 而 mpv / MediaExtractor 是按 Range 请求来读的 —— 拖一次进度条就要重新
+  /// 握手一次, 这就是局域网播放"拖一下就卡一下"的直接来源。
+  Future<void> _serve(HttpRequest request, SmbTarget target) {
+    return SmbSessionPool.instance.run<void>(
       host: target.host,
       port: target.port,
-      fallbackAddress: target.address,
+      share: target.share,
+      user: target.user,
+      password: target.password,
+      domain: target.domain,
+      address: target.address,
+      body: (client) => _stream(request, target, client),
     );
+  }
+
+  Future<void> _stream(
+    HttpRequest request,
+    SmbTarget target,
+    Smb2Client client,
+  ) async {
+    ({int persistent, int volatile, int size})? handle;
     try {
-      await client.connect(
-        user: target.user,
-        password: target.password,
-        domain: target.domain,
-      );
-      await client.treeConnect(target.share);
-      final handle = await client.openFile(target.path);
+      handle = await client.openFile(target.path);
       final total = handle.size;
-      final range = parseRange(request.headers.value(HttpHeaders.rangeHeader), total);
+      final range = parseRange(
+        request.headers.value(HttpHeaders.rangeHeader),
+        total,
+      );
       final start = range.$1;
       final end = range.$2;
       final length = end < start ? 0 : end - start + 1;
@@ -162,8 +179,33 @@ class LocalMediaProxy {
           'bytes $start-$end/$total',
         );
       }
+      await _pump(client, handle, response, start, end);
+    } on SmbException catch (e) {
+      await _fail(
+        request,
+        e.isNotFound ? HttpStatus.notFound : HttpStatus.badGateway,
+        e.statusText,
+      );
+    } finally {
+      // 文件句柄要还, 会话不还(由池管着, 下次请求继续用)
+      final h = handle;
+      if (h != null) {
+        try {
+          await client.closeFile(h.persistent, h.volatile);
+        } catch (_) {}
+      }
+    }
+  }
 
-      var offset = start;
+  Future<void> _pump(
+    Smb2Client client,
+    ({int persistent, int volatile, int size}) handle,
+    HttpResponse response,
+    int start,
+    int end,
+  ) async {
+    var offset = start;
+    try {
       while (offset <= end) {
         final want = min(end - offset + 1, chunkSize);
         final data = await client.read(
@@ -180,14 +222,14 @@ class LocalMediaProxy {
         offset += data.length;
       }
       await response.close();
-    } on SmbException catch (e) {
-      await _fail(
-        request,
-        e.isNotFound ? HttpStatus.notFound : HttpStatus.badGateway,
-        e.statusText,
-      );
-    } finally {
-      await client.close();
+    } on Object catch (_) {
+      // 客户端(mpv / MediaExtractor)中断了本次请求 —— seek 时天天发生。
+      // 这是 HTTP 层的事, 与 SMB 会话健康无关: 绝不能因此让池把会话作废,
+      // 否则"拖动进度条 = 重新握手", 正好把要修的问题又造回来。
+      // (真正的 SMB/网络错误是 SmbException / SocketException, 由外层与池处理)
+      try {
+        await response.close();
+      } catch (_) {}
     }
   }
 

@@ -20,11 +20,14 @@ import kotlin.math.atan2
  * 没有旋转矢量传感器时退回「加速度计定姿态 + 陀螺仪积分」，与 Dart 版同构。
  *
  * 坐标约定与 Dart 侧完全一致：**yaw+ = 向右看，pitch+ = 向上看**。
- * 推导：Android 设备坐标 X 向右、Y 向上、Z 垂直屏幕指向用户；
- * `getRotationMatrixFromVector` 给的 R 把设备坐标映到世界坐标（X 东、Y 北、Z 天），
- * 于是「屏幕朝向」在世界里就是 R·(0,0,1) = R 的第三列；
+ * 推导：Android 设备坐标 X 向右、Y 向上、Z 垂直屏幕**指向用户**；
+ * `getRotationMatrixFromVector` 给的 R 把设备坐标映到世界坐标（X 东、Y 北、Z 天）。
+ * magic-window 模式下"看向"的是**背面摄像头的方向 = -Z**（手机举起来对着场景、
+ * 屏幕朝着自己），所以视线向量 f = -R·(0,0,1) = -(R 的第三列)；
  * yaw = atan2(f.x, f.y)（以北为 0、向东为正 → 右转时增大），
  * pitch = asin(f.z)（抬头时增大）。
+ * **用 +Z 会得到符号相反的 pitch** —— 第六轮真机反馈的"上下是反的"就是这个，
+ * 而 yaw 只差一个常量 π、取相邻两次差值时自动抵消，所以当时只有俯仰翻。
  *
  * 增量不直接改视角，而是攒在 [drain] 里由 GL 线程每帧取走，
  * 避免传感器线程和渲染线程抢同一组 volatile 浮点数。
@@ -113,10 +116,15 @@ internal class VrHeadTracker(private val context: Context) : SensorEventListener
                 } catch (e: IllegalArgumentException) {
                     return // 个别机型在传感器还没 ready 时会给长度不对的 values
                 }
-                // R 的第三列 = 屏幕朝向在世界坐标里的方向
-                val fx = rotationMatrix[2]
-                val fy = rotationMatrix[5]
-                val fz = rotationMatrix[8]
+                // R 的第三列 = **屏幕法线**(+Z, 指向用户)在世界坐标里的方向。
+                // 但 magic-window 模式下"看向"的是**背面摄像头**的方向(-Z):
+                // 你把手机举起来对着场景, 屏幕朝着自己。用 +Z 会让俯仰符号
+                // 正好相反 —— 真机反馈"陀螺仪上下是反的"就是这个。
+                // (偏航只因此差一个常量 π, 而这里用的是相邻两次的**差值**,
+                //  常量自动抵消, 所以偏航一直是对的、只有俯仰翻。)
+                val fx = -rotationMatrix[2]
+                val fy = -rotationMatrix[5]
+                val fz = -rotationMatrix[8]
                 val yaw = atan2(fx, fy) * RAD2DEG
                 val pitch = asin(fz.coerceIn(-1f, 1f)) * RAD2DEG
                 val prevYaw = lastAbsYaw
@@ -145,15 +153,20 @@ internal class VrHeadTracker(private val context: Context) : SensorEventListener
                 if (dt <= 0f || dt > 0.5f) return
                 val wx = event.values[0]
                 val wy = event.values[1]
-                // 世界坐标下：绕「竖直轴」的分量 -> 偏航，绕「左右水平轴」的分量 -> 俯仰。
-                // 没有磁力计时用重力方向近似判定持握姿态（与 Dart 版 VrGyroMath 同思路）。
-                val g = gravity
-                val landscape = kotlin.math.abs(g[0]) > kotlin.math.abs(g[1])
-                val flipped = if (landscape) g[0] > 0 else false
-                val sign = if (flipped) -1f else 1f
-                val dyaw = if (landscape) sign * wy else -sign * wy
-                val dpitch = if (landscape) -sign * wx else sign * wx
                 if (kotlin.math.abs(wx) < DEADZONE && kotlin.math.abs(wy) < DEADZONE) return
+                // 没有旋转矢量传感器时的退回方案: 用重力判定持握姿态, 再把
+                // 设备坐标的角速度映射到"偏航/俯仰"。四种姿态各自推导
+                // (视角方向 = -Z, 偏航 = 绕世界竖直轴, 俯仰 = 绕视线左右的水平轴):
+                //   竖屏(+y 朝上)      : dyaw = -wy, dpitch = +wx
+                //   竖屏倒置(+y 朝下)  : dyaw = +wy, dpitch = -wx
+                //   横屏顶左(+x 朝上)  : dyaw = -wx, dpitch = -wy
+                //   横屏顶右(+x 朝下)  : dyaw = +wx, dpitch = +wy
+                val g = gravity
+                val (dyaw, dpitch) = if (kotlin.math.abs(g[1]) >= kotlin.math.abs(g[0])) {
+                    if (g[1] >= 0) Pair(-wy, wx) else Pair(wy, -wx)
+                } else {
+                    if (g[0] >= 0) Pair(-wx, -wy) else Pair(wx, wy)
+                }
                 addDelta(dyaw * dt * RAD2DEG, dpitch * dt * RAD2DEG)
             }
         }

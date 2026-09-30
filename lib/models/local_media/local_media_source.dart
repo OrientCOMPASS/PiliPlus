@@ -73,10 +73,23 @@ class LocalMediaSource {
         '${Uri.encodeComponent(username ?? '')}:'
         '${Uri.encodeComponent(password ?? '')}';
     final host = uri.host;
-    final port = uri.hasPort && !uri.isPortDefault ? ':${uri.port}' : '';
+    // Uri.port 在未显式指定端口时会返回该 scheme 的默认端口, 这里据此决定是否写出端口
+    final port = uri.port;
+    final portPart = port == defaultPortFor(uri.scheme) || port == 0
+        ? ''
+        : ':$port';
     final p = uri.path;
-    return '${uri.scheme}://$info@$host$port${p.isEmpty ? '/' : p}';
+    return '${uri.scheme}://$info@$host$portPart${p.isEmpty ? '/' : p}';
   }
+
+  /// 常见协议的默认端口(未知协议返回 0, 此时不写出端口)
+  static int defaultPortFor(String scheme) => switch (scheme.toLowerCase()) {
+    'http' => 80,
+    'https' => 443,
+    'ftp' => 21,
+    'rtsp' => 554,
+    _ => 0,
+  };
 
   Map<String, dynamic> toJson() => {
     'type': type.index,

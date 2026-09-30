@@ -191,6 +191,22 @@ class LocalMediaSource {
     );
   }
 
+  /// 覆盖凭据。与 [copyWith] 不同, 传 null 就是**清空**
+  /// (浏览中改用匿名访问、或把密码改空时需要这个语义)。
+  LocalMediaSource withCredentials({
+    String? username,
+    String? password,
+    String? domain,
+  }) => LocalMediaSource(
+    type: type,
+    name: name,
+    url: url,
+    username: username,
+    password: password,
+    domain: domain,
+    address: address,
+  );
+
   LocalMediaSource copyWith({
     LocalMediaSourceType? type,
     String? name,

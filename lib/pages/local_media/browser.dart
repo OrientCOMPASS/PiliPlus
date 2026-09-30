@@ -18,7 +18,7 @@ import 'package:PiliPlus/utils/page_utils.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
-import 'package:get/get.dart' show Get;
+import 'package:get/get.dart';
 import 'package:material_ui/material_ui.dart';
 
 /// 目录浏览页: 从一个来源(本机目录 / SMB 共享 / WebDAV)的某个路径开始逐层浏览。
@@ -126,7 +126,7 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
     final user = creds.user.isEmpty ? null : creds.user;
     final password = creds.password.isEmpty ? null : creds.password;
     final domain = creds.domain.isEmpty ? null : creds.domain;
-    final updated = source.copyWith(
+    final updated = source.withCredentials(
       username: user,
       password: password,
       domain: domain,

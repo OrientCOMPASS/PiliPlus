@@ -369,10 +369,12 @@ class LocalMediaController extends GetxController {
     String? password,
     String domain = '',
   }) async {
-    final updated = source.copyWith(
+    // withCredentials 而不是 copyWith: 传 null 要能真的把旧凭据清掉,
+    // 否则"改用匿名访问"会一直带着上一次的错密码重试
+    final updated = source.withCredentials(
       username: user,
-      password: (password == null || password.isEmpty) ? null : password,
-      domain: domain.isEmpty ? null : domain,
+      password: password,
+      domain: domain,
     );
     final index = savedSources.indexOf(source);
     if (index >= 0) {

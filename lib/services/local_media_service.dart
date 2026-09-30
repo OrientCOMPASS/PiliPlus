@@ -162,7 +162,6 @@ abstract final class LocalMediaService {
         source,
         path,
         showHidden: showHidden,
-        onlyMedia: onlyMedia,
       ),
       _ => <LocalMediaItem>[],
     };

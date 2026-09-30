@@ -2026,7 +2026,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     vrGyroEnabled.value = false;
     _vrGyroTracker?.stop();
     _vrGyroTracker = null;
-    _vrShaderSource = null;
+    // 着色器文件与"源码 -> 路径"映射随播放器一起作废
+    // (下一次 _initPlayer 会 purge 目录并重置变体预算)
+    _vrAppliedSource = null;
+    _vrPathBySource.clear();
+    _vrSeq = 0;
+    _vrQuantizer.reset();
+    _vrBudgetWarned = false;
     isLocalMedia = false;
     _stopOrientationListener();
     _disableAutoEnterPip();

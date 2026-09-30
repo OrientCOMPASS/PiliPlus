@@ -64,6 +64,15 @@ internal class VrEngine(
     var speed: Float = 1f
         private set
 
+    /// 诊断计数: 解码器吐出的帧数 / 真正送去渲染的帧数
+    @Volatile
+    var decodedFrames: Long = 0
+        private set
+
+    @Volatile
+    var renderedFrames: Long = 0
+        private set
+
     // ==================== 视频 ====================
     private var videoExtractor: MediaExtractor? = null
     private var videoCodec: MediaCodec? = null
@@ -449,6 +458,7 @@ internal class VrEngine(
                         val pts = info.presentationTimeUs
                         val render = info.size > 0 &&
                             (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
+                        if (render) decodedFrames++
                         if (render) {
                             if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
                                 videoOutputDone = true
@@ -471,6 +481,7 @@ internal class VrEngine(
                                 break
                             }
                             codec.releaseOutputBuffer(outIndex, true)
+                            renderedFrames++
                             renderOneFrame = false
                             gl.requestRender()
                             if (starvingSince != 0L) {

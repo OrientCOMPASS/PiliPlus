@@ -80,6 +80,7 @@ internal class VrGlPipeline(
             uniform float uAspect;
             uniform float uCoverageH;
             uniform vec4 uEye;
+            uniform float uPassthrough;
             const float PI = 3.14159265358979;
 
             vec3 rotX(vec3 v, float a) {
@@ -95,6 +96,14 @@ internal class VrGlPipeline(
             }
 
             void main() {
+              // 诊断模式: 不做投影, 直接把解码帧原样贴出来。
+              // 用它区分"解码/纹理这条链路坏了"还是"投影数学坏了":
+              //   passthrough 有画面 -> 问题在投影; 仍是纯色 -> 问题在解码/纹理
+              if (uPassthrough > 0.5) {
+                vec2 ruv = (uTexMatrix * vec4(vUv.x, 1.0 - vUv.y, 0.0, 1.0)).xy;
+                gl_FragColor = texture2D(uVideo, ruv);
+                return;
+              }
               float tanH = tan(radians(uFov) * 0.5);
               float tanV = tanH / max(uAspect, 0.01);
               vec2 sc = (vUv - 0.5) * 2.0;
@@ -164,6 +173,73 @@ internal class VrGlPipeline(
 
     var onError: ((String) -> Unit)? = null
 
+    /**
+     * 诊断模式：不做球面投影，直接把解码帧原样贴出来。
+     * 用来区分"解码/纹理链路坏了"还是"投影数学坏了"。
+     */
+    @Volatile
+    var passthrough: Boolean = false
+
+    // ==================== 诊断计数（排查"纯色画面"用） ====================
+
+    @Volatile
+    var renderedFrames: Long = 0
+        private set
+
+    @Volatile
+    var textureUpdates: Long = 0
+        private set
+
+    @Volatile
+    var lastGlError: Int = 0
+        private set
+
+    /** 渲染目标(EGL surface)的实际尺寸，0x0 说明 Flutter 那边还没给尺寸 */
+    @Volatile
+    var renderSize: String = "0x0"
+        private set
+
+    /** 一帧视频都还没到 -> 清成深蓝而不是黑，便于和"GL 没跑起来"区分 */
+    @Volatile
+    private var gotFirstFrame: Boolean = false
+
+    /**
+     * 渲染目标的缓冲区尺寸。
+     *
+     * **必须自己设**：Flutter 的 `TextureRegistry.createSurfaceTexture()` 不会替
+     * 插件设 `setDefaultBufferSize`，SurfaceTexture 默认是 0x0；
+     * 这时 EGL 交换出来的缓冲是 0/1 像素，`glViewport` 也只有 1x1，
+     * Flutter 把这 1 个像素拉伸铺满全屏 —— 表现就是**整个画面一个纯色**
+     * （第一版真机反馈的"解码出来的画面是纯色"正是这个）。
+     * Dart 侧会在布局完成后用 [setRenderSize] 报真实尺寸过来。
+     */
+    @Volatile
+    private var renderWidth = 1280
+
+    @Volatile
+    private var renderHeight = 720
+
+    fun setRenderSize(width: Int, height: Int) {
+        if (width <= 1 || height <= 1) return
+        if (width == renderWidth && height == renderHeight) return
+        renderWidth = width
+        renderHeight = height
+        handler?.post {
+            outputSurfaceTexture.setDefaultBufferSize(width, height)
+            // EGL 的 window surface 可能已经把旧尺寸缓存住了, 重建一次最稳
+            recreateEglSurface()
+        }
+    }
+
+    /** 诊断信息（Dart 侧可显示到屏幕上，真机排查时比 logcat 方便） */
+    fun debugInfo(): String {
+        val (vw, vh) = videoSize
+        return "render=$renderSize video=${vw}x$vh " +
+            "frames=$renderedFrames texUpd=$textureUpdates " +
+            "glErr=0x${Integer.toHexString(lastGlError)} " +
+            "passthrough=$passthrough firstFrame=$gotFirstFrame"
+    }
+
     // ==================== 内部状态（只在渲染线程上碰） ====================
 
     private var thread: HandlerThread? = null
@@ -172,6 +248,7 @@ internal class VrGlPipeline(
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
     private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
     private var eglConfig: EGLConfig? = null
+    private var outputSurface: Surface? = null
     private var program = 0
     private var videoTextureId = 0
     private var videoSurfaceTexture: SurfaceTexture? = null
@@ -185,6 +262,7 @@ internal class VrGlPipeline(
     private var aspectLocation = 0
     private var coverageLocation = 0
     private var eyeLocation = 0
+    private var passthroughLocation = 0
 
     @Volatile
     private var frameAvailable = false
@@ -291,13 +369,18 @@ internal class VrGlPipeline(
             intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0,
         )
         if (eglContext == EGL14.EGL_NO_CONTEXT) throw RuntimeException("eglCreateContext failed")
+        // 用 Surface 包一层再交给 EGL: EGL14 对 SurfaceTexture 的支持各版本
+        // 行为不完全一致, Surface 是所有实现都认的 native window
+        outputSurface = Surface(outputSurfaceTexture)
         eglSurface = EGL14.eglCreateWindowSurface(
-            eglDisplay, eglConfig, outputSurfaceTexture, intArrayOf(EGL14.EGL_NONE), 0,
+            eglDisplay, eglConfig, outputSurface, intArrayOf(EGL14.EGL_NONE), 0,
         )
         if (eglSurface == EGL14.EGL_NO_SURFACE) throw RuntimeException("eglCreateWindowSurface failed")
         if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
             throw RuntimeException("eglMakeCurrent failed")
         }
+        // Flutter 不会替我们设输出缓冲区尺寸, 不设就是 0x0 -> 纯色画面
+        outputSurfaceTexture.setDefaultBufferSize(renderWidth, renderHeight)
         querySurfaceSize()
 
         program = buildProgram()
@@ -309,6 +392,7 @@ internal class VrGlPipeline(
         aspectLocation = GLES20.glGetUniformLocation(program, "uAspect")
         coverageLocation = GLES20.glGetUniformLocation(program, "uCoverageH")
         eyeLocation = GLES20.glGetUniformLocation(program, "uEye")
+        passthroughLocation = GLES20.glGetUniformLocation(program, "uPassthrough")
 
         val quad = floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
         vertexBuffer = ByteBuffer.allocateDirect(quad.size * 4)
@@ -360,8 +444,31 @@ internal class VrGlPipeline(
         val h = IntArray(1)
         EGL14.eglQuerySurface(eglDisplay, eglSurface, EGL14.EGL_WIDTH, w, 0)
         EGL14.eglQuerySurface(eglDisplay, eglSurface, EGL14.EGL_HEIGHT, h, 0)
-        if (w[0] > 0) surfaceWidth = w[0]
-        if (h[0] > 0) surfaceHeight = h[0]
+        // EGL 查不到(个别实现会返回 0)时退回我们自己设的尺寸, 绝不能是 0/1,
+        // 否则 glViewport 只有 1x1, Flutter 拉伸后就是纯色
+        surfaceWidth = if (w[0] > 1) w[0] else renderWidth
+        surfaceHeight = if (h[0] > 1) h[0] else renderHeight
+        renderSize = "${surfaceWidth}x$surfaceHeight"
+    }
+
+    /** 缓冲区尺寸变化后重建 EGL window surface, 让 EGL 重新读取几何信息 */
+    private fun recreateEglSurface() {
+        if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglConfig == null) return
+        try {
+            EGL14.eglMakeCurrent(
+                eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, eglContext,
+            )
+            if (eglSurface != EGL14.EGL_NO_SURFACE) {
+                EGL14.eglDestroySurface(eglDisplay, eglSurface)
+            }
+            eglSurface = EGL14.eglCreateWindowSurface(
+                eglDisplay, eglConfig, outputSurface, intArrayOf(EGL14.EGL_NONE), 0,
+            )
+            EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+            querySurfaceSize()
+        } catch (e: Throwable) {
+            Log.w(TAG, "recreateEglSurface: ${e.message}")
+        }
     }
 
     private fun startFrameLoop() {
@@ -402,11 +509,18 @@ internal class VrGlPipeline(
             try {
                 st.updateTexImage()
                 st.getTransformMatrix(texMatrix)
+                textureUpdates++
+                gotFirstFrame = true
             } catch (e: Throwable) {
                 Log.w(TAG, "updateTexImage failed: ${e.message}")
             }
         }
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight)
+        // 一帧视频都还没到时清成深蓝: 深蓝 = GL 在跑但没有解码帧,
+        // 纯黑 = 连 GL 输出都没到 Flutter。两者修法完全不同, 必须能区分
+        GLES20.glClearColor(
+            0f, 0f, if (gotFirstFrame) 0f else 0.25f, 1f,
+        )
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         if (program == 0 || st == null) {
             EGL14.eglSwapBuffers(eglDisplay, eglSurface)
@@ -423,6 +537,9 @@ internal class VrGlPipeline(
         GLES20.glUniform1f(aspectLocation, surfaceWidth.toFloat() / surfaceHeight.toFloat())
         GLES20.glUniform1f(coverageLocation, coverageHDeg)
         GLES20.glUniform4fv(eyeLocation, 1, eyeRect, 0)
+        GLES20.glUniform1f(
+            passthroughLocation, if (passthrough) 1f else 0f,
+        )
 
         vertexBuffer?.let { vb ->
             GLES20.glEnableVertexAttribArray(posLocation)
@@ -430,13 +547,24 @@ internal class VrGlPipeline(
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             GLES20.glDisableVertexAttribArray(posLocation)
         }
-        EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+        val swapped = EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+        renderedFrames++
+        val err = GLES20.glGetError()
+        if (err != GLES20.GL_NO_ERROR) lastGlError = err
+        if (!swapped) {
+            val eglErr = EGL14.eglGetError()
+            if (eglErr != EGL14.EGL_SUCCESS) {
+                Log.w(TAG, "eglSwapBuffers failed: 0x${Integer.toHexString(eglErr)}")
+            }
+        }
     }
 
     private fun releaseGl() {
         try {
             videoSurfaceTexture?.release()
             videoSurfaceTexture = null
+            outputSurface?.release()
+            outputSurface = null
             if (program != 0) {
                 GLES20.glDeleteProgram(program)
                 program = 0

@@ -169,6 +169,81 @@ abstract final class LocalMediaService {
     return onlyMedia ? _filterPlayable(items) : items;
   }
 
+  /// 从「父目录 path + 条目」推出下一层的 path。
+  ///
+  /// 三种来源的约定不同(本机是绝对路径, 网络是服务器相对路径), 浏览页下钻与
+  /// 递归检索都必须用同一套, 否则很容易多套一层共享名。
+  static String childPath(
+    LocalMediaSource source,
+    LocalMediaItem item,
+  ) => switch (source.type) {
+    LocalMediaSourceType.device => item.uri,
+    _ => item.remotePath ?? item.uri,
+  };
+
+  /// 在 [rootPath] **及其所有子目录**里检索文件名包含 [query] 的可播放媒体。
+  ///
+  /// 广度优先: 离当前目录越近的结果越靠前(要搜的东西多半就在附近),
+  /// 因此结果**不再按名称重排**, 保留这个顺序。
+  ///
+  /// [maxResults] / [maxDirs] 是硬上限: 整卡递归动辄上万个目录, SMB 更是
+  /// 每个目录一次网络往返, 不设上限会把 UI 和连接一起拖死; 触到上限时
+  /// 通过 [onProgress] 让调用方能把"已扫描/已找到"显示出来。
+  /// [cancelled] 返回 true 立刻收手(改关键词、退出页面、销毁控制器)。
+  static Future<List<LocalMediaItem>> search({
+    required LocalMediaSource source,
+    required String rootPath,
+    required String query,
+    int maxResults = 500,
+    int maxDirs = 1500,
+    bool showHidden = false,
+    bool Function()? cancelled,
+    void Function(int scannedDirs, int matches)? onProgress,
+  }) async {
+    final keyword = query.trim().toLowerCase();
+    if (keyword.isEmpty) {
+      return const [];
+    }
+    final results = <LocalMediaItem>[];
+    final queue = <String>[rootPath];
+    var dirs = 0;
+    while (queue.isNotEmpty) {
+      if (cancelled?.call() ?? false) {
+        break;
+      }
+      if (dirs >= maxDirs || results.length >= maxResults) {
+        break;
+      }
+      final dir = queue.removeAt(0);
+      dirs++;
+      List<LocalMediaItem> items;
+      try {
+        items = await listOrThrow(
+          source: source,
+          path: dir,
+          showHidden: showHidden,
+        );
+      } catch (_) {
+        // 单个目录读不出来(没权限/断链/服务端拒绝)不影响整体检索
+        continue;
+      }
+      for (final item in items) {
+        if (item.isDirectory) {
+          queue.add(childPath(source, item));
+          continue;
+        }
+        if (item.isPlayable && item.name.toLowerCase().contains(keyword)) {
+          results.add(item);
+          if (results.length >= maxResults) {
+            break;
+          }
+        }
+      }
+      onProgress?.call(dirs, results.length);
+    }
+    return results;
+  }
+
   /// 错误原因的人类可读版本(浏览页自己 catch 时用)
   static String humanize(Object err, LocalMediaSource source) =>
       _humanize(err, source);

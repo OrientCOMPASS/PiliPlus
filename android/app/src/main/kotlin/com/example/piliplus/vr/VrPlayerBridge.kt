@@ -114,6 +114,22 @@ class VrPlayerBridge(
                 "setProjection" -> { applyProjection(call.argument<String>("mode") ?: "equirect360"); result.success(true) }
                 "setEye" -> { applyEye(call.argument<String>("eye") ?: "left"); result.success(true) }
                 "setGyro" -> { setGyro(call.argument<Boolean>("enabled") ?: false); result.success(true) }
+                // 渲染目标的缓冲区尺寸: Flutter 不会替插件设
+                // SurfaceTexture 的 defaultBufferSize, 不设就是 0x0 -> 纯色画面
+                "setRenderSize" -> {
+                    gl?.setRenderSize(
+                        call.argument<Number>("width")?.toInt() ?: 0,
+                        call.argument<Number>("height")?.toInt() ?: 0,
+                    )
+                    result.success(true)
+                }
+                // 诊断: 跳过球面投影, 把解码帧原样贴出来
+                "setPassthrough" -> {
+                    gl?.passthrough = call.argument<Boolean>("enabled") ?: false
+                    gl?.requestRender()
+                    result.success(true)
+                }
+                "getDebugInfo" -> result.success(debugInfo())
                 "getPosition" -> result.success(engine?.getPositionUs() ?: 0L)
                 "getDuration" -> result.success(engine?.durationUs ?: 0L)
                 "release" -> { releaseInternal(); result.success(true) }
@@ -226,6 +242,7 @@ class VrPlayerBridge(
         if (now - lastReportMs < REPORT_INTERVAL_MS) return
         lastReportMs = now
         val e = engine
+        val info = debugInfo()
         main.post {
             channel.invokeMethod(
                 "view",
@@ -234,9 +251,20 @@ class VrPlayerBridge(
                     "pitch" to g.pitchDeg,
                     "fov" to g.fovDeg,
                     "positionUs" to (e?.getPositionUs() ?: 0L),
+                    "debug" to info,
                 ),
             )
         }
+    }
+
+    /** 一行诊断信息: 尺寸/帧数/GL 错误/解码状态, 真机排查"纯色画面"全靠它 */
+    private fun debugInfo(): String {
+        val g = gl
+        val e = engine
+        return (g?.debugInfo() ?: "gl=null") +
+            " | decoded=${e?.decodedFrames ?: 0} rendered=${e?.renderedFrames ?: 0}" +
+            " pos=${(e?.getPositionUs() ?: 0) / 1000}ms" +
+            " playing=${e?.playing == true} dur=${(e?.durationUs ?: 0) / 1000000}s"
     }
 
     private fun lookBy(dyaw: Float, dpitch: Float) {

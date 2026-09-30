@@ -1,3 +1,5 @@
+import 'dart:async' show Timer;
+
 import 'package:PiliPlus/common/widgets/flutter/pop_scope.dart';
 import 'package:PiliPlus/common/widgets/loading_widget/http_error.dart';
 import 'package:PiliPlus/common/widgets/loading_widget/loading_widget.dart';
@@ -52,6 +54,26 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
   Map<String, Duration> _progress = const {};
   bool _busy = false;
 
+  // ==================== 检索(本目录 + 子目录) ====================
+  bool _searching = false;
+  bool _searchRunning = false;
+  String _query = '';
+  List<LocalMediaItem> _results = const [];
+  String _searchInfo = '';
+
+  /// 检索代数: 改关键词/退出检索就自增, 在飞的那次结果直接丢弃
+  int _searchGen = 0;
+  Timer? _searchDebounce;
+  final TextEditingController _searchCtr = TextEditingController();
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    _searchGen++; // 让在飞的检索作废, 回调里会因 mounted/gen 不符而直接返回
+    _searchCtr.dispose();
+    super.dispose();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -72,6 +94,9 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
   }
 
   List<LocalMediaItem> get _items => _state.dataOrNull ?? const [];
+
+  /// 当前展示(也就是"同目录播放列表"取值)的条目: 检索时是结果集
+  List<LocalMediaItem> get _effectiveItems => _searching ? _results : _items;
 
   _Level get _current => _stack.last;
 
@@ -171,9 +196,7 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
       await _play(item);
       return;
     }
-    final childPath = _current.source.type == LocalMediaSourceType.device
-        ? item.uri
-        : item.remotePath ?? item.uri;
+    final childPath = LocalMediaService.childPath(_current.source, item);
     setState(() {
       _stack.add(
         _Level(source: _current.source, path: childPath, title: item.name),
@@ -183,6 +206,10 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
   }
 
   bool _back() {
+    if (_searching) {
+      _exitSearch();
+      return true;
+    }
     if (_stack.length <= 1) {
       return false;
     }
@@ -201,7 +228,7 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
     try {
       // SMB 需要先在本机代理上注册一个回环地址(打包的 FFmpeg 没有 smb 协议)
       final url = await LocalMediaService.resolvePlayUrl(item);
-      final siblings = _items.where((e) => e.isVideo).toList();
+      final siblings = _effectiveItems.where((e) => e.isVideo).toList();
       final index = siblings.indexWhere((e) => e.uri == item.uri);
       final list = index >= 0 ? siblings : <LocalMediaItem>[item];
       if (!mounted) {
@@ -222,7 +249,7 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
       );
       // 播放页返回后刷新续播进度
       if (mounted) {
-        setState(() => _syncProgress(_items));
+        setState(() => _syncProgress(_effectiveItems));
       }
     } on Object catch (err) {
       SmartDialog.showToast('无法播放: $err');
@@ -234,7 +261,7 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
   @override
   Widget build(BuildContext context) {
     return popScope(
-      canPop: _stack.length <= 1,
+      canPop: _stack.length <= 1 && !_searching,
       onPopInvokedWithResult: (didPop, result) {
         if (!didPop) {
           _back();
@@ -242,74 +269,96 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
       },
       child: SimpleScaffold(
         appBar: AppBar(
-          title: Text(
-            _current.title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
+          title: _searching
+              ? TextField(
+                  controller: _searchCtr,
+                  autofocus: true,
+                  onChanged: _onQueryChanged,
+                  textInputAction: TextInputAction.search,
+                  decoration: const InputDecoration(
+                    hintText: '检索本目录及子目录',
+                    border: InputBorder.none,
+                    isDense: true,
+                  ),
+                )
+              : Text(
+                  _current.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
           actions: [
-            // VLC 式书签: 浏览到常用目录时手动收藏, 而不是连接主机时被动弹窗。
-            // 刻意不用 Obx: 收藏状态只在点按后变化, setState 足够, 也避免
-            // 控制器没注册时 Obx 因为"没订阅到任何可观察对象"而报错。
             IconButton(
-              tooltip: _isBookmarked ? '已在快捷方式中' : '添加到快捷方式',
-              onPressed: _shortcut == null ? null : _addShortcut,
-              icon: Icon(
-                _isBookmarked
-                    ? Icons.bookmark_added_outlined
-                    : Icons.bookmark_add_outlined,
+              tooltip: _searching ? '退出检索' : '检索(含子目录)',
+              onPressed: _searching ? _exitSearch : _enterSearch,
+              icon: Icon(_searching ? Icons.close : Icons.search),
+            ),
+            // 检索态下这些都只对浏览态有意义, 一并收起来
+            if (!_searching) ...[
+              // VLC 式书签: 浏览到常用目录时手动收藏, 而不是连接主机时被动弹窗。
+              // 刻意不用 Obx: 收藏状态只在点按后变化, setState 足够, 也避免
+              // 控制器没注册时 Obx 因为"没订阅到任何可观察对象"而报错。
+              IconButton(
+                tooltip: _isBookmarked ? '已在快捷方式中' : '添加到快捷方式',
+                onPressed: _shortcut == null ? null : _addShortcut,
+                icon: Icon(
+                  _isBookmarked
+                      ? Icons.bookmark_added_outlined
+                      : Icons.bookmark_add_outlined,
+                ),
               ),
-            ),
-            PopupMenuButton<LocalMediaSort>(
-              tooltip: '排序',
-              initialValue: _sort,
-              icon: const Icon(Icons.sort),
-              onSelected: (value) {
-                setState(() => _sort = value);
-                final current = _state.dataOrNull;
-                if (current != null) {
-                  setState(
-                    () => _state = Success(
-                      LocalMediaService.sortItems(current, value),
-                    ),
-                  );
-                }
-              },
-              itemBuilder: (context) => LocalMediaSort.values
-                  .map((e) => PopupMenuItem(value: e, child: Text(e.label)))
-                  .toList(),
-            ),
-            IconButton(
-              tooltip: _showHidden ? '隐藏隐藏文件' : '显示隐藏文件',
-              onPressed: () {
-                setState(() => _showHidden = !_showHidden);
-                _refresh();
-              },
-              icon: Icon(
-                _showHidden
-                    ? Icons.visibility_outlined
-                    : Icons.visibility_off_outlined,
+              PopupMenuButton<LocalMediaSort>(
+                tooltip: '排序',
+                initialValue: _sort,
+                icon: const Icon(Icons.sort),
+                onSelected: (value) {
+                  setState(() => _sort = value);
+                  final current = _state.dataOrNull;
+                  if (current != null) {
+                    setState(
+                      () => _state = Success(
+                        LocalMediaService.sortItems(current, value),
+                      ),
+                    );
+                  }
+                },
+                itemBuilder: (context) => LocalMediaSort.values
+                    .map((e) => PopupMenuItem(value: e, child: Text(e.label)))
+                    .toList(),
               ),
-            ),
-            IconButton(
-              tooltip: '刷新',
-              onPressed: _busy ? null : _refresh,
-              icon: const Icon(Icons.refresh),
-            ),
+              IconButton(
+                tooltip: _showHidden ? '隐藏隐藏文件' : '显示隐藏文件',
+                onPressed: () {
+                  setState(() => _showHidden = !_showHidden);
+                  _refresh();
+                },
+                icon: Icon(
+                  _showHidden
+                      ? Icons.visibility_outlined
+                      : Icons.visibility_off_outlined,
+                ),
+              ),
+              IconButton(
+                tooltip: '刷新',
+                onPressed: _busy ? null : _refresh,
+                icon: const Icon(Icons.refresh),
+              ),
+            ],
             const SizedBox(width: 6),
           ],
         ),
         body: CustomScrollView(
           slivers: [
             ViewSliverSafeArea(
-              sliver: switch (_state) {
-                Loading() => linearLoading,
-                Error(:final errMsg) => HttpError(
-                  errMsg: errMsg,
-                  onReload: _refresh,
-                ),
-                Success() => _buildList(),
-              },
+              sliver: _searching
+                  ? _buildSearchSliver()
+                  : switch (_state) {
+                      Loading() => linearLoading,
+                      Error(:final errMsg) => HttpError(
+                        errMsg: errMsg,
+                        onReload: _refresh,
+                      ),
+                      Success() => _buildList(),
+                    },
             ),
           ],
         ),
@@ -336,6 +385,80 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
         final item = items[index - (_stack.length > 1 ? 1 : 0)];
         return _buildItem(item);
       },
+    );
+  }
+
+  /// 检索态的内容: 提示 / 进度 / 结果列表
+  Widget _buildSearchSliver() {
+    final keyword = _query.trim();
+    if (keyword.isEmpty) {
+      return const SliverFillRemaining(
+        hasScrollBody: false,
+        child: Padding(
+          padding: EdgeInsets.symmetric(horizontal: 28, vertical: 40),
+          child: Column(
+            spacing: 10,
+            children: [
+              Icon(Icons.manage_search_outlined, size: 52),
+              Text(
+                '输入关键词，检索当前目录及其所有子目录里的视频/音频\n'
+                '(按文件名匹配，就近的排在前面)',
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    if (_results.isEmpty) {
+      return SliverFillRemaining(
+        hasScrollBody: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 40),
+          child: Column(
+            spacing: 12,
+            children: [
+              if (_searchRunning)
+                const SizedBox.square(
+                  dimension: 26,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else
+                const Icon(Icons.search_off_outlined, size: 48),
+              Text(_searchInfo, textAlign: TextAlign.center),
+            ],
+          ),
+        ),
+      );
+    }
+    return SliverMainAxisGroup(
+      slivers: [
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 6, 20, 2),
+            child: Row(
+              spacing: 8,
+              children: [
+                Expanded(
+                  child: Text(
+                    _searchInfo,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+                if (_searchRunning)
+                  const SizedBox.square(
+                    dimension: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        SliverList.builder(
+          itemCount: _results.length,
+          itemBuilder: (context, index) => _buildItem(_results[index]),
+        ),
+      ],
     );
   }
 
@@ -367,6 +490,84 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
       onTap: () => _open(item),
       onLongPress: () => _showItemMenu(item),
     );
+  }
+
+  // ==================== 检索 ====================
+
+  void _enterSearch() {
+    setState(() {
+      _searching = true;
+      _searchInfo = '';
+    });
+  }
+
+  void _exitSearch() {
+    _searchDebounce?.cancel();
+    _searchGen++;
+    setState(() {
+      _searching = false;
+      _searchRunning = false;
+      _query = '';
+      _results = const [];
+      _searchInfo = '';
+      _searchCtr.clear();
+    });
+    // 回到浏览态: 顺带把续播进度刷新一下(可能刚在检索结果里播过)
+    _refresh();
+  }
+
+  void _onQueryChanged(String value) {
+    _searchDebounce?.cancel();
+    final gen = ++_searchGen;
+    final keyword = value.trim();
+    setState(() {
+      _query = value;
+      if (keyword.isEmpty) {
+        _searchRunning = false;
+        _results = const [];
+        _searchInfo = '';
+      } else {
+        _searchRunning = true;
+        _searchInfo = '正在检索本目录及子目录…';
+      }
+    });
+    if (keyword.isEmpty) {
+      return;
+    }
+    // 输入过程中的抖动不触发全盘递归: 停手 400ms 再查
+    _searchDebounce = Timer(const Duration(milliseconds: 400), () {
+      if (mounted) {
+        _runSearch(keyword, gen);
+      }
+    });
+  }
+
+  Future<void> _runSearch(String keyword, int gen) async {
+    final level = _current;
+    final found = await LocalMediaService.search(
+      source: level.source,
+      rootPath: level.path,
+      query: keyword,
+      showHidden: _showHidden,
+      cancelled: () => gen != _searchGen || !mounted,
+      onProgress: (dirs, matches) {
+        if (gen != _searchGen || !mounted) {
+          return;
+        }
+        setState(() => _searchInfo = '已扫描 $dirs 个目录，找到 $matches 个');
+      },
+    );
+    if (gen != _searchGen || !mounted) {
+      return;
+    }
+    setState(() {
+      _results = found;
+      _searchRunning = false;
+      _searchInfo = found.isEmpty
+          ? '「$keyword」没有匹配的可播放文件'
+          : '找到 ${found.length} 个（含子目录，就近的排在前面）';
+      _syncProgress(found);
+    });
   }
 
   // ==================== 快捷方式(书签) ====================

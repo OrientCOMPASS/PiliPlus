@@ -62,8 +62,10 @@ class _VrPlayerPageState extends State<VrPlayerPage> {
   );
 
   bool _showControls = true;
+  bool _debugOverlay = false;
   Timer? _hideTimer;
   double _scaleBase = 90;
+  Size _lastReportedSize = Size.zero;
 
   /// 进来时系统栏是否可见: 只有这种情况下退出才需要恢复,
   /// 否则会把外层(全屏播放中)刻意隐藏的状态栏放出来
@@ -122,7 +124,6 @@ class _VrPlayerPageState extends State<VrPlayerPage> {
     }
   }
 
-
   @override
   Widget build(BuildContext context) {
     return popScope(
@@ -136,35 +137,89 @@ class _VrPlayerPageState extends State<VrPlayerPage> {
       child: Scaffold(
         backgroundColor: Colors.black,
         body: LayoutBuilder(
-          builder: (context, constraints) => GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: _toggleControls,
-            onScaleStart: (details) {
-              _scaleBase = _c.fov.value;
-            },
-            onScaleUpdate: (details) {
-              if (details.pointerCount > 1) {
-                if (details.scale > 0) {
-                  _c.setFov(_scaleBase / details.scale);
+          builder: (context, constraints) {
+            // 把渲染目标的真实尺寸(设备像素)告诉 native。
+            // Flutter 不会替插件设 SurfaceTexture 的 defaultBufferSize,
+            // 不设就是 0x0 -> EGL 只交换出 1 个像素 -> Flutter 拉伸铺满全屏,
+            // 整个画面就是一个纯色(第一版真机反馈的"解码出来是纯色"就是这个)。
+            _reportRenderSize(context, constraints);
+            return GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _toggleControls,
+              onScaleStart: (details) {
+                _scaleBase = _c.fov.value;
+              },
+              onScaleUpdate: (details) {
+                if (details.pointerCount > 1) {
+                  if (details.scale > 0) {
+                    _c.setFov(_scaleBase / details.scale);
+                  }
+                  return;
                 }
-                return;
-              }
-              _c.lookByPixels(
-                details.focalPointDelta.dx,
-                details.focalPointDelta.dy,
-                width: constraints.maxWidth,
-                height: constraints.maxHeight,
-              );
-              _scheduleHide();
-            },
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                _buildVideo(),
-                if (_showControls) ..._buildControls(context),
-              ],
-            ),
-          ),
+                _c.lookByPixels(
+                  details.focalPointDelta.dx,
+                  details.focalPointDelta.dy,
+                  width: constraints.maxWidth,
+                  height: constraints.maxHeight,
+                );
+                _scheduleHide();
+              },
+              // Stack 的非定位子项在 StackFit.expand 下会拿到**全屏 tight 约束**,
+              // 直接塞 Row/SafeArea 会被拉满整屏、内容垂直居中 —— 第一版
+              // "所有控件都跑到屏幕中间"就是这么来的。一律用 Positioned 定位。
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  _buildVideo(),
+                  if (_showControls) ...[
+                    const Positioned.fill(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.black54,
+                              Colors.transparent,
+                              Colors.black54,
+                            ],
+                            stops: [0, 0.35, 1],
+                          ),
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      child: _buildTopBar(context),
+                    ),
+                    Positioned(
+                      left: 6,
+                      top: 0,
+                      bottom: 0,
+                      child: Center(child: _leftButtons()),
+                    ),
+                    Positioned(
+                      right: 6,
+                      top: 0,
+                      bottom: 0,
+                      child: Center(child: _rightButtons()),
+                    ),
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: _buildBottomBar(context),
+                    ),
+                  ],
+                  if (_debugOverlay) _buildDebugOverlay(),
+                  // 错误/缓冲/播完 的状态不受控件显隐影响, 一直可见
+                  Center(child: _buildCenterState()),
+                ],
+              ),
+            );
+          },
         ),
       ),
     );
@@ -194,25 +249,21 @@ class _VrPlayerPageState extends State<VrPlayerPage> {
     });
   }
 
-  List<Widget> _buildControls(BuildContext context) {
-    return [
-      // 半透明底, 保证按钮在亮色画面上也看得清
-      const DecoratedBox(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Colors.black54, Colors.transparent, Colors.black54],
-            stops: [0, 0.35, 1],
-          ),
-        ),
-        child: SizedBox.expand(),
-      ),
-      _buildTopBar(context),
-      _buildSideButtons(),
-      _buildBottomBar(context),
-      _buildCenterState(),
-    ];
+  /// 渲染目标尺寸(设备像素)有变化时报给 native, 只在变化时报
+  void _reportRenderSize(BuildContext context, BoxConstraints constraints) {
+    if (!constraints.hasBoundedWidth || !constraints.hasBoundedHeight) {
+      return;
+    }
+    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final size = Size(
+      (constraints.maxWidth * dpr).roundToDouble(),
+      (constraints.maxHeight * dpr).roundToDouble(),
+    );
+    if (size == _lastReportedSize) {
+      return;
+    }
+    _lastReportedSize = size;
+    _c.setRenderSize(size.width.toInt(), size.height.toInt());
   }
 
   Widget _buildTopBar(BuildContext context) {
@@ -273,8 +324,10 @@ class _VrPlayerPageState extends State<VrPlayerPage> {
                       onPressed: () => _c.setEye(
                         _c.eye.value == VrEye.left ? VrEye.right : VrEye.left,
                       ),
-                      icon: const Icon(Icons.remove_red_eye_outlined,
-                          color: Colors.white),
+                      icon: const Icon(
+                        Icons.remove_red_eye_outlined,
+                        color: Colors.white,
+                      ),
                     )
                   : const SizedBox.shrink(),
             ),
@@ -296,44 +349,81 @@ class _VrPlayerPageState extends State<VrPlayerPage> {
               },
               icon: const Icon(Icons.center_focus_strong, color: Colors.white),
             ),
+            IconButton(
+              tooltip: '诊断信息',
+              onPressed: () => setState(() => _debugOverlay = !_debugOverlay),
+              icon: Icon(
+                Icons.bug_report_outlined,
+                color: _debugOverlay ? Colors.amberAccent : Colors.white,
+              ),
+            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildSideButtons() {
-    Widget look(IconData icon, double dyaw, double dpitch) => _StepButton(
-      icon: icon,
-      onStep: () => _c.lookBy(dyaw, dpitch),
-      onStepEnd: _scheduleHide,
-    );
-    Widget zoom(IconData icon, double delta) => _StepButton(
-      icon: icon,
-      onStep: () => _c.setFov(_c.fov.value + delta),
-      onStepEnd: _scheduleHide,
-    );
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+  Widget _lookButton(IconData icon, double dyaw, double dpitch) => _StepButton(
+    icon: icon,
+    onStep: () => _c.lookBy(dyaw, dpitch),
+    onStepEnd: _scheduleHide,
+  );
+
+  Widget _zoomButton(IconData icon, double delta) => _StepButton(
+    icon: icon,
+    onStep: () => _c.setFov(_c.fov.value + delta),
+    onStepEnd: _scheduleHide,
+  );
+
+  Widget _leftButtons() => Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      _lookButton(Icons.keyboard_arrow_left, -10, 0),
+      _lookButton(Icons.keyboard_arrow_right, 10, 0),
+    ],
+  );
+
+  Widget _rightButtons() => Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      _lookButton(Icons.keyboard_arrow_up, 0, 10),
+      _lookButton(Icons.keyboard_arrow_down, 0, -10),
+      const SizedBox(height: 8),
+      _zoomButton(Icons.zoom_in, -8),
+      _zoomButton(Icons.zoom_out, 8),
+    ],
+  );
+
+  /// 诊断浮层: native 每 100ms 回报一行(渲染尺寸/解码帧数/渲染帧数/GL 错误),
+  /// 外加「原画直通」开关 —— 直通有画面说明解码与纹理链路是好的、问题在投影,
+  /// 直通仍是纯色说明问题在解码/纹理。真机截图就能定位, 不用来回猜。
+  Widget _buildDebugOverlay() {
+    return Positioned(
+      left: 8,
+      right: 8,
+      bottom: 64,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              look(Icons.keyboard_arrow_left, -10, 0),
-              look(Icons.keyboard_arrow_right, 10, 0),
-            ],
+          Obx(
+            () => Text(
+              _c.debug.value.isEmpty ? '等待 native 回报…' : _c.debug.value,
+              style: const TextStyle(
+                color: Colors.amberAccent,
+                fontSize: 11,
+                height: 1.4,
+                shadows: [Shadow(color: Colors.black, blurRadius: 4)],
+              ),
+            ),
           ),
-          Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              look(Icons.keyboard_arrow_up, 0, 10),
-              look(Icons.keyboard_arrow_down, 0, -10),
-              const SizedBox(height: 8),
-              zoom(Icons.zoom_in, -8),
-              zoom(Icons.zoom_out, 8),
-            ],
+          const SizedBox(height: 6),
+          Obx(
+            () => ActionChip(
+              label: Text(_c.passthrough.value ? '退出原画直通' : '原画直通(诊断)'),
+              avatar: const Icon(Icons.image_outlined, size: 16),
+              onPressed: () => _c.setPassthrough(!_c.passthrough.value),
+            ),
           ),
         ],
       ),
@@ -353,7 +443,11 @@ class _VrPlayerPageState extends State<VrPlayerPage> {
               mainAxisSize: MainAxisSize.min,
               spacing: 10,
               children: [
-                const Icon(Icons.error_outline, color: Colors.redAccent, size: 40),
+                const Icon(
+                  Icons.error_outline,
+                  color: Colors.redAccent,
+                  size: 40,
+                ),
                 Text(
                   err,
                   textAlign: TextAlign.center,
@@ -382,7 +476,10 @@ class _VrPlayerPageState extends State<VrPlayerPage> {
         return const Center(
           child: SizedBox.square(
             dimension: 40,
-            child: CircularProgressIndicator(strokeWidth: 3, color: Colors.white),
+            child: CircularProgressIndicator(
+              strokeWidth: 3,
+              color: Colors.white,
+            ),
           ),
         );
       }
@@ -391,72 +488,72 @@ class _VrPlayerPageState extends State<VrPlayerPage> {
   }
 
   Widget _buildBottomBar(BuildContext context) {
-    return Align(
-      alignment: Alignment.bottomCenter,
-      child: SafeArea(
-        child: Obx(
-          () {
-            final total = _c.duration.value;
-            final pos = _c.position.value;
-            return Padding(
-              padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
-              child: Row(
-                children: [
-                  IconButton(
-                    tooltip: _c.playing.value ? '暂停' : '播放',
-                    onPressed: () {
-                      _c.toggle();
-                      _scheduleHide();
-                    },
-                    icon: Icon(
-                      _c.playing.value ? Icons.pause : Icons.play_arrow,
-                      color: Colors.white,
-                    ),
+    return SafeArea(
+      top: false,
+      child: Obx(
+        () {
+          final total = _c.duration.value;
+          final pos = _c.position.value;
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
+            child: Row(
+              children: [
+                IconButton(
+                  tooltip: _c.playing.value ? '暂停' : '播放',
+                  onPressed: () {
+                    _c.toggle();
+                    _scheduleHide();
+                  },
+                  icon: Icon(
+                    _c.playing.value ? Icons.pause : Icons.play_arrow,
+                    color: Colors.white,
                   ),
-                  IconButton(
-                    tooltip: '后退 10 秒',
-                    onPressed: () {
-                      _c.seekBy(const Duration(seconds: -10));
-                      _scheduleHide();
-                    },
-                    icon: const Icon(Icons.replay_10, color: Colors.white),
-                  ),
-                  Text(
-                    DurationUtils.formatDuration(pos.inSeconds),
-                    style: const TextStyle(color: Colors.white, fontSize: 12),
-                  ),
-                  Expanded(
-                    child: Slider(
-                      value: total == Duration.zero
-                          ? 0
-                          : (pos.inMilliseconds / total.inMilliseconds)
-                                .clamp(0.0, 1.0),
-                      onChanged: total == Duration.zero
-                          ? null
-                          : (v) => _c.seek(
-                              Duration(
-                                milliseconds: (v * total.inMilliseconds).round(),
-                              ),
+                ),
+                IconButton(
+                  tooltip: '后退 10 秒',
+                  onPressed: () {
+                    _c.seekBy(const Duration(seconds: -10));
+                    _scheduleHide();
+                  },
+                  icon: const Icon(Icons.replay_10, color: Colors.white),
+                ),
+                Text(
+                  DurationUtils.formatDuration(pos.inSeconds),
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
+                Expanded(
+                  child: Slider(
+                    value: total == Duration.zero
+                        ? 0
+                        : (pos.inMilliseconds / total.inMilliseconds).clamp(
+                            0.0,
+                            1.0,
+                          ),
+                    onChanged: total == Duration.zero
+                        ? null
+                        : (v) => _c.seek(
+                            Duration(
+                              milliseconds: (v * total.inMilliseconds).round(),
                             ),
-                    ),
+                          ),
                   ),
-                  Text(
-                    DurationUtils.formatDuration(total.inSeconds),
-                    style: const TextStyle(color: Colors.white, fontSize: 12),
-                  ),
-                  IconButton(
-                    tooltip: '前进 10 秒',
-                    onPressed: () {
-                      _c.seekBy(const Duration(seconds: 10));
-                      _scheduleHide();
-                    },
-                    icon: const Icon(Icons.forward_10, color: Colors.white),
-                  ),
-                ],
-              ),
-            );
-          },
-        ),
+                ),
+                Text(
+                  DurationUtils.formatDuration(total.inSeconds),
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
+                IconButton(
+                  tooltip: '前进 10 秒',
+                  onPressed: () {
+                    _c.seekBy(const Duration(seconds: 10));
+                    _scheduleHide();
+                  },
+                  icon: const Icon(Icons.forward_10, color: Colors.white),
+                ),
+              ],
+            ),
+          );
+        },
       ),
     );
   }

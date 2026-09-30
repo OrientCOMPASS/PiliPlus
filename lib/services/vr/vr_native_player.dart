@@ -51,12 +51,24 @@ class VrNativePlayerController extends GetxController {
   final Rx<Duration> duration = Rx<Duration>(Duration.zero);
   final RxnString error = RxnString();
 
+  /// native 回报的诊断信息（渲染目标尺寸 / 解码帧数 / 渲染帧数 / GL 错误 …）。
+  /// 排查"画面是纯色"这类只有真机能复现的问题时，一行字比 logcat 好用。
+  final RxString debug = RxString('');
+
+  /// 诊断模式：跳过球面投影，把解码帧原样贴出来。
+  /// 有画面 => 问题在投影；仍是纯色 => 问题在解码/纹理链路。
+  final RxBool passthrough = RxBool(false);
+
   // 视角读数（native 回报，10Hz）
   final RxDouble yaw = RxDouble(0);
   final RxDouble pitch = RxDouble(0);
   final RxDouble fov = RxDouble(90);
 
   bool _closed = false;
+
+  /// 打开后 10 秒还没有任何画面就明确报错(附上 native 的诊断信息)。
+  /// 否则用户只会看到一个纯色/蓝屏, 完全不知道卡在哪一环。
+  Timer? _firstFrameWatchdog;
 
   /// 打开并开始播放。失败返回 false（原因在 [error]）。
   Future<bool> open({
@@ -86,6 +98,16 @@ class VrNativePlayerController extends GetxController {
       });
       await _channel.invokeMethod<bool>('setGyro', {'enabled': gyro.value});
       ready.value = true;
+      _firstFrameWatchdog?.cancel();
+      _firstFrameWatchdog = Timer(const Duration(seconds: 10), () {
+        if (_closed) {
+          return;
+        }
+        final info = debug.value;
+        if (info.contains('firstFrame=false') || info.contains('texUpd=0')) {
+          error.value = '10 秒内没有解出任何画面。\n$info';
+        }
+      });
       return true;
     } on MissingPluginException {
       error.value = '这个安装包没有自研 VR 播放器（native 桥未注册）';
@@ -119,6 +141,9 @@ class VrNativePlayerController extends GetxController {
           final us = (args['positionUs'] as num?)?.toInt();
           if (us != null) {
             position.value = Duration(microseconds: us);
+          }
+          if (args['debug'] case final String d) {
+            debug.value = d;
           }
         }
       case 'buffering':
@@ -165,6 +190,23 @@ class VrNativePlayerController extends GetxController {
   }
 
   void setSpeed(double speed) => _invoke('setSpeed', {'speed': speed});
+
+  /// 告诉 native 渲染目标有多大（**设备像素**）。
+  ///
+  /// Flutter 的 `TextureRegistry.createSurfaceTexture()` 不会替插件设
+  /// SurfaceTexture 的 defaultBufferSize，不设就是 0x0，EGL 交换出来的缓冲
+  /// 只有一个像素，Flutter 把它拉伸铺满全屏 —— 画面就成了**一个纯色**。
+  void setRenderSize(int width, int height) {
+    if (width < 2 || height < 2) {
+      return;
+    }
+    _invoke('setRenderSize', {'width': width, 'height': height});
+  }
+
+  Future<void> setPassthrough(bool value) async {
+    passthrough.value = value;
+    await _invoke('setPassthrough', {'enabled': value});
+  }
 
   // ==================== 视角 ====================
 
@@ -230,6 +272,7 @@ class VrNativePlayerController extends GetxController {
   @override
   void onClose() {
     _closed = true;
+    _firstFrameWatchdog?.cancel();
     _invoke('release');
     try {
       _channel.setMethodCallHandler(null);

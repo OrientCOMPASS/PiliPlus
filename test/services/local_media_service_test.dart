@@ -244,6 +244,50 @@ void main() {
     });
   });
 
+  group('childPath(下钻路径约定)', () {
+    test('本机用绝对路径, 网络用服务器相对路径', () {
+      const deviceItem = LocalMediaItem(
+        name: 'Movies',
+        uri: '/storage/emulated/0/Movies',
+        source: device,
+        isDirectory: true,
+      );
+      expect(
+        LocalMediaService.childPath(device, deviceItem),
+        '/storage/emulated/0/Movies',
+      );
+
+      // SMB 主机级来源: remotePath 的第一段是共享名
+      const shareItem = LocalMediaItem(
+        name: 'pub',
+        uri: 'smb://NAS/pub',
+        source: smbHost,
+        remotePath: 'pub',
+        isDirectory: true,
+      );
+      expect(LocalMediaService.childPath(smbHost, shareItem), 'pub');
+
+      const innerItem = LocalMediaItem(
+        name: '2024',
+        uri: 'smb://NAS/pub/2024',
+        source: smbHost,
+        remotePath: r'pub\2024',
+        isDirectory: true,
+      );
+      expect(LocalMediaService.childPath(smbHost, innerItem), r'pub\2024');
+
+      // 共享级来源: remotePath 就是共享内路径
+      const shareLevelItem = LocalMediaItem(
+        name: '2024',
+        uri: 'smb://NAS/pub/2024',
+        source: smbShare,
+        remotePath: '2024',
+        isDirectory: true,
+      );
+      expect(LocalMediaService.childPath(smbShare, shareLevelItem), '2024');
+    });
+  });
+
   group('shortcutFor(添加到快捷方式)', () {
     test('本机目录: url 就是绝对路径', () {
       final s = LocalMediaController.shortcutFor(

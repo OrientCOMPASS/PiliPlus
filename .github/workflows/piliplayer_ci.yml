@@ -43,6 +43,7 @@ env:
     # paths added by this branch: analyzed with zero tolerance (infos included)
     STRICT_PATHS: >-
         lib/pages/local_media
+        lib/pages/video/introduction/local_media
         lib/services/local_media_service.dart
         lib/models/local_media
         lib/plugin/pl_player/models/vr_projection.dart
@@ -75,7 +76,10 @@ jobs:
               shell: bash
               run: |
                   set -uo pipefail
-                  flutter analyze --no-pub | tee analyze.txt
+                  # 仓库基线本身有若干 info 级提示, 因此这里只把 error 视为失败,
+                  # warning/info 计数写进 job summary; 新增代码另有一步零容忍检查
+                  flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings \
+                    | tee analyze.txt || true
                   err=$(grep -cE '(^|[[:space:]])error[[:space:]]+•' analyze.txt || true)
                   warn=$(grep -cE '(^|[[:space:]])warning[[:space:]]+•' analyze.txt || true)
                   info=$(grep -cE '(^|[[:space:]])info[[:space:]]+•' analyze.txt || true)

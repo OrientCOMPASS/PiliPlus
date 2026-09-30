@@ -24,6 +24,7 @@ import 'package:PiliPlus/models/common/video/live_quality.dart';
 import 'package:PiliPlus/models/common/video/subtitle_pref_type.dart';
 import 'package:PiliPlus/models/common/video/video_decode_type.dart';
 import 'package:PiliPlus/models/common/video/video_quality.dart';
+import 'package:PiliPlus/models/local_media/local_media_sort.dart';
 import 'package:PiliPlus/models/user/danmaku_rule.dart';
 import 'package:PiliPlus/models/user/info.dart';
 import 'package:PiliPlus/pages/setting/pages/fullscreen_sc_size.dart'
@@ -33,6 +34,7 @@ import 'package:PiliPlus/plugin/pl_player/models/bottom_progress_behavior.dart';
 import 'package:PiliPlus/plugin/pl_player/models/fullscreen_mode.dart';
 import 'package:PiliPlus/plugin/pl_player/models/hwdec_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
+import 'package:PiliPlus/plugin/pl_player/models/vr_projection.dart';
 import 'package:PiliPlus/utils/device_utils.dart';
 import 'package:PiliPlus/utils/extension/iterable_ext.dart';
 import 'package:PiliPlus/utils/global_data.dart';
@@ -1047,4 +1049,42 @@ abstract final class Pref {
 
   static bool get enableEmoteTooltip =>
       _setting.get(SettingBoxKey.enableEmoteTooltip, defaultValue: false);
+
+  // VR / 全景
+
+  /// 按文件名关键词自动识别全景片源
+  static bool get vrAutoDetect =>
+      _setting.get(SettingBoxKey.vrAutoDetect, defaultValue: true);
+
+  /// VR 默认水平视场角
+  static double get vrDefaultFov =>
+      _setting.get(SettingBoxKey.vrDefaultFov, defaultValue: 90.0);
+
+  // 本地板块
+
+  /// 列表排序方式
+  static LocalMediaSort get localMediaSort {
+    final index = _setting.get(SettingBoxKey.localMediaSort);
+    if (index is int) {
+      if (LocalMediaSort.values.elementAtOrNull(index) case final sort?) {
+        return sort;
+      }
+    }
+    return LocalMediaSort.name;
+  }
+
+  /// 是否显示隐藏文件(以 . 开头)
+  static bool get localMediaShowHidden =>
+      _setting.get(SettingBoxKey.localMediaShowHidden, defaultValue: false);
+
+  /// 双目片源默认眼位
+  static VrEye get vrEye {
+    final index = _setting.get(SettingBoxKey.vrEye);
+    if (index is int) {
+      if (VrEye.values.elementAtOrNull(index) case final eye?) {
+        return eye;
+      }
+    }
+    return VrEye.left;
+  }
 }

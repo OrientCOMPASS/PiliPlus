@@ -43,6 +43,7 @@ import 'package:PiliPlus/plugin/pl_player/models/fullscreen_mode.dart';
 import 'package:PiliPlus/plugin/pl_player/models/gesture_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/models/video_fit_type.dart';
+import 'package:PiliPlus/plugin/pl_player/models/vr_projection.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/app_bar_ani.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/backward_seek.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/bottom_control.dart';
@@ -923,6 +924,9 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   late double maxWidth;
   late double maxHeight;
 
+  /// VR 模式: 双指缩放开始时的视场角, 缩放是相对该基准的绝对映射
+  double _vrFovBase = VrViewState.kVrDefaultFov;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -940,9 +944,17 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   void _onPanStart(ScaleStartDetails details) {
     _gestureType = null;
     _initialFocalPoint = details.localFocalPoint;
+    _vrFovBase = plPlayerController.vrView.fov;
   }
 
   void _onScaleUpdate(double scale) {
+    // VR 模式: 双指缩放调整视场角(放大 -> 视场角变小)
+    if (plPlayerController.vrEnabled) {
+      if (scale > 0) {
+        plPlayerController.setVrFov(_vrFovBase / scale);
+      }
+      return;
+    }
     showRestoreScaleBtn.value = scale != 1.0;
   }
 
@@ -985,6 +997,16 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   }
 
   void _onPanUpdate(ScaleUpdateDetails details) {
+    // VR 模式: 单指拖拽环视, 不触发进退/亮度/音量/全屏手势
+    if (plPlayerController.vrEnabled) {
+      plPlayerController.onVrLook(
+        details.focalPointDelta.dx,
+        details.focalPointDelta.dy,
+        width: maxWidth,
+        height: maxHeight,
+      );
+      return;
+    }
     if (_gestureType == null) {
       final cumulativeDelta = details.localFocalPoint - _initialFocalPoint!;
       if (cumulativeDelta.distanceSquared < 1) return;
@@ -1121,7 +1143,10 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   }
 
   void _onPanEnd(ScaleEndDetails details) {
-    if (_gestureType == .horizontal) {
+    if (plPlayerController.vrEnabled) {
+      // 手势结束强制落一次, 保证最终视角与手指位置一致
+      plPlayerController.applyVrView(force: true);
+    } else if (_gestureType == .horizontal) {
       _onHorizontalDragEnd();
     }
     _initialFocalPoint = null;
@@ -1266,6 +1291,16 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
 
   void _onPointerPanZoomUpdate(PointerPanZoomUpdateEvent event) {
     if (plPlayerController.controlsLock.value) return;
+    // VR 模式: 拖拽环视
+    if (plPlayerController.vrEnabled) {
+      plPlayerController.onVrLook(
+        event.localPanDelta.dx,
+        event.localPanDelta.dy,
+        width: maxWidth,
+        height: maxHeight,
+      );
+      return;
+    }
     if (_gestureType == null) {
       final pan = event.pan;
       if (pan.distanceSquared < 1) return;
@@ -1306,7 +1341,9 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   }
 
   void _onPointerPanZoomEnd(PointerPanZoomEndEvent event) {
-    if (_gestureType == .horizontal) {
+    if (plPlayerController.vrEnabled) {
+      plPlayerController.applyVrView(force: true);
+    } else if (_gestureType == .horizontal) {
       _onHorizontalDragEnd();
     }
     _gestureType = null;
@@ -1314,6 +1351,11 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
 
   void _onPointerSignal(PointerSignalEvent event) {
     if (event is PointerScrollEvent) {
+      // VR 模式: 滚轮缩放视场角
+      if (plPlayerController.vrEnabled) {
+        plPlayerController.onVrZoom(1 + event.scrollDelta.dy / 1000);
+        return;
+      }
       final offset = -event.scrollDelta.dy / 4000;
       final volume = clampDouble(
         plPlayerController.volume.value + offset,

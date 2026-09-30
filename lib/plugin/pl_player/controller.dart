@@ -29,7 +29,9 @@ import 'package:PiliPlus/plugin/pl_player/models/heart_beat_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/models/video_fit_type.dart';
+import 'package:PiliPlus/plugin/pl_player/models/vr_projection.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
+import 'package:PiliPlus/plugin/pl_player/utils/vr_shader.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/android/android_helper.dart';
@@ -575,6 +577,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   // offline
   bool get isFileSource => dataSource is FileSource;
 
+  /// 本地/局域网媒体(「本地」板块)。
+  ///
+  /// 播放的不是 B 站内容, 因此一切会上报到 B 站或依赖 B 站接口的行为都必须关闭:
+  /// 心跳/历史上报、进度预览图(videoshot)、弹幕、评论、点赞投币收藏、
+  /// SponsorBlock 分段、B 站 UA/Referer 请求头等。
+  bool isLocalMedia = false;
+
   // 初始化资源
   Future<void> setDataSource(
     DataSource dataSource, {
@@ -600,10 +609,22 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     VoidCallback? onInit,
     Volume? volume,
     bool autoFullScreenFlag = false,
+    // 本地/局域网媒体: 关闭一切 B 站上报与请求
+    bool isLocalMedia = false,
+    // VR/全景片源布局, 为 null 时按设置自动识别
+    VrProjection? vrProjection,
   }) async {
     try {
       _processing = true;
       this.isLive = isLive;
+      this.isLocalMedia = isLocalMedia;
+      // 自动识别只对本地/局域网媒体生效: 在线视频地址里常带 360/1080p 之类
+      // 的清晰度字样, 误判会直接把正常视频弄花, 在线内容请手动开启
+      _initVrState(
+        vrProjection,
+        dataSource.videoSource,
+        autoDetect: isLocalMedia,
+      );
       _videoType = videoType ?? VideoType.ugc;
       this.width = width;
       this.height = height;
@@ -692,6 +713,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         setting.put(SettingBoxKey.superResolutionType, type.index);
       }
     }
+    // VR 重投影与超分辨率都占用 glsl-shaders, 不能同时生效, VR 优先
+    if (vrEnabled) {
+      return;
+    }
     pp ??= _videoPlayerController!;
     switch (type) {
       case SuperResolutionType.disable:
@@ -716,6 +741,171 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             Assets.mpvAnime4KShaders,
           ),
         ]);
+    }
+  }
+
+  // ==================== VR / 全景 ====================
+
+  /// 当前片源的立体布局, [VrProjection.off] 表示普通视频
+  final Rx<VrProjection> vrProjection = Rx<VrProjection>(VrProjection.off);
+
+  /// 双目片源渲染哪只眼睛(手机单屏只显示一只)
+  final Rx<VrEye> vrEye = Rx<VrEye>(Pref.vrEye);
+
+  VrViewState _vrView = VrViewState(fov: Pref.vrDefaultFov);
+  VrViewState get vrView => _vrView;
+
+  bool get vrEnabled => vrProjection.value.enabled;
+
+  /// 上一次烘焙的着色器源码, 避免同一视角重复写盘与重复重载
+  String? _vrShaderSource;
+
+  /// 着色器重载最小间隔: 拖拽时按此节流, 手势结束再强制落一次
+  static const int vrApplyIntervalMs = 45;
+  int _vrLastApplyMs = 0;
+
+  void _initVrState(
+    VrProjection? hint,
+    String source, {
+    bool autoDetect = false,
+  }) {
+    var projection = hint;
+    if (projection == null && autoDetect && Pref.vrAutoDetect) {
+      projection = VrProjection.detectFromName(mediaName(source));
+    }
+    vrProjection.value = projection ?? VrProjection.off;
+    _vrView = VrViewState(fov: Pref.vrDefaultFov);
+    _vrShaderSource = null;
+    _vrLastApplyMs = 0;
+  }
+
+  /// 从路径/URL 中取出文件名
+  static String mediaName(String source) {
+    var name = source;
+    final query = name.indexOf('?');
+    if (query >= 0) {
+      name = name.substring(0, query);
+    }
+    final slash = name.lastIndexOf('/');
+    return slash >= 0 ? name.substring(slash + 1) : name;
+  }
+
+  /// 切换片源布局
+  Future<void> setVrProjection(
+    VrProjection projection, {
+    bool resetView = true,
+  }) async {
+    vrProjection.value = projection;
+    if (resetView) {
+      _vrView = VrViewState(fov: _vrView.fov);
+    }
+    if (projection.enabled) {
+      await _applyVrShader(force: true);
+    } else {
+      // 退出 VR: 恢复超分辨率着色器(未开启时其内部会清空着色器列表)
+      _vrShaderSource = null;
+      await setShader();
+    }
+  }
+
+  /// 切换左/右眼
+  Future<void> setVrEye(VrEye eye) async {
+    if (vrEye.value == eye) {
+      return;
+    }
+    vrEye.value = eye;
+    await _applyVrShader(force: true);
+  }
+
+  /// 拖拽改变视角。dx/dy 为像素位移, 手势方向与画面移动方向一致
+  /// (手指右滑 -> 画面右移 -> 视角左转), 与主流 360 播放器手感一致。
+  void onVrLook(
+    double dx,
+    double dy, {
+    required double width,
+    required double height,
+  }) {
+    if (!vrEnabled) {
+      return;
+    }
+    // 一屏宽度对应 1.5 倍水平视场角
+    final scale = _vrView.fov * 1.5;
+    _vrView = _vrView
+        .copyWith(
+          yaw: _vrView.yaw - dx * scale / max(width, 1.0),
+          pitch: _vrView.pitch - dy * scale / max(height, 1.0),
+        )
+        .clamped(vrProjection.value);
+    applyVrView();
+  }
+
+  /// 设置水平视场角(双指缩放的绝对映射)
+  void setVrFov(double fov) {
+    if (!vrEnabled) {
+      return;
+    }
+    _vrView = _vrView
+        .copyWith(fov: fov.clamp(VrViewState.minFov, VrViewState.maxFov))
+        .clamped(vrProjection.value);
+    applyVrView();
+  }
+
+  /// 双指缩放视场角, factor > 1 表示放大(视场角变小)
+  void onVrZoom(double factor) {
+    if (!vrEnabled || factor <= 0) {
+      return;
+    }
+    _vrView = _vrView
+        .copyWith(
+          fov: (_vrView.fov / factor).clamp(
+            VrViewState.minFov,
+            VrViewState.maxFov,
+          ),
+        )
+        .clamped(vrProjection.value);
+    applyVrView();
+  }
+
+  /// 视角摆正
+  void resetVrView() {
+    _vrView = VrViewState(fov: _vrView.fov);
+    applyVrView(force: true);
+  }
+
+  /// 节流应用视角; [force] 用于手势结束时保证最终视角准确
+  void applyVrView({bool force = false}) {
+    if (!vrEnabled) {
+      return;
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (!force && now - _vrLastApplyMs < vrApplyIntervalMs) {
+      return;
+    }
+    _vrLastApplyMs = now;
+    _applyVrShader(force: force);
+  }
+
+  Future<void> _applyVrShader({bool force = false}) async {
+    final player = _videoPlayerController;
+    if (player == null || !vrEnabled) {
+      return;
+    }
+    final source = VrShader.source(
+      projection: vrProjection.value,
+      eye: vrEye.value,
+      view: _vrView,
+    );
+    if (!force && source == _vrShaderSource) {
+      return;
+    }
+    _vrShaderSource = source;
+    try {
+      final file = VrShader.write(source);
+      await player.command(['change-list', 'glsl-shaders', 'set', file]);
+    } catch (err) {
+      if (kDebugMode) {
+        debugPrint('apply vr shader failed: $err');
+      }
     }
   }
 
@@ -752,7 +942,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       ),
     );
 
-    player.setMediaHeader(userAgent: BrowserUa.pc, referer: HttpString.baseUrl);
+    // 本地/局域网媒体不带 B 站 UA 与 Referer: 既无必要, 也会被部分
+    // NAS/HTTP 服务器当作非法请求拒绝
+    if (!isLocalMedia) {
+      player.setMediaHeader(
+        userAgent: BrowserUa.pc,
+        referer: HttpString.baseUrl,
+      );
+    }
 
     _startListeners(player);
 
@@ -784,7 +981,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         return;
       }
       _videoPlayerController = player;
-      if (isAnim && superResolutionType.value != .disable) {
+      if (vrEnabled) {
+        await _applyVrShader(force: true);
+      } else if (isAnim && superResolutionType.value != .disable) {
         await setShader();
       }
     }
@@ -1439,6 +1638,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     VideoType? videoType,
   }) {
     if (isLive ||
+        // 本地/局域网媒体: 不上报 B 站播放历史
+        isLocalMedia ||
         !enableHeart ||
         progress == 0 ||
         (playerStatus.isPaused && !isManual)) {
@@ -1530,6 +1731,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       showSystemBar();
     }
     danmakuController = null;
+    // VR 状态是单次播放会话的, 播放器销毁后复位
+    vrProjection.value = VrProjection.off;
+    _vrShaderSource = null;
+    isLocalMedia = false;
     _stopOrientationListener();
     _disableAutoEnterPip();
     setPlayCallBack(null);
@@ -1625,7 +1830,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   }
 
   Future<void> getVideoShot() async {
-    videoShot = await VideoHttp.videoshot(bvid: bvid, cid: cid!);
+    // 本地/局域网媒体没有 bvid/cid, 也不该向 B 站请求预览图
+    if (isLocalMedia || _bvid == null || cid == null) {
+      return;
+    }
+    videoShot = await VideoHttp.videoshot(bvid: _bvid!, cid: cid!);
   }
 
   Future<void> takeScreenshot() async {

@@ -3,6 +3,7 @@ import 'dart:ui' show PlatformDispatcher;
 
 import 'package:PiliPlus/common/constants.dart';
 import 'package:PiliPlus/grpc/bilibili/app/listener/v1.pb.dart' show DetailItem;
+import 'package:PiliPlus/models/local_media/local_media_item.dart';
 import 'package:PiliPlus/models_new/download/bili_download_entry_info.dart';
 import 'package:PiliPlus/models_new/live/live_room_info_h5/data.dart';
 import 'package:PiliPlus/models_new/pgc/pgc_info_model/episode.dart';
@@ -241,6 +242,13 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
           artist: data.ownerName,
           duration: Duration(milliseconds: data.totalTimeMilli),
           artUri: uri,
+        );
+      // 「本地」板块: 标题用文件名, 副标题用来源名, 不请求任何网络封面
+      case LocalMediaItem():
+        mediaItem = MediaItem(
+          id: id,
+          title: data.name,
+          artist: data.source.name,
         );
       default:
         return;

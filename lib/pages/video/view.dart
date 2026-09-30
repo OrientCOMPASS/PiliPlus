@@ -30,6 +30,8 @@ import 'package:PiliPlus/pages/video/ai_conclusion/view.dart';
 import 'package:PiliPlus/pages/video/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/local/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/local/view.dart';
+import 'package:PiliPlus/pages/video/introduction/local_media/controller.dart';
+import 'package:PiliPlus/pages/video/introduction/local_media/view.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/view.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/widgets/intro_detail.dart';
@@ -93,7 +95,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
 
   // intro ctr
   late final CommonIntroController introController =
-      videoDetailController.isFileSource
+      videoDetailController.isLocalMedia
+      ? localMediaIntroController
+      : videoDetailController.isFileSource
       ? localIntroController
       : videoDetailController.isUgc
       ? ugcIntroController
@@ -101,6 +105,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   late final UgcIntroController ugcIntroController;
   late final PgcIntroController pgcIntroController;
   late final LocalIntroController localIntroController;
+  late final LocalMediaIntroController localMediaIntroController;
 
   bool get autoExitFullscreen =>
       videoDetailController.plPlayerController.autoExitFullscreen;
@@ -157,7 +162,12 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       );
     }
 
-    if (videoDetailController.isFileSource) {
+    if (videoDetailController.isLocalMedia) {
+      localMediaIntroController = Get.put(
+        LocalMediaIntroController(),
+        tag: heroTag,
+      );
+    } else if (videoDetailController.isFileSource) {
       localIntroController = Get.put(LocalIntroController(), tag: heroTag);
     } else if (videoDetailController.isUgc) {
       ugcIntroController = Get.put(UgcIntroController(), tag: heroTag);
@@ -1622,6 +1632,25 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     );
   }
 
+  Widget localMediaIntroPanel({bool needCtr = true}) {
+    return CustomScrollView(
+      controller: needCtr
+          ? videoDetailController.effectiveIntroScrollCtr
+          : null,
+      physics: !needCtr ? platformAlwaysClampingPhysics : null,
+      key: const PageStorageKey(CommonIntroController),
+      slivers: [
+        SliverPadding(
+          padding: EdgeInsets.only(top: 7, bottom: padding.bottom + 100),
+          sliver: LocalMediaIntroPanel(
+            key: videoRelatedKey,
+            heroTag: heroTag,
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget videoIntro({
     double? width,
     double? height,
@@ -1629,6 +1658,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     bool needRelated = true,
     bool needCtr = true,
   }) {
+    if (videoDetailController.isLocalMedia) {
+      return localMediaIntroPanel(needCtr: needCtr);
+    }
     if (videoDetailController.isFileSource) {
       return localIntroPanel(needCtr: needCtr);
     }

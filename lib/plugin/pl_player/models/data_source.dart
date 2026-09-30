@@ -37,4 +37,13 @@ class FileSource extends DataSource {
              ? null
              : path.join(dir, typeTag, PathUtils.audioNameType2),
        );
+
+  /// 直接播放一个本地文件(「本地」板块), 不涉及 B 站缓存目录结构。
+  ///
+  /// 仍然是 [FileSource], 因此播放器里所有"离线"判断(不上报历史、
+  /// 不请求预览图、打开失败不重试等)都会自动生效。
+  FileSource.direct({required String filePath})
+    : dir = path.dirname(filePath),
+      isMp4 = true,
+      super(videoSource: filePath, audioSource: null);
 }

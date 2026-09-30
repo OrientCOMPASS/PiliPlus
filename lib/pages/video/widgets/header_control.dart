@@ -35,9 +35,11 @@ import 'package:PiliPlus/pages/video/introduction/ugc/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/widgets/action_item.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/widgets/menu_row.dart';
 import 'package:PiliPlus/pages/video/widgets/header_mixin.dart';
+import 'package:PiliPlus/pages/video/introduction/local_media/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/data_source.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
+import 'package:PiliPlus/plugin/pl_player/models/vr_projection.dart';
 import 'package:PiliPlus/services/shutdown_timer_service.dart'
     show shutdownTimerService, ShutdownPanel;
 import 'package:PiliPlus/utils/accounts.dart';
@@ -337,7 +339,10 @@ class HeaderControlState extends State<HeaderControl>
   late final UgcIntroController ugcIntroController;
   late final PgcIntroController pgcIntroController;
   late final LocalIntroController localIntroController;
-  late CommonIntroController introController = isFileSource
+  late final LocalMediaIntroController localMediaIntroController;
+  late CommonIntroController introController = videoDetailCtr.isLocalMedia
+      ? localMediaIntroController
+      : isFileSource
       ? localIntroController
       : videoDetailCtr.isUgc
       ? ugcIntroController
@@ -353,7 +358,9 @@ class HeaderControlState extends State<HeaderControl>
   @override
   void initState() {
     super.initState();
-    if (isFileSource) {
+    if (videoDetailCtr.isLocalMedia) {
+      introController = Get.find<LocalMediaIntroController>(tag: heroTag);
+    } else if (isFileSource) {
       introController = Get.find<LocalIntroController>(tag: heroTag);
     } else if (videoDetailCtr.isUgc) {
       introController = Get.find<UgcIntroController>(tag: heroTag);
@@ -490,6 +497,56 @@ class HeaderControlState extends State<HeaderControl>
                   descPosType: .subtitle,
                   descStyle: subTitleStyle,
                 ),
+                PopupListTile<VrProjection>(
+                  dense: true,
+                  leading: const Icon(Icons.vrpano_outlined, size: 20),
+                  title: const Text('VR/全景', style: titleStyle),
+                  titleStyle: theme.textTheme.bodyLarge,
+                  value: () {
+                    final value = plPlayerController.vrProjection.value;
+                    return (value, value.label);
+                  },
+                  itemBuilder: (_) => enumItemBuilder(VrProjection.values),
+                  onSelected: (value, setState) {
+                    plPlayerController.setVrProjection(value);
+                    setState();
+                  },
+                  descPosType: .subtitle,
+                  descStyle: subTitleStyle,
+                ),
+                if (plPlayerController.vrEnabled) ...[
+                  if (plPlayerController.vrProjection.value.isStereo)
+                    PopupListTile<VrEye>(
+                      dense: true,
+                      leading: const Icon(Icons.visibility_outlined, size: 20),
+                      title: const Text('VR 眼位', style: titleStyle),
+                      titleStyle: theme.textTheme.bodyLarge,
+                      value: () {
+                        final value = plPlayerController.vrEye.value;
+                        return (value, value.label);
+                      },
+                      itemBuilder: (_) => enumItemBuilder(VrEye.values),
+                      onSelected: (value, setState) {
+                        plPlayerController.setVrEye(value);
+                        setState();
+                      },
+                      descPosType: .subtitle,
+                      descStyle: subTitleStyle,
+                    ),
+                  ListTile(
+                    dense: true,
+                    onTap: () {
+                      Get.back();
+                      plPlayerController.resetVrView();
+                      SmartDialog.showToast('视角已摆正，双指可缩放');
+                    },
+                    leading: const Icon(
+                      Icons.center_focus_strong_outlined,
+                      size: 20,
+                    ),
+                    title: const Text('VR 重置视角', style: titleStyle),
+                  ),
+                ],
                 if (PlatformUtils.isMobile)
                   if (plPlayerController.videoPlayerController
                       case final player?)

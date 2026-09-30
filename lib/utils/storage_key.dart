@@ -239,7 +239,15 @@ abstract final class SettingBoxKey {
       reduceLuxColor = 'reduceLuxColor',
       liveCdnUrl = 'liveCdnUrl',
       saveReply = 'saveReply',
-      appFont = 'appFont';
+      appFont = 'appFont',
+      // VR / 全景
+      vrAutoDetect = 'vrAutoDetect',
+      vrDefaultFov = 'vrDefaultFov',
+      vrEye = 'vrEye',
+      // 本地板块
+      localMediaSources = 'localMediaSources',
+      localMediaSort = 'localMediaSort',
+      localMediaShowHidden = 'localMediaShowHidden';
 }
 
 abstract final class LocalCacheKey {

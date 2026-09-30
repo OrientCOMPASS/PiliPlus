@@ -25,6 +25,8 @@ import 'package:PiliPlus/models/common/video/source_type.dart';
 import 'package:PiliPlus/models/common/video/video_decode_type.dart';
 import 'package:PiliPlus/models/common/video/video_quality.dart';
 import 'package:PiliPlus/models/common/video/video_type.dart';
+import 'package:PiliPlus/models/local_media/local_media_item.dart';
+import 'package:PiliPlus/models/local_media/local_media_source.dart';
 import 'package:PiliPlus/models/video/play/url.dart';
 import 'package:PiliPlus/models_new/download/bili_download_entry_info.dart';
 import 'package:PiliPlus/models_new/media_list/media_list.dart';
@@ -52,12 +54,14 @@ import 'package:PiliPlus/plugin/pl_player/models/data_source.dart';
 import 'package:PiliPlus/plugin/pl_player/models/heart_beat_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/services/download/download_service.dart';
+import 'package:PiliPlus/services/local_media_service.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/connectivity_utils.dart';
 import 'package:PiliPlus/utils/extension/context_ext.dart';
 import 'package:PiliPlus/utils/extension/iterable_ext.dart';
 import 'package:PiliPlus/utils/extension/nested_scroll_ext.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
+import 'package:PiliPlus/utils/local_media_progress.dart';
 import 'package:PiliPlus/utils/extension/size_ext.dart';
 import 'package:PiliPlus/utils/page_utils.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
@@ -102,6 +106,11 @@ class VideoDetailController extends GetxController
   late SourceType sourceType;
   late BiliDownloadEntryInfo entry;
   late bool isFileSource;
+
+  /// 「本地」板块媒体(本机文件 / 局域网), 与离线缓存一样走离线分支
+  late bool isLocalMedia;
+  late LocalMediaItem localItem;
+  String? localPlayUrl;
   late bool _mediaDesc = false;
   late final RxList<MediaListItemModel> mediaList = <MediaListItemModel>[].obs;
   late String watchLaterTitle;
@@ -325,6 +334,20 @@ class VideoDetailController extends GetxController
 
   late final watchProgress = GStorage.watchProgress;
   void cacheLocalProgress() {
+    if (isLocalMedia) {
+      // 只写本机记录, 不上报 B 站
+      final pl = plPlayerController;
+      final pos = pl.positionInMilliseconds;
+      if (pos > 0) {
+        final total = pl.durationInMilliseconds;
+        LocalMediaProgress.put(
+          localItem.uri,
+          Duration(milliseconds: pos),
+          duration: total > 0 ? Duration(milliseconds: total) : null,
+        );
+      }
+      return;
+    }
     if (plPlayerController.playerStatus.isCompleted) {
       watchProgress.put(cid.value.toString(), entry.totalTimeMilli);
     } else if (playedTime case final playedTime?) {
@@ -353,6 +376,29 @@ class VideoDetailController extends GetxController
     _setVideoHeight();
   }
 
+  /// 本地/局域网媒体: 播放地址来自文件系统或 URL, 全程不请求 B 站接口
+  void initLocalMediaSource(LocalMediaItem item) {
+    localItem = item;
+    localPlayUrl = LocalMediaService.playbackUrl(item);
+    firstVideo = VideoItem(
+      id: 0,
+      // 本地文件没有 B 站画质概念, 这里只是占位(简介面板不展示画质)
+      quality: VideoQuality.fluent360,
+    );
+    data = PlayUrlModel(timeLength: null);
+    // 续播位置来自本机记录
+    defaultST = LocalMediaProgress.get(item.uri);
+    _setVideoHeight();
+  }
+
+  /// 本机文件用 [FileSource](关闭缓存); 局域网用 [NetworkSource](保留缓冲策略)
+  DataSource _localDataSource() {
+    final url = localPlayUrl!;
+    return localItem.source.type == LocalMediaSourceType.device
+        ? FileSource.direct(filePath: url)
+        : NetworkSource(videoSource: url, audioSource: null);
+  }
+
   @override
   void onInit() {
     super.onInit();
@@ -377,9 +423,14 @@ class VideoDetailController extends GetxController
     isVertical = RxBool(args['isVertical'] ?? false);
 
     sourceType = args['sourceType'] ?? SourceType.normal;
-    isFileSource = sourceType == SourceType.file;
+    isLocalMedia = sourceType == SourceType.localMedia;
+    // 本地/局域网媒体与离线缓存共用"离线"语义: 不请求任何 B 站接口,
+    // 不显示评论与相关视频, 不上报播放进度
+    isFileSource = sourceType == SourceType.file || isLocalMedia;
     isPlayAll = sourceType != SourceType.normal && !isFileSource;
-    if (isFileSource) {
+    if (isLocalMedia) {
+      initLocalMediaSource(args['localMedia'] as LocalMediaItem);
+    } else if (isFileSource) {
       initFileSource(args['entry']);
     } else if (isPlayAll) {
       watchLaterTitle = args['favTitle'];
@@ -726,7 +777,9 @@ class VideoDetailController extends GetxController
     if (seek == .zero) seek = null;
     seek ??= getFirstSegment();
     await plPlayerController.setDataSource(
-      isFileSource
+      isLocalMedia
+          ? _localDataSource()
+          : isFileSource
           ? FileSource(
               dir: args['dirPath'],
               typeTag: entry.typeTag!,
@@ -758,6 +811,7 @@ class VideoDetailController extends GetxController
       height: firstVideo.height,
       volume: volume,
       autoFullScreenFlag: autoFullScreenFlag,
+      isLocalMedia: isLocalMedia,
     );
 
     if (isClosed) return;

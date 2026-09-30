@@ -27,6 +27,9 @@ enum SourceType {
     playlistSource: PlaylistSource.MEDIA_LIST,
   ),
   file,
+
+  /// 「本地」板块: 本机文件或局域网(WebDAV / HTTP / FTP)媒体
+  localMedia,
   ;
 
   final int? mediaType;

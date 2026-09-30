@@ -8,6 +8,8 @@ import 'package:PiliPlus/models/common/video/source_type.dart';
 import 'package:PiliPlus/models/local_media/local_media_item.dart';
 import 'package:PiliPlus/models/local_media/local_media_sort.dart';
 import 'package:PiliPlus/models/local_media/local_media_source.dart';
+import 'package:PiliPlus/pages/local_media/controller.dart';
+import 'package:PiliPlus/pages/local_media/widgets/smb_dialogs.dart';
 import 'package:PiliPlus/services/local_media_service.dart';
 import 'package:PiliPlus/utils/cache_manager.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
@@ -16,6 +18,7 @@ import 'package:PiliPlus/utils/page_utils.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
+import 'package:get/get.dart' show Get, Obx;
 import 'package:material_ui/material_ui.dart';
 
 /// 目录浏览页: 从一个来源(本机目录 / SMB 共享 / WebDAV)的某个路径开始逐层浏览。
@@ -72,23 +75,86 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
 
   _Level get _current => _stack.last;
 
-  Future<void> _refresh() async {
+  /// [askCredentials] 为 false 时不再弹凭据框(避免账号错误时无限循环)
+  Future<void> _refresh({bool askCredentials = true}) async {
     setState(() => _state = LoadingState.loading());
     final level = _current;
-    final res = await LocalMediaService.list(
-      source: level.source,
-      path: level.path,
-      sort: _sort,
-      showHidden: _showHidden,
+    try {
+      final items = await LocalMediaService.listOrThrow(
+        source: level.source,
+        path: level.path,
+        showHidden: _showHidden,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _state = Success(LocalMediaService.sortItems(items, _sort));
+        _syncProgress(items);
+      });
+    } on Object catch (err) {
+      if (!mounted) {
+        return;
+      }
+      // SMB 服务端不接受匿名: 弹一次凭据框, 存进来源后重试。
+      // 凭据挂在"来源"上, 所以整台主机的所有共享/子目录共用一份, 不会反复问。
+      if (askCredentials &&
+          LocalMediaService.isAuthFailure(err) &&
+          await _askCredentials(level.source)) {
+        await _refresh(askCredentials: false);
+        return;
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _state = Error(LocalMediaService.humanize(err, level.source));
+      });
+    }
+  }
+
+  /// 弹凭据框; 成功后把账号写回来源(持久化)并更新本页面栈里的所有层级
+  Future<bool> _askCredentials(LocalMediaSource source) async {
+    final creds = await showSmbCredentialsDialog(
+      context,
+      hostLabel: source.name,
+      initialUser: source.username,
+    );
+    if (creds == null || !mounted) {
+      return false;
+    }
+    final user = creds.user.isEmpty ? null : creds.user;
+    final password = creds.password.isEmpty ? null : creds.password;
+    final domain = creds.domain.isEmpty ? null : creds.domain;
+    final updated = source.copyWith(
+      username: user,
+      password: password,
+      domain: domain,
+    );
+    await _mediaController?.updateCredentials(
+      source,
+      user: user,
+      password: password,
+      domain: creds.domain,
     );
     if (!mounted) {
-      return;
+      return false;
     }
-    setState(() {
-      _state = res;
-      _syncProgress(res.dataOrNull ?? const []);
-    });
+    // 页面栈里的同一来源都要换成带凭据的副本, 否则回退一层又要重输
+    for (final level in _stack) {
+      if (level.source.url == source.url &&
+          level.source.type == source.type) {
+        level.source = updated;
+      }
+    }
+    return true;
   }
+
+  /// 「本地」板块控制器(用于保存快捷方式与凭据); 独立打开本页时可能没有
+  LocalMediaController? get _mediaController =>
+      Get.isRegistered<LocalMediaController>()
+      ? Get.find<LocalMediaController>()
+      : null;
 
   void _syncProgress(List<LocalMediaItem> items) {
     final next = <String, Duration>{};
@@ -182,6 +248,18 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
             overflow: TextOverflow.ellipsis,
           ),
           actions: [
+            // VLC 式书签: 浏览到常用目录时手动收藏, 而不是连接主机时被动弹窗
+            Obx(
+              () => IconButton(
+                tooltip: _isBookmarked ? '已在快捷方式中' : '添加到快捷方式',
+                onPressed: _isBookmarked ? null : _addShortcut,
+                icon: Icon(
+                  _isBookmarked
+                      ? Icons.bookmark_added_outlined
+                      : Icons.bookmark_add_outlined,
+                ),
+              ),
+            ),
             PopupMenuButton<LocalMediaSort>(
               tooltip: '排序',
               initialValue: _sort,
@@ -291,6 +369,38 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
     );
   }
 
+  // ==================== 快捷方式(书签) ====================
+
+  /// 当前层级对应的快捷方式(不可收藏时为 null)
+  LocalMediaSource? get _shortcut => _mediaController?.shortcutFor(
+    source: _current.source,
+    path: _current.path,
+    title: _current.title,
+  );
+
+  bool get _isBookmarked {
+    // 先读一次 `.value`: Obx 要求 build 期间至少订阅到一个可观察对象,
+    // 提前 return 会让它认为"没在监听"而报错
+    final saved =
+        _mediaController?.savedSources.value ?? const <LocalMediaSource>[];
+    final target = _shortcut;
+    if (target == null) {
+      return false;
+    }
+    return saved.any((e) => e.type == target.type && e.url == target.url);
+  }
+
+  Future<void> _addShortcut() async {
+    final controller = _mediaController;
+    final target = _shortcut;
+    if (controller == null || target == null) {
+      SmartDialog.showToast('当前目录无法添加为快捷方式');
+      return;
+    }
+    await controller.addSource(target);
+    SmartDialog.showToast('已添加「${target.name}」到快捷方式');
+  }
+
   void _showItemMenu(LocalMediaItem item) {
     final masked = LocalMediaService.maskedUrl(item.uri);
     showDialog<void>(
@@ -353,13 +463,10 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
 }
 
 class _Level {
-  const _Level({
-    required this.source,
-    required this.path,
-    required this.title,
-  });
+  _Level({required this.source, required this.path, required this.title});
 
-  final LocalMediaSource source;
+  /// 中途拿到凭据时要就地换成带账号的副本, 所以不是 final
+  LocalMediaSource source;
   final String path;
   final String title;
 }

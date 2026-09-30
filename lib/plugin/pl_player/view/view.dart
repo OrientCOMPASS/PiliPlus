@@ -878,7 +878,9 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       ),
     };
 
-    final isNotFileSource = !plPlayerController.isFileSource;
+    // 本地/局域网媒体的局域网来源是 NetworkSource, 单看 isFileSource 会把
+    // 弹幕趋势图/看点/选集/AI 翻译/画质这些 B 站专属按钮错误地显示出来
+    final isNotFileSource = !plPlayerController.isOfflinePlayback;
 
     List<BottomControlType> userSpecifyItemLeft = [
       .playOrPause,
@@ -965,7 +967,8 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     plPlayerController
       ..seekToPos = Duration(milliseconds: newPos)
       ..seekPosition.value = seconds;
-    if (!plPlayerController.isFileSource &&
+    // 进度预览图来自 B 站的 videoshot 接口, 离线/本地媒体没有
+    if (!plPlayerController.isOfflinePlayback &&
         plPlayerController.showSeekPreview) {
       plPlayerController.updatePreviewIndex(seconds);
     }

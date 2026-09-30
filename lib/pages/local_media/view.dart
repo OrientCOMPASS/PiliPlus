@@ -153,6 +153,23 @@ class _LocalMediaPageState extends State<LocalMediaPage>
         );
       }
 
+      // 本机目录的书签(在浏览页里手动收藏的), 与 VLC 的 bookmark 一致
+      final shortcuts = _controller.deviceShortcuts;
+      if (shortcuts.isNotEmpty) {
+        children
+          ..add(const Divider(height: 24))
+          ..add(
+            const ListTile(
+              leading: Icon(Icons.bookmark_border),
+              title: Text('快捷方式'),
+              subtitle: Text('浏览目录时点右上角书签收藏到这里'),
+            ),
+          );
+        for (final source in shortcuts) {
+          children.add(_buildSource(context, source));
+        }
+      }
+
       if (!scanning && folders.isEmpty) {
         children.add(
           Padding(
@@ -253,12 +270,14 @@ class _LocalMediaPageState extends State<LocalMediaPage>
         ..add(const Divider(height: 24))
         ..add(
           const ListTile(
-            leading: Icon(Icons.cloud_outlined),
-            title: Text('已保存的共享'),
-            subtitle: Text('SMB / WebDAV 可浏览目录，HTTP / FTP 为直链播放'),
+            leading: Icon(Icons.bookmark_border),
+            title: Text('快捷方式'),
+            subtitle: Text(
+              '连接过的主机与收藏的目录；SMB / WebDAV 可浏览，HTTP / FTP 为直链',
+            ),
           ),
         );
-      for (final source in _controller.savedSources) {
+      for (final source in _controller.networkShortcuts) {
         children.add(_buildSource(context, source));
       }
       children.add(
@@ -281,9 +300,8 @@ class _LocalMediaPageState extends State<LocalMediaPage>
       leading: const Icon(Icons.computer_outlined),
       title: Text(host.displayName),
       subtitle: Text(
-        host.name == null
-            ? '${host.address}:${host.port} · 点击自动获取共享列表'
-            : '${host.address}:${host.port}',
+        '${host.address}:${host.port}'
+        '${host.name == null ? '' : ' · 点击进入主机，共享为其中的子目录'}',
       ),
       trailing: const Icon(Icons.chevron_right),
       onTap: () => _controller.openDiscoveredHost(context, host),

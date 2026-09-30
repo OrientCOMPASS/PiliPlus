@@ -27,6 +27,18 @@ class LocalMediaController extends GetxController {
   /// 自动发现的 SMB 主机
   final RxList<SmbHost> discovered = <SmbHost>[].obs;
 
+  /// 本机目录的书签(浏览页里手动收藏的)
+  List<LocalMediaSource> get deviceShortcuts => [
+    for (final s in savedSources)
+      if (s.type == LocalMediaSourceType.device) s,
+  ];
+
+  /// 网络来源的书签: 连接过的主机 + 收藏的共享/目录 + 直链
+  List<LocalMediaSource> get networkShortcuts => [
+    for (final s in savedSources)
+      if (s.type != LocalMediaSourceType.device) s,
+  ];
+
   final RxBool scanningNetwork = false.obs;
   final RxInt scanDone = 0.obs;
   final RxInt scanTotal = 0.obs;
@@ -151,26 +163,40 @@ class LocalMediaController extends GetxController {
     );
   }
 
-  /// 发现的主机 -> 自动枚举共享(SRVSVC, 与 VLC/资源管理器同款行为) ->
-  /// 选共享 -> 保存并打开。
-  /// 匿名被拒时弹凭据框重试; 枚举失败(服务端禁用 RPC 等)退回手动输入。
+  /// 连接一台发现的主机。
+  ///
+  /// **主机即目录**(第四轮改的交互, 与 VLC/资源管理器一致): 连接后直接进入
+  /// 这台主机, 它共享出来的每个目录就是里面的一级子目录。
+  /// 之前的做法是"枚举共享 -> 弹窗让用户挑一个 -> 存成一条快捷路径 -> 打开",
+  /// 想换另一个共享就得退回来重选, 而且共享列表会越攒越长。
+  /// 现在只有用户自己按浏览页右上角的「添加到快捷方式」时才会新增收藏。
+  ///
+  /// 这里仍然先做一次共享枚举, 但目的不是让用户挑, 而是:
+  ///   1. 拿服务端自报的权威主机名(NTLM CHALLENGE 的 AV_PAIR), 存成
+  ///      `smb://<主机名>` 而不是 `smb://<IP>`(IP 会变, 名字不会);
+  ///   2. 提前知道要不要账号(匿名被拒就弹一次凭据框);
+  ///   3. 把结果当作浏览页根目录的 initialItems, 省掉第二次往返。
+  /// 枚举本身失败(服务端禁用 RPC 等)才退回"手动输入共享地址"。
   Future<void> openDiscoveredHost(
     BuildContext context,
     SmbHost host,
   ) async {
-    // 复用同主机已保存来源的凭据, 免得每次都输
     final saved = _savedSourceForHost(host);
+    // 已经收藏过这台主机: 直接进入, 不再重新枚举、不再弹窗
+    if (saved != null && saved.isSmbHostRoot) {
+      openSource(saved);
+      return;
+    }
+    // 复用同主机已保存来源的凭据(可能是旧版本按共享保存的), 免得每次都输
     String? user = saved?.username;
     String? password = saved?.password;
     var domain = saved?.domain ?? '';
     var askedForCredentials = false;
 
-    SmbShareListResult? result;
-    String? errorText;
     while (true) {
-      SmartDialog.showLoading(msg: '正在获取「${host.displayName}」的共享列表…');
+      SmartDialog.showLoading(msg: '正在连接「${host.displayName}」…');
       try {
-        result = await SmbBrowse.listShares(
+        final result = await SmbBrowse.listShares(
           host: host.address,
           port: host.port,
           user: user,
@@ -178,8 +204,47 @@ class LocalMediaController extends GetxController {
           domain: domain,
         );
         SmartDialog.dismiss();
-        errorText = null;
-        break;
+        if (!context.mounted) {
+          return;
+        }
+        final serverName = result.serverInfo?.bestName ?? host.name;
+        final urlHost = _urlSafeHostName(serverName) ?? host.address;
+        final source = LocalMediaSource(
+          type: LocalMediaSourceType.smb,
+          name: serverName ?? host.address,
+          // 主机级地址: 没有共享名, 浏览页把根目录解释为"列共享"
+          url: SmbBrowse.hostUri(host: urlHost, port: host.port),
+          username: user,
+          password: (password == null || password.isEmpty) ? null : password,
+          domain: domain.isEmpty ? null : domain,
+          address: SmbName.isIpLiteral(host.address) ? host.address : null,
+        );
+        await addSource(source);
+        // 共享列表已经拿到了, 直接当根目录内容用(过滤规则与服务层一致)
+        final shares = <LocalMediaItem>[
+          for (final share in result.browsable)
+            LocalMediaItem(
+              name: share.name,
+              uri: SmbBrowse.uri(
+                host: urlHost,
+                port: host.port,
+                share: share.name,
+                remotePath: '',
+              ),
+              source: source,
+              remotePath: share.name,
+              isDirectory: true,
+            ),
+        ];
+        Get.to(
+          () => LocalMediaBrowserPage(
+            source: source,
+            path: '',
+            title: source.name,
+            initialItems: shares,
+          ),
+        );
+        return;
       } on SmbException catch (e) {
         SmartDialog.dismiss();
         if (e.isAuthFailure && !askedForCredentials) {
@@ -200,62 +265,116 @@ class LocalMediaController extends GetxController {
           domain = creds.domain;
           continue;
         }
-        errorText = '获取共享列表失败: ${e.statusText}';
-        break;
+        if (!context.mounted) {
+          return;
+        }
+        // 连得上但共享枚举不可用(服务端禁用 RPC / 权限不足): 退回手动输入
+        SmartDialog.showToast('获取共享列表失败: ${e.statusText}');
+        await _manualAddHost(context, host, null, user, password, domain);
+        return;
       } catch (e) {
         SmartDialog.dismiss();
-        errorText = '获取共享列表失败: $e';
-        break;
-      }
-    }
-    if (!context.mounted) {
-      return;
-    }
-
-    final serverName = result?.serverInfo?.bestName ?? host.name;
-    if (result == null) {
-      // RPC 被禁用/网络异常: 回落到手动输入(旧行为), 但把失败原因告诉用户
-      if (errorText != null) {
-        SmartDialog.showToast(errorText);
-      }
-      await _manualAddHost(context, host, serverName, user, password, domain);
-      return;
-    }
-
-    final pick = await showSmbSharePicker(
-      context,
-      hostLabel: serverName ?? host.address,
-      address: '${host.address}:${host.port}',
-      shares: result.browsable,
-    );
-    if (pick == null) {
-      return;
-    }
-    if (pick.manual || pick.share == null) {
-      if (!context.mounted) {
+        if (!context.mounted) {
+          return;
+        }
+        SmartDialog.showToast('连接失败: $e');
+        await _manualAddHost(context, host, null, user, password, domain);
         return;
       }
-      await _manualAddHost(context, host, serverName, user, password, domain);
-      return;
     }
-    final share = pick.share!;
-    // 尽量用主机名: URL 写 smb://<主机名>/<共享>, 同时记录 IP 作为解析兜底
-    final urlHost = _urlSafeHostName(serverName) ?? host.address;
-    final source = LocalMediaSource(
-      type: LocalMediaSourceType.smb,
-      name: share.name,
-      url: SmbBrowse.uri(
-        host: urlHost,
-        port: host.port,
-        share: share.name,
-        remotePath: '',
-      ),
+  }
+
+  /// 浏览页里把当前目录收藏成快捷方式(VLC 的 bookmark 行为)。
+  ///
+  /// 返回 null 表示当前层级不适合收藏(直链来源、或就在来源根目录上)。
+  LocalMediaSource? shortcutFor({
+    required LocalMediaSource source,
+    required String path,
+    required String title,
+  }) {
+    final name = title.isEmpty ? source.name : title;
+    switch (source.type) {
+      case LocalMediaSourceType.device:
+        if (path.isEmpty) {
+          return null;
+        }
+        return LocalMediaSource(
+          type: LocalMediaSourceType.device,
+          name: name,
+          url: path,
+        );
+      case LocalMediaSourceType.smb:
+        final h = source.smbHost;
+        if (h == null) {
+          return null;
+        }
+        // 主机级来源: path 的第一段是共享名; 共享级来源: 共享名在 endpoint 里
+        final String url;
+        if (source.isSmbHostRoot) {
+          final (share, inner) = SmbBrowse.splitSharePath(path);
+          if (share.isEmpty) {
+            return null; // 就在主机根上, 收藏它等于收藏主机本身
+          }
+          url = SmbBrowse.uri(
+            host: h.host,
+            port: h.port,
+            share: share,
+            remotePath: inner,
+          );
+        } else {
+          final ep = source.smbEndpoint!;
+          url = SmbBrowse.uri(
+            host: ep.host,
+            port: ep.port,
+            share: ep.share,
+            remotePath: path,
+          );
+        }
+        return LocalMediaSource(
+          type: LocalMediaSourceType.smb,
+          name: name,
+          url: url,
+          username: source.username,
+          password: source.password,
+          domain: source.domain,
+          address: source.address,
+        );
+      case LocalMediaSourceType.webdav:
+        if (path.isEmpty || path == '/') {
+          return null;
+        }
+        return LocalMediaSource(
+          type: LocalMediaSourceType.webdav,
+          name: name,
+          url: LocalMediaService.joinUrl(source.url, path),
+          username: source.username,
+          password: source.password,
+        );
+      case LocalMediaSourceType.http:
+      case LocalMediaSourceType.ftp:
+        return null; // 直链来源没有目录可收藏
+    }
+  }
+
+  /// 浏览中弹出凭据框后, 把账号写回来源(否则每进一层都要重输)
+  Future<void> updateCredentials(
+    LocalMediaSource source, {
+    String? user,
+    String? password,
+    String domain = '',
+  }) async {
+    final updated = source.copyWith(
       username: user,
       password: (password == null || password.isEmpty) ? null : password,
       domain: domain.isEmpty ? null : domain,
-      address: SmbName.isIpLiteral(host.address) ? host.address : null,
     );
-    await _testAndOpen(source);
+    final index = savedSources.indexOf(source);
+    if (index >= 0) {
+      savedSources[index] = updated;
+      await _persist();
+    } else {
+      await addSource(updated);
+    }
   }
 
   /// 手动输入共享地址(自动枚举失败时的兜底, 预填已知信息)
@@ -303,23 +422,32 @@ class LocalMediaController extends GetxController {
     }
   }
 
-  /// 找到同一台主机上已保存的 SMB 来源(按 IP 或主机名匹配)
+  /// 找到同一台主机上已保存的 SMB 来源(按 IP 或主机名匹配)。
+  /// 主机级来源(`smb://NAS`)优先: 它才是"这台主机"本身。
   LocalMediaSource? _savedSourceForHost(SmbHost host) {
+    LocalMediaSource? fallback;
     for (final source in savedSources) {
       if (source.type != LocalMediaSourceType.smb) {
         continue;
       }
-      final ep = source.smbEndpoint;
-      if (ep == null) {
+      // 主机级来源用 smbHost, 共享级来源用 smbEndpoint
+      final h = source.smbHost;
+      if (h == null) {
         continue;
       }
-      if (ep.host == host.address ||
+      final match =
+          h.host == host.address ||
           source.address == host.address ||
-          (host.name != null && ep.host == host.name)) {
+          (host.name != null && h.host == host.name);
+      if (!match) {
+        continue;
+      }
+      if (source.isSmbHostRoot) {
         return source;
       }
+      fallback ??= source;
     }
-    return null;
+    return fallback;
   }
 
   /// 主机名能不能安全地写进 URL(否则退回 IP)

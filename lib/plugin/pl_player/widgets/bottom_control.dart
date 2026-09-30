@@ -31,7 +31,8 @@ class BottomControl extends StatelessWidget {
   }
 
   void onDragUpdate(ThumbDragDetails duration) {
-    if (!controller.isFileSource && controller.showSeekPreview) {
+    // 预览图来自 B 站 videoshot 接口, 离线/本地媒体没有
+    if (!controller.isOfflinePlayback && controller.showSeekPreview) {
       controller.updatePreviewIndex(duration.seconds);
     }
     controller.seekPosition.value = duration.seconds;

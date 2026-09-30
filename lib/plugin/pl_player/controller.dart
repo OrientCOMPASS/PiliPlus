@@ -578,6 +578,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   // offline
   bool get isFileSource => dataSource is FileSource;
 
+  /// 真正的"离线播放": B 站离线缓存 **或** 「本地」板块的本机/局域网媒体。
+  ///
+  /// [isFileSource] 只看 `dataSource` 的类型, 而本地媒体的局域网来源是
+  /// [NetworkSource](SMB 走本机回环 HTTP 代理, WebDAV/HTTP/FTP 直连),
+  /// 用它来判断会把一堆只对 B 站在线视频成立的行为错误地打开
+  /// (进度预览图 videoshot、弹幕趋势图、画质/音质选择、AI 字幕翻译...)。
+  /// 凡是"这件事依赖 B 站接口"的判断都应该用它, 而不是 [isFileSource]。
+  bool get isOfflinePlayback => isFileSource || isLocalMedia;
+
   /// 本地/局域网媒体(「本地」板块)。
   ///
   /// 播放的不是 B 站内容, 因此一切会上报到 B 站或依赖 B 站接口的行为都必须关闭:

@@ -71,6 +71,10 @@ internal class VrEngine(
     private var videoInputDone = false
     private var videoOutputDone = false
 
+    /// 暂停状态下也放行一帧(拖动进度条时能看到画面)
+    @Volatile
+    private var renderOneFrame = false
+
     // ==================== 音频 ====================
     private var audioExtractor: MediaExtractor? = null
     private var audioCodec: MediaCodec? = null
@@ -91,11 +95,20 @@ internal class VrEngine(
     private var wallClockBaseUs = 0L
     private var wallClockBaseNanos = 0L
 
+    /// 暂停期间冻结的位置（仅无音轨时用；有音轨时 AudioTrack 停下时钟自然就不走了）
+    @Volatile
+    private var frozenUs: Long = -1
+
     // 无音轨时用墙钟推进
     private fun wallClockNowUs(): Long =
         wallClockBaseUs + ((System.nanoTime() - wallClockBaseNanos) / 1000 * speed).toLong()
 
-    private fun positionUs(): Long = if (hasAudio) clockUs.get() else wallClockNowUs()
+    private fun positionUs(): Long = if (hasAudio) {
+        clockUs.get()
+    } else {
+        val f = frozenUs
+        if (f >= 0) f else wallClockNowUs()
+    }
 
     private fun resyncWallClock(us: Long) {
         wallClockBaseUs = us
@@ -250,8 +263,11 @@ internal class VrEngine(
 
     fun play() {
         if (playing) return
+        // 先把冻结的位置接回墙钟基准, 再清掉冻结值(顺序不能反)
+        val resumeFrom = if (hasAudio) clockUs.get() else positionUs()
+        resyncWallClock(resumeFrom)
+        frozenUs = -1
         playing = true
-        resyncWallClock(positionUs())
         audioTrack?.let {
             try {
                 it.play()
@@ -264,6 +280,11 @@ internal class VrEngine(
     fun pause() {
         if (!playing) return
         playing = false
+        if (!hasAudio) {
+            // 墙钟不会因为暂停而停下, 必须显式冻结, 否则恢复播放时
+            // 位置会一次性跳过"暂停了多久"
+            frozenUs = wallClockNowUs()
+        }
         audioTrack?.let {
             try {
                 it.pause()
@@ -294,6 +315,9 @@ internal class VrEngine(
         seekGeneration.incrementAndGet()
         clockUs.set(target)
         resyncWallClock(target)
+        frozenUs = if (playing || hasAudio) -1 else target
+        // 暂停中拖动进度条也要能看到那一帧, 放一帧出来
+        renderOneFrame = true
     }
 
     fun getPositionUs(): Long = positionUs()
@@ -393,7 +417,7 @@ internal class VrEngine(
         try {
             while (!released) {
                 handleSeek(ex, codec, true)
-                if (!playing && !videoOutputDone) {
+                if (!playing && !videoOutputDone && !renderOneFrame) {
                     Thread.sleep(MAX_SLEEP_MS)
                     continue
                 }
@@ -447,6 +471,7 @@ internal class VrEngine(
                                 break
                             }
                             codec.releaseOutputBuffer(outIndex, true)
+                            renderOneFrame = false
                             gl.requestRender()
                             if (starvingSince != 0L) {
                                 starvingSince = 0

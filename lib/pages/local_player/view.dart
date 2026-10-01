@@ -87,7 +87,6 @@ class _LocalPlayerPageState extends State<LocalPlayerPage> {
   void _flashSeekIcon(int seconds) {
     SmartDialog.showToast(
       seconds > 0 ? '快进 $seconds 秒' : '快退 ${-seconds} 秒',
-      duration: const Duration(milliseconds: 600),
     );
   }
 
@@ -221,7 +220,6 @@ class _LocalPlayerPageState extends State<LocalPlayerPage> {
           _c.setRate(Pref.longPressSpeedDefault);
           SmartDialog.showToast(
             '${Pref.longPressSpeedDefault}x 中…',
-            duration: const Duration(milliseconds: 600),
           );
         }
       },
@@ -563,8 +561,7 @@ class _LocalPlayerPageState extends State<LocalPlayerPage> {
                       tooltip: '画面比例：${_c.aspectLabel}',
                       onPressed: () {
                         _c.cycleAspect();
-                        SmartDialog.showToast('画面比例：${_c.aspectLabel}',
-                            duration: const Duration(milliseconds: 700));
+                        SmartDialog.showToast('画面比例：${_c.aspectLabel}');
                         _bumpControls();
                       },
                     ),

@@ -1,0 +1,69 @@
+#!/bin/bash -e
+# Build the VR-patched libmpv.so (arm64-v8a) and assemble the media_kit
+# Android jar around it.
+#
+# Strategy: build ONLY libmpv.so from patched sources (patches/mpv/*), then
+# take the official media_kit jar pinned by the app
+# (My-Responsitories/libmpv-android-video-build release 20260906, built from
+# upstream commit 8e50ecc which this buildscripts/ tree is copied from) and
+# replace its lib/arm64-v8a/libmpv.so with ours. The other native libraries
+# in the jar (libmedia_kit_native_event_loop.so, libmediakitandroidhelper.so)
+# stay byte-identical to what the app already ships, so the only runtime
+# difference is mpv itself.
+#
+# Output: ../output/default-arm64-v8a.jar (+ .sha256)
+
+set -euo pipefail
+cd "$( dirname "${BASH_SOURCE[0]}" )"
+
+UPSTREAM_TAG=20260906
+UPSTREAM_JAR_URL="https://github.com/My-Responsitories/libmpv-android-video-build/releases/download/${UPSTREAM_TAG}/default-arm64-v8a.jar"
+UPSTREAM_JAR_SHA256="98df6410375cc7a4be7e6eff56f9ccd88fa52678973cc23bcf7e934ab8c8682d"
+
+# --------------------------------------------------
+# 1. deps + patches + build (arm64 only)
+
+./download.sh
+./patch.sh
+
+# sanity: the VR patch must have applied (patch.sh does git apply; a failed
+# hunk would already abort, but check the files exist too)
+test -f deps/mpv/video/out/gpu/vr.c
+test -f deps/mpv/video/out/gpu/vr_tracker.c
+grep -q "vr-head-tracking" deps/mpv/video/out/gpu/video.c
+
+cp flavors/default.sh scripts/ffmpeg.sh
+./build.sh mpv --arch arm64
+
+NEW_SO="../libmpv/src/main/jniLibs/arm64-v8a/libmpv.so"
+test -f "$NEW_SO"
+ls -la "$NEW_SO"
+
+# sanity: VR options must be compiled into the library
+if ! strings -a "$NEW_SO" | grep -q "vr-head-tracking"; then
+    echo "FATAL: libmpv.so does not contain the VR options" >&2
+    exit 1
+fi
+echo "libmpv.so contains VR options ✓"
+
+# --------------------------------------------------
+# 2. jar assembly: upstream jar with our libmpv.so swapped in
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+wget -q "$UPSTREAM_JAR_URL" -O "$work/upstream.jar"
+echo "$UPSTREAM_JAR_SHA256  $work/upstream.jar" | sha256sum -c -
+(cd "$work" && unzip -q upstream.jar)
+
+cp -L "$NEW_SO" "$work/lib/arm64-v8a/libmpv.so"
+
+mkdir -p ../output
+rm -f ../output/default-arm64-v8a.jar
+(cd "$work/lib" && zip -q -r ../default-arm64-v8a.jar arm64-v8a)
+mv "$work/default-arm64-v8a.jar" ../output/default-arm64-v8a.jar
+
+(cd ../output && sha256sum default-arm64-v8a.jar | tee default-arm64-v8a.jar.sha256)
+unzip -l ../output/default-arm64-v8a.jar
+
+echo "OK: ../output/default-arm64-v8a.jar"

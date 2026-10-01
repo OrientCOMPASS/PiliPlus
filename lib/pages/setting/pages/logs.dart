@@ -109,12 +109,13 @@ class _LogsPageState extends State<LogsPage> {
       ..writeln('Commit: ${BuildConfig.commitHash}')
       ..writeln('构建时间戳: ${BuildConfig.buildTime}');
     if (_deviceInfo case final d?) {
+      final (device, app, custom) = d.item;
       buf
         ..writeln()
         ..writeln('===== 设备/应用参数 =====')
-        ..writeln('deviceParameters: ${d.$1}')
-        ..writeln('applicationParameters: ${d.$2}')
-        ..writeln('customParameters: ${d.$3}');
+        ..writeln('deviceParameters: $device')
+        ..writeln('applicationParameters: $app')
+        ..writeln('customParameters: $custom');
     }
     buf
       ..writeln()

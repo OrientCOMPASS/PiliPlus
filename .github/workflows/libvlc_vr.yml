@@ -132,7 +132,7 @@ jobs:
                   set -euo pipefail
                   cd tool/libvlc-vr
                   mkdir -p output
-                  SO_DIR="$(dirname "$(find libvlcjni -path '*libs/arm64-v8a/libvlc.so' | head -1)")"
+                  SO_DIR="$(dirname "$(find libvlcjni -path '*libs/arm64-v8a/libvlc.so' -print -quit)")"
                   echo "SO_DIR=$SO_DIR"; ls -la "$SO_DIR"
                   for so in libvlc.so libvlcjni.so libc++_shared.so; do
                     [ -f "$SO_DIR/$so" ] || { echo "missing $so"; exit 1; }
@@ -141,12 +141,15 @@ jobs:
                   curl -fL --retry 3 -o output/official.aar "$OFFICIAL_AAR_URL"
                   echo "$OFFICIAL_AAR_SHA256  output/official.aar" | sha256sum -c
 
-                  # 自检: VR 选项与 changeset 标记必须编进 libvlc.so
-                  strings "$SO_DIR/libvlc.so" | grep -q "vr-coverage"   || { echo "FAIL: vr-coverage not in libvlc.so"; exit 1; }
-                  strings "$SO_DIR/libvlc.so" | grep -q "vr-projection" || { echo "FAIL: vr-projection not in libvlc.so"; exit 1; }
-                  strings "$SO_DIR/libvlc.so" | grep -q "vr-layout"     || { echo "FAIL: vr-layout not in libvlc.so"; exit 1; }
-                  strings "$SO_DIR/libvlc.so" | grep -q "vr-eye"        || { echo "FAIL: vr-eye not in libvlc.so"; exit 1; }
-                  strings "$SO_DIR/libvlc.so" | grep -q "piliplus-vr1"  || { echo "FAIL: changeset marker not in libvlc.so"; exit 1; }
+                  # 自检: VR 选项与 changeset 标记必须编进 libvlc.so。
+                  # 注意不能写 `strings x | grep -q y`: pipefail 下 grep -q 命中
+                  # 即退出会让 strings 吃 SIGPIPE(141), 管线被误判失败(上一轮
+                  # 就是这么冤枉失败的)。先落盘一次再逐个 grep。
+                  strings "$SO_DIR/libvlc.so" > output/libvlc.strings
+                  for needle in vr-projection vr-layout vr-coverage vr-eye piliplus-vr1; do
+                    grep -q "$needle" output/libvlc.strings || { echo "FAIL: $needle not in libvlc.so"; exit 1; }
+                  done
+                  rm -f output/libvlc.strings
                   echo "::notice::strings 自检通过(vr-* 选项与 piliplus-vr1 标记均已编入)"
 
                   cp output/official.aar "output/$ASSET_NAME"

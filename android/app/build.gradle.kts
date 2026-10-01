@@ -1,5 +1,8 @@
 import com.android.build.gradle.internal.api.ApkVariantOutputImpl
 import org.jetbrains.kotlin.konan.properties.Properties
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 
 plugins {
     id("com.android.application")
@@ -165,7 +168,7 @@ val downloadLibVlcVr = tasks.register("downloadLibVlcVr") {
             )
         }
         val expected = shaTmp.readText().trim().split(Regex("\\s+")).first()
-        val md = java.security.MessageDigest.getInstance("SHA-256")
+        val md = MessageDigest.getInstance("SHA-256")
         tmp.inputStream().use { input ->
             val buf = ByteArray(1 shl 20)
             var n: Int
@@ -181,10 +184,7 @@ val downloadLibVlcVr = tasks.register("downloadLibVlcVr") {
                 "libvlc-vr AAR sha256 校验失败: expected=$expected actual=$actual(已删除, 重跑构建即重试)",
             )
         }
-        java.nio.file.Files.move(
-            tmp.toPath(), out.toPath(),
-            java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-        )
+        Files.move(tmp.toPath(), out.toPath(), StandardCopyOption.REPLACE_EXISTING)
         shaTmp.renameTo(File(out.parentFile, "${out.name}.sha256"))
         logger.lifecycle("libvlc-vr AAR 校验通过 sha256=$actual")
     }

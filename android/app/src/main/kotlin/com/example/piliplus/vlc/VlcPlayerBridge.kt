@@ -8,11 +8,12 @@ import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.view.TextureRegistry
+import com.example.piliplus.LogCollector
+import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
 import org.videolan.libvlc.interfaces.IMedia
@@ -63,6 +64,12 @@ class VlcPlayerBridge(
     private var vpPitch = 0f
     private var vpFov = 80f
     private var is360 = false
+
+    // ---- VR 强制格式(§18): 0=auto(元数据) 1=平面 2=360 3=360SBS 4=360TB
+    //      5=180 6=180SBS 7=180TB; vrCoverageDeg: 360/180(手动偏航收敛用) ----
+    private var vrMode = 0
+    private var vrEye = 0
+    private var vrCoverageDeg = 360
     private var gyroOn = false
     private var headBaseSet = false
     private var headBaseYaw = 0f
@@ -116,7 +123,7 @@ class VlcPlayerBridge(
             try {
                 textureEntry?.surfaceTexture()?.setDefaultBufferSize(w, h)
             } catch (e: Throwable) {
-                Log.w(TAG, "setDefaultBufferSize: ${e.message}")
+                LogCollector.w(TAG, "setDefaultBufferSize: ${e.message}")
             }
             videoW = w
             videoH = h
@@ -147,7 +154,14 @@ class VlcPlayerBridge(
             }
             MediaPlayer.Event.LengthChanged -> {
                 val len = event.getLengthChanged()
-                emit("onPrepared", mapOf("lengthMs" to len, "is360" to is360))
+                emit(
+                    "onPrepared",
+                    mapOf(
+                        "lengthMs" to len, "is360" to is360,
+                        "vrMode" to vrMode, "vrEye" to vrEye,
+                        "coverage" to vrCoverageDeg,
+                    ),
+                )
             }
             MediaPlayer.Event.Playing -> {
                 if (pendingRate != 1.0f) {
@@ -159,7 +173,10 @@ class VlcPlayerBridge(
             MediaPlayer.Event.Paused -> emit("onPaused", null)
             MediaPlayer.Event.Stopped -> emit("onStopped", null)
             MediaPlayer.Event.EndReached -> emit("onEnded", null)
-            MediaPlayer.Event.EncounteredError -> emit("onError", mapOf("message" to "VLC 播放失败"))
+            MediaPlayer.Event.EncounteredError -> {
+                LogCollector.e(TAG, "MediaPlayer EncounteredError (uri=${try { media?.getUri() } catch (_: Throwable) { "?" }})")
+                emit("onError", mapOf("message" to "VLC 播放失败"))
+            }
             MediaPlayer.Event.Buffering -> emit("onBuffering", mapOf("percent" to event.getBuffering()))
             MediaPlayer.Event.Vout -> emit("onVout", mapOf("count" to event.getVoutCount()))
             MediaPlayer.Event.ESAdded, MediaPlayer.Event.ESDeleted, MediaPlayer.Event.ESSelected ->
@@ -215,7 +232,7 @@ class VlcPlayerBridge(
                     try {
                         player?.addSlave(IMedia.Slave.Type.Subtitle, Uri.parse(path), true)
                     } catch (e: Throwable) {
-                        Log.w(TAG, "addSubtitle: ${e.message}")
+                        LogCollector.w(TAG, "addSubtitle: ${e.message}")
                     }
                 }
                 result.success(null)
@@ -241,12 +258,14 @@ class VlcPlayerBridge(
                 val dyaw = (call.argument<Number>("dyaw") ?: 0).toFloat()
                 val dpitch = (call.argument<Number>("dpitch") ?: 0).toFloat()
                 vpYaw = wrap180(vpYaw + dyaw)
+                clampYawToCoverage()
                 vpPitch = (vpPitch + dpitch).coerceIn(-89f, 89f)
                 applyViewpoint()
                 result.success(mapOf("yaw" to vpYaw, "pitch" to vpPitch, "fov" to vpFov))
             }
             "setFov" -> {
                 vpFov = ((call.argument<Number>("fov") ?: 80).toFloat()).coerceIn(20f, 140f)
+                clampYawToCoverage()
                 applyViewpoint()
                 result.success(mapOf("fov" to vpFov))
             }
@@ -262,6 +281,20 @@ class VlcPlayerBridge(
             "setGyro" -> {
                 setGyro(call.argument<Boolean>("on") ?: false)
                 result.success(null)
+            }
+            "engineInfo" -> worker.execute {
+                val info = try {
+                    VlcCore.get(context) // 确保 native 已加载, 静态方法才可用
+                    mapOf(
+                        "version" to (LibVLC.version() ?: ""),
+                        "changeset" to (LibVLC.changeset() ?: ""),
+                        "compiler" to (LibVLC.compiler() ?: ""),
+                    )
+                } catch (t: Throwable) {
+                    LogCollector.e(TAG, "engineInfo failed", t)
+                    mapOf("error" to "${t.javaClass.simpleName}: ${t.message}")
+                }
+                main.post { result.success(info) }
             }
             "getState" -> {
                 val p = player
@@ -296,9 +329,13 @@ class VlcPlayerBridge(
         }
         val startMs = (call.argument<Number>("startMs") ?: 0).toLong()
         pendingRate = (call.argument<Number>("rate") ?: 1.0).toFloat()
+        vrMode = (call.argument<Number>("vrMode") ?: 0).toInt().coerceIn(0, 7)
+        vrEye = (call.argument<Number>("vrEye") ?: 0).toInt().coerceIn(0, 1)
+        vrCoverageDeg = if (vrMode in 5..7) 180 else 360
         vpYaw = 0f; vpPitch = 0f; vpFov = 80f
         headBaseSet = false; headYaw = 0f; headPitch = 0f
-        is360 = false
+        // 强制沉浸式(2..7)立即生效; auto(0) 等解析元数据; 强制平面(1)恒 false
+        is360 = vrMode >= 2
         videoW = 0; videoH = 0
 
         // 纹理与 vout 附着都在主线程做(上一代的 ANR/黑屏教训)
@@ -327,7 +364,7 @@ class VlcPlayerBridge(
             vout.setVideoSurface(entry.surfaceTexture())
             vout.attachViews(layoutListener)
         } catch (e: Throwable) {
-            Log.e(TAG, "attach surface failed", e)
+            LogCollector.e(TAG, "attach surface failed", e)
         }
         result.success(entry.id())
 
@@ -338,6 +375,10 @@ class VlcPlayerBridge(
                 if (startMs > 0) {
                     m.addOption(":start-time=" + (startMs / 1000.0))
                 }
+                // VR 补丁选项(定制 libvlc 才认识; 官方引擎会静默忽略, 无害)
+                for (opt in vrMediaOptions(vrMode, vrEye)) {
+                    m.addOption(opt)
+                }
                 // 同步解析: 360° 检测需要轨道的 projection 元数据。
                 // 网络源可能耗时数秒, 所以在后台线程做, 失败不阻断播放。
                 try {
@@ -345,7 +386,8 @@ class VlcPlayerBridge(
                     for (i in 0 until m.trackCount) {
                         val t = m.getTrack(i)
                         if (t != null && t.type == IMedia.Track.Type.Video && t is IMedia.VideoTrack) {
-                            if (t.projection != 0) is360 = true
+                            // auto 模式: 元数据说了算; 强制模式: 以强制为准
+                            if (vrMode == 0 && t.projection != 0) is360 = true
                             if (videoW == 0 && t.width > 0) {
                                 videoW = t.width; videoH = t.height
                                 sarNum = if (t.sarNum > 0) t.sarNum else 1
@@ -354,14 +396,14 @@ class VlcPlayerBridge(
                         }
                     }
                 } catch (e: Throwable) {
-                    Log.w(TAG, "media parse: ${e.message}")
+                    LogCollector.w(TAG, "media parse: ${e.message}")
                 }
                 media?.let { old -> try { old.release() } catch (_: Throwable) {} }
                 media = m
                 p.setMedia(m)
                 p.play()
             } catch (e: Throwable) {
-                Log.e(TAG, "open failed", e)
+                LogCollector.e(TAG, "open failed", e)
                 emit("onError", mapOf("message" to "打开失败: ${e.message}"))
             }
         }
@@ -369,13 +411,37 @@ class VlcPlayerBridge(
 
     // -------------------------------------------------------------- internals
 
+    /** vrMode/vrEye → 定制 libvlc 的 media 选项(官方 libvlc 会忽略未知选项)。 */
+    private fun vrMediaOptions(mode: Int, eye: Int): List<String> {
+        val base = when (mode) {
+            1 -> listOf(":vr-projection=2", ":vr-layout=1")
+            2 -> listOf(":vr-projection=1", ":vr-layout=1")
+            3 -> listOf(":vr-projection=1", ":vr-layout=2")
+            4 -> listOf(":vr-projection=1", ":vr-layout=3")
+            5 -> listOf(":vr-projection=1", ":vr-layout=1", ":vr-coverage=180")
+            6 -> listOf(":vr-projection=1", ":vr-layout=2", ":vr-coverage=180")
+            7 -> listOf(":vr-projection=1", ":vr-layout=3", ":vr-coverage=180")
+            else -> emptyList()
+        }
+        // :vr-eye 在任何模式下都下发: 单目/平面源引擎侧自然无效(no-op),
+        // 而 auto 模式下元数据 SBS/TB 源也能切换眼位
+        return if (eye == 1) base + ":vr-eye=1" else base
+    }
+
+    /** 180° 片源: 手动偏航不能转出覆盖范围, 否则看到网格外的黑(与 mpv 时代一致)。 */
+    private fun clampYawToCoverage() {
+        if (vrCoverageDeg >= 360 || !is360) return
+        val limit = ((vrCoverageDeg - vpFov) / 2f).coerceAtLeast(0f)
+        vpYaw = vpYaw.coerceIn(-limit, limit)
+    }
+
     private fun applyViewpoint() {
         val p = player ?: return
         if (!is360) return
         try {
             p.updateViewpoint(vpYaw + headYaw, vpPitch + headPitch, 0f, vpFov, true)
         } catch (e: Throwable) {
-            Log.w(TAG, "updateViewpoint: ${e.message}")
+            LogCollector.w(TAG, "updateViewpoint: ${e.message}")
         }
     }
 
@@ -416,7 +482,7 @@ class VlcPlayerBridge(
                 "curVideo" to p.getVideoTrack(),
             )
         } catch (e: Throwable) {
-            Log.w(TAG, "tracksMap: ${e.message}")
+            LogCollector.w(TAG, "tracksMap: ${e.message}")
             null
         }
     }

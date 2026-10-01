@@ -1,9 +1,13 @@
 import 'dart:async';
 
+import 'package:PiliPlus/models/local_media/vr_format.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
 import 'package:PiliPlus/services/vlc/vlc_library.dart';
 import 'package:PiliPlus/services/vlc/vlc_player.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
+import 'package:PiliPlus/utils/storage.dart';
+import 'package:PiliPlus/utils/storage_key.dart';
+import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:flutter_volume_controller/flutter_volume_controller.dart';
@@ -75,7 +79,24 @@ class _VlcPlayerPageState extends State<VlcPlayerPage> {
   // 360 环视: 双指缩放基准
   double _fovBase = 80;
 
+  // VR 格式(§18): null = 未手动指定, 跟随文件名自动识别/元数据
+  VrFormat? _vrManual;
+  bool _vrRightEye = false;
+
   VlcPlaylistEntry get _entry => widget.playlist[_index];
+
+  /// 当前生效的 VR 格式: 手动指定 > 文件名自动识别(可关) > auto(元数据)
+  VrFormat get _effectiveVr {
+    if (_vrManual case final m?) {
+      return m;
+    }
+    if (Pref.vrAutoDetect) {
+      if (VrFormat.detectFromName(_entry.title) case final d?) {
+        return d;
+      }
+    }
+    return VrFormat.auto;
+  }
 
   @override
   void initState() {
@@ -83,6 +104,7 @@ class _VlcPlayerPageState extends State<VlcPlayerPage> {
     hideSystemBar();
     WakelockPlus.enable();
     _c.onEnded = _onEnded;
+    _c.fetchEngineInfo(); // 探测是否 VR 补丁版引擎(菜单提示用), 不阻塞起播
     _open(Duration(milliseconds: _entry.startMs));
     // 每 5 秒把续播位置写进 libml(与 VLC 同一存储), 进程被杀也不丢
     _positionSaver = Timer.periodic(
@@ -109,7 +131,13 @@ class _VlcPlayerPageState extends State<VlcPlayerPage> {
   }
 
   Future<void> _open(Duration start) async {
-    await _c.open(_entry.uri, start: start, rate: _c.rate.value);
+    await _c.open(
+      _entry.uri,
+      start: start,
+      rate: _c.rate.value,
+      vrFormat: _effectiveVr,
+      vrRightEye: _vrRightEye,
+    );
     VlcLibrary.instance.addHistory(_entry.uri, _entry.title);
     if (mounted) {
       setState(() {});
@@ -151,6 +179,9 @@ class _VlcPlayerPageState extends State<VlcPlayerPage> {
     setState(() {
       _index = index;
       _seekPreview = null;
+      // 换条目: VR 手动覆盖/眼位回到"按新文件名识别"
+      _vrManual = null;
+      _vrRightEye = false;
     });
     _c.position.value = Duration.zero;
     _c.length.value = Duration.zero;
@@ -394,9 +425,10 @@ class _VlcPlayerPageState extends State<VlcPlayerPage> {
             borderRadius: BorderRadius.circular(16),
           ),
           child: Text(
-            '360° 偏航 ${_c.vpYaw.value.toStringAsFixed(0)}°  '
+            '${_hudFormatLabel()}偏航 ${_c.vpYaw.value.toStringAsFixed(0)}°  '
             '俯仰 ${_c.vpPitch.value.toStringAsFixed(0)}°  '
-            '视场 ${_c.vpFov.value.toStringAsFixed(0)}°',
+            '视场 ${_c.vpFov.value.toStringAsFixed(0)}°'
+            '${_c.vrRightEye.value ? '  右眼' : ''}',
             style: const TextStyle(color: Colors.white70, fontSize: 12),
           ),
         ),
@@ -464,6 +496,10 @@ class _VlcPlayerPageState extends State<VlcPlayerPage> {
                   const PopupMenuItem(
                     value: 'rotate',
                     child: Text('旋转屏幕', style: _menuStyle),
+                  ),
+                  const PopupMenuItem(
+                    value: 'vr',
+                    child: Text('VR/全景…', style: _menuStyle),
                   ),
                   if (_c.is360.value) ...[
                     PopupMenuItem(
@@ -600,6 +636,8 @@ class _VlcPlayerPageState extends State<VlcPlayerPage> {
         _cycleScale();
       case 'rotate':
         _rotate();
+      case 'vr':
+        _showVrSheet();
       case 'gyro':
         _c.setGyro(!_c.gyroOn.value);
       case 'recenter':
@@ -627,6 +665,114 @@ class _VlcPlayerPageState extends State<VlcPlayerPage> {
       _landscapeForced
           ? [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]
           : DeviceOrientation.values,
+    );
+  }
+
+  String _hudFormatLabel() {
+    final f = _c.vrFormat.value;
+    if (f != VrFormat.auto) {
+      return '${f.label}  ';
+    }
+    return _c.is360.value ? '360°(元数据)  ' : '';
+  }
+
+  /// 应用新的 VR 格式/眼位: 以当前进度原位重开(media 选项只在装载时生效)
+  Future<void> _applyVr({VrFormat? format, bool? rightEye}) async {
+    final pos = _c.position.value;
+    setState(() {
+      if (format != null) {
+        _vrManual = format;
+      }
+      if (rightEye != null) {
+        _vrRightEye = rightEye;
+      }
+    });
+    await _open(
+      pos > Duration.zero ? pos : Duration(milliseconds: _entry.startMs),
+    );
+  }
+
+  Future<void> _showVrSheet() async {
+    await _c.fetchEngineInfo();
+    if (!mounted) {
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      builder: (sheetContext) => Obx(
+        () {
+          final cur = _effectiveVr;
+          final patched = _c.enginePatched.value ?? true;
+          return ListView(
+            shrinkWrap: true,
+            children: [
+              const _SheetTitle('VR/全景格式'),
+              for (final f in VrFormat.values)
+                ListTile(
+                  dense: true,
+                  title: Text(f.label),
+                  subtitle: f == VrFormat.auto
+                      ? const Text('按片源元数据自动进入环视(官方行为)')
+                      : null,
+                  trailing: _check(f == cur, sheetContext),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    _applyVr(format: f);
+                  },
+                ),
+              if (!patched)
+                const ListTile(
+                  dense: true,
+                  leading: Icon(Icons.info_outline, size: 18),
+                  title: Text(
+                    '当前为官方 libvlc 引擎(未含 VR 补丁): 强制格式不生效, 仅"自动"可用',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ),
+              const _SheetTitle('眼位(左右/上下格式生效)'),
+              ListTile(
+                dense: true,
+                title: Text(_vrRightEye ? '右眼' : '左眼'),
+                trailing: Switch(
+                  value: _vrRightEye,
+                  onChanged: (v) {
+                    Navigator.of(sheetContext).pop();
+                    _applyVr(rightEye: v);
+                  },
+                ),
+              ),
+              const _SheetTitle('自动识别'),
+              ListTile(
+                dense: true,
+                title: const Text('按文件名识别 VR 格式'),
+                subtitle: const Text('360/180/SBS/TB/VR/全景 等关键词; 识别不到时始终跟随元数据'),
+                trailing: Switch(
+                  value: Pref.vrAutoDetect,
+                  onChanged: (v) {
+                    GStorage.setting.put(SettingBoxKey.vrAutoDetect, v);
+                    Navigator.of(sheetContext).pop();
+                    if (_vrManual == null) {
+                      _applyVr(); // 识别结果可能变化, 原位重开
+                    }
+                  },
+                ),
+              ),
+              if (_c.engineVersion.value case final v?)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                  child: Text(
+                    '引擎: libvlc $v',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Theme.of(sheetContext).colorScheme.outline,
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
     );
   }
 

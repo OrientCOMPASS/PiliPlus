@@ -1133,4 +1133,10 @@ abstract final class Pref {
   /// 是否显示隐藏文件(以 . 开头)
   static bool get localMediaShowHidden =>
       _setting.get(SettingBoxKey.localMediaShowHidden, defaultValue: false);
+
+  /// VR/全景文件名自动识别(默认开): 播放页打开本地视频时按文件名猜
+  /// 180/360 与 SBS/TB 布局并强制生效; 关闭后一律跟随片源元数据。
+  /// 识别不到关键词时不受本开关影响(始终 auto)。见 docs §18。
+  static bool get vrAutoDetect =>
+      _setting.get(SettingBoxKey.vrAutoDetect, defaultValue: true);
 }

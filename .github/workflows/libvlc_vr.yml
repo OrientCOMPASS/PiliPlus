@@ -1,0 +1,212 @@
+name: libvlc VR (arm64)
+
+# Builds the VR-patched libvlc for arm64-v8a and publishes the libvlc-all AAR
+# (official 3.7.6 AAR with only jni/arm64-v8a/{libvlc,libvlcjni,libc++_shared}.so
+# replaced) to the rolling release tag `libvlc-vr` of THIS repository.
+#
+# android/app/build.gradle.kts downloads that asset (sha256-pinned), so after
+# this workflow succeeds the app CI picks up the VR engine automatically.
+#
+# Sources are fetched on demand (nothing vendored except libvlcjni, see
+# tool/libvlc-vr/README.md): vlc core @ pinned hash from the GitHub mirror,
+# prebuilt contribs from artifacts.videolan.org, official base AAR from
+# Maven Central. The build runs inside VideoLAN's own Android CI image.
+
+on:
+    workflow_dispatch:
+        inputs:
+            publish:
+                description: "Publish AAR to the rolling libvlc-vr release"
+                type: boolean
+                default: true
+    push:
+        branches:
+            - piliplayer
+        paths:
+            - "tool/libvlc-vr/**"
+            - ".github/workflows/libvlc_vr.yml"
+
+permissions:
+    contents: read
+
+concurrency:
+    group: libvlc-vr
+    cancel-in-progress: true
+
+env:
+    VLC_REPO: https://github.com/videolan/vlc.git
+    VLC_BRANCH: 3.0.x
+    VLC_HASH: 66455a98c8c515796b4a192acaa125c5d68c76c8
+    CONTRIB_URL: >-
+        https://artifacts.videolan.org/vlc-3.0/android-arm64/vlc-contrib-aarch64-linux-android-4d08fe2a37bfba5ea223758ecd033b15ca53400d.tar.zst
+    OFFICIAL_AAR_URL: >-
+        https://repo1.maven.org/maven2/org/videolan/android/libvlc-all/3.7.6/libvlc-all-3.7.6.aar
+    OFFICIAL_AAR_SHA256: 6b438ab75eb3b307d9699f4594c043f46b0a9a697521bd03729c02c0a400eb8a
+    ASSET_NAME: libvlc-all-3.7.6-pvr1-arm64-v8a.aar
+
+jobs:
+    build:
+        name: Build VR libvlc + AAR
+        runs-on: ubuntu-latest
+        timeout-minutes: 240
+        container:
+            # VideoLAN 官方 CI 构建 arm64 libvlc 用的同一镜像(含 NDK 与全部依赖)
+            image: registry.videolan.org/vlc-debian-android:20260610055743
+        steps:
+            - name: 代码迁出
+              uses: actions/checkout@v7
+
+            - name: 检查/补齐工具
+              shell: bash
+              run: |
+                  set -uo pipefail
+                  export DEBIAN_FRONTEND=noninteractive
+                  for t in git curl unzip zip sha256sum strings python3; do
+                    command -v "$t" >/dev/null || MISSING="$MISSING $t"
+                  done
+                  if [ -n "${MISSING:-}" ]; then
+                    echo "installing:$MISSING"
+                    apt-get update -qq && apt-get install -y -qq --no-install-recommends $MISSING
+                  fi
+                  echo "--- toolchain env ---"
+                  echo "ANDROID_NDK=${ANDROID_NDK:-unset} ANDROID_SDK=${ANDROID_SDK:-unset} ANDROID_HOME=${ANDROID_HOME:-unset}"
+                  if [ -z "${ANDROID_NDK:-}" ]; then
+                    for c in /opt/android-ndk* /opt/android-sdk/ndk/* "${ANDROID_HOME:-/nonexistent}"/ndk/* /usr/local/android-ndk*; do
+                      [ -f "$c/source.properties" ] && ANDROID_NDK="$c" && break
+                    done
+                    echo "detected ANDROID_NDK=$ANDROID_NDK"
+                  fi
+                  if [ -z "${ANDROID_SDK:-}" ] && [ -n "${ANDROID_HOME:-}" ]; then
+                    ANDROID_SDK="$ANDROID_HOME"; echo "detected ANDROID_SDK=$ANDROID_SDK"
+                  fi
+                  {
+                    echo "ANDROID_NDK=$ANDROID_NDK"
+                    echo "ANDROID_SDK=${ANDROID_SDK:-}"
+                  } >> "$GITHUB_ENV"
+                  grep Pkg.Revision "$ANDROID_NDK/source.properties"
+
+            # contribs 预编译包(126MB)按内容寻址缓存: URL 里带着 sha, 命中即免下载
+            - name: 缓存 contribs 包
+              uses: actions/cache@v4
+              with:
+                  path: tool/libvlc-vr/.cache
+                  key: vlc-contrib-aarch64-4d08fe2a37bfba5ea223758ecd033b15ca53400d
+
+            - name: 下载 contribs 包
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  f=tool/libvlc-vr/.cache/vlc-contrib.tar.zst
+                  mkdir -p tool/libvlc-vr/.cache
+                  if [ ! -s "$f" ]; then
+                    curl -fL --retry 3 --retry-delay 5 -o "$f" "$CONTRIB_URL"
+                  fi
+                  ls -la "$f"
+
+            - name: 准备 vlc 源码并打补丁
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  git config --global --add safe.directory '*'
+                  cd tool/libvlc-vr/libvlcjni
+                  rm -rf vlc
+                  git clone --filter=blob:none --single-branch --branch "$VLC_BRANCH" "$VLC_REPO" vlc
+                  cd vlc
+                  git reset --hard "$VLC_HASH"
+                  git config user.name "OrientCOMPASS"
+                  git config user.email "316423573+OrientCOMPASS@users.noreply.github.com"
+                  echo "--- libvlcjni 官方补丁(20 个) ---"
+                  git am --message-id ../libvlc/patches/*.patch
+                  echo "--- PiliPlus VR 补丁 ---"
+                  git am --message-id ../../patches/vlc/*.patch
+                  git log --oneline -4
+
+            - name: 构建 libvlc (arm64-v8a, release, 预编译 contribs)
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  cd tool/libvlc-vr/libvlcjni
+                  export ANDROID_NDK ANDROID_SDK
+                  export VLC_PREBUILT_CONTRIBS_URL="$CONTRIB_URL"
+                  ./buildsystem/compile-libvlc.sh -a arm64-v8a --release --with-prebuilt-contribs
+
+            - name: 组装 VR AAR(官方底包换心)
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  cd tool/libvlc-vr
+                  mkdir -p output
+                  SO_DIR="$(dirname "$(find libvlcjni -path '*libs/arm64-v8a/libvlc.so' | head -1)")"
+                  echo "SO_DIR=$SO_DIR"; ls -la "$SO_DIR"
+                  for so in libvlc.so libvlcjni.so libc++_shared.so; do
+                    [ -f "$SO_DIR/$so" ] || { echo "missing $so"; exit 1; }
+                  done
+
+                  curl -fL --retry 3 -o output/official.aar "$OFFICIAL_AAR_URL"
+                  echo "$OFFICIAL_AAR_SHA256  output/official.aar" | sha256sum -c
+
+                  # 自检: VR 选项与 changeset 标记必须编进 libvlc.so
+                  strings "$SO_DIR/libvlc.so" | grep -q "vr-coverage"   || { echo "FAIL: vr-coverage not in libvlc.so"; exit 1; }
+                  strings "$SO_DIR/libvlc.so" | grep -q "vr-projection" || { echo "FAIL: vr-projection not in libvlc.so"; exit 1; }
+                  strings "$SO_DIR/libvlc.so" | grep -q "vr-layout"     || { echo "FAIL: vr-layout not in libvlc.so"; exit 1; }
+                  strings "$SO_DIR/libvlc.so" | grep -q "vr-eye"        || { echo "FAIL: vr-eye not in libvlc.so"; exit 1; }
+                  strings "$SO_DIR/libvlc.so" | grep -q "piliplus-vr1"  || { echo "FAIL: changeset marker not in libvlc.so"; exit 1; }
+                  echo "::notice::strings 自检通过(vr-* 选项与 piliplus-vr1 标记均已编入)"
+
+                  cp output/official.aar "output/$ASSET_NAME"
+                  mkdir -p swap/jni/arm64-v8a
+                  cp "$SO_DIR"/libvlc.so "$SO_DIR"/libvlcjni.so "$SO_DIR"/libc++_shared.so swap/jni/arm64-v8a/
+                  (cd swap && zip -q "../output/$ASSET_NAME" jni/arm64-v8a/libvlc.so jni/arm64-v8a/libvlcjni.so jni/arm64-v8a/libc++_shared.so)
+                  rm -rf swap output/official.aar
+
+                  (cd output && sha256sum "$ASSET_NAME" > "$ASSET_NAME.sha256")
+                  cat output/"$ASSET_NAME".sha256
+                  unzip -l "output/$ASSET_NAME" | grep "jni/arm64-v8a"
+
+            - name: 上传产物
+              uses: actions/upload-artifact@v7
+              with:
+                  name: libvlc-vr-arm64-${{ github.sha }}
+                  path: |
+                      tool/libvlc-vr/output/*
+                  if-no-files-found: error
+                  retention-days: 30
+
+    publish:
+        name: Publish to rolling release
+        needs: build
+        runs-on: ubuntu-latest
+        if: ${{ github.event_name == 'push' || inputs.publish }}
+        permissions:
+            contents: write
+        steps:
+            - name: 下载产物
+              uses: actions/download-artifact@v6
+              with:
+                  name: libvlc-vr-arm64-${{ github.sha }}
+                  path: out
+
+            - name: 发布到滚动 Release (libvlc-vr)
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  cd out
+                  sha="$(cut -d' ' -f1 "$ASSET_NAME.sha256")"
+                  notes="VR 版 libvlc-all (arm64-v8a) — 由 PiliPlus 提交 ${GITHUB_SHA} 构建。
+
+                  - 基线: 官方 libvlc-all 3.7.6(vlc-android tag libvlc-3.7.6 = libvlcjni c0cc8ce + vlc 3.0.x @ ${VLC_HASH})
+                  - 补丁: tool/libvlc-vr/patches/vlc/0001(vr-projection / vr-layout / vr-coverage / vr-eye + changeset 标记 piliplus-vr1)
+                  - 换心: 仅替换 jni/arm64-v8a/{libvlc,libvlcjni,libc++_shared}.so, AAR 其余内容与官方逐字节一致
+                  - sha256: ${sha}"
+                  if ! gh release view libvlc-vr >/dev/null 2>&1; then
+                    gh release create libvlc-vr --prerelease \
+                      --title "libvlc VR (arm64-v8a) 滚动构建" --notes "$notes"
+                  else
+                    gh release edit libvlc-vr --notes "$notes"
+                  fi
+                  gh release upload libvlc-vr --clobber "$ASSET_NAME" "$ASSET_NAME.sha256"
+                  echo "::notice::已发布 ${ASSET_NAME} (sha256 ${sha}) 到 release libvlc-vr"
+                  echo "### libvlc-vr 已发布" >> "$GITHUB_STEP_SUMMARY"
+                  echo "- 资产: \`${ASSET_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
+                  echo "- sha256: \`${sha}\`(把它填进 android/app/build.gradle.kts 的 LIBVLC_VR_SHA256)" >> "$GITHUB_STEP_SUMMARY"

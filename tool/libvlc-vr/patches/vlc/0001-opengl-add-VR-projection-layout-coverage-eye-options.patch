@@ -1,0 +1,307 @@
+From 9cf8766057fe1507a94954287e80090c575edf0e Mon Sep 17 00:00:00 2001
+Message-Id: <9cf8766057fe1507a94954287e80090c575edf0e.1790858272.git.316423573+OrientCOMPASS@users.noreply.github.com>
+From: OrientCOMPASS <316423573+OrientCOMPASS@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 12:37:52 +0000
+Subject: [PATCH] opengl: add VR projection/layout/coverage/eye options
+
+Add four per-media options to the OpenGL/GLES2 vout display module so that
+immersive sources without proper metadata can still be rendered correctly,
+and so that stereo (SBS/TB) and half-dome (180 degrees) equirectangular
+sources become usable:
+
+ - vr-projection: 0 auto (metadata), 1 force equirectangular, 2 force flat
+ - vr-layout: 0 auto (metadata), 1 mono, 2 side-by-side, 3 top-bottom
+ - vr-coverage: horizontal coverage of equirect sources, 360 or 180
+ - vr-eye: which eye of SBS/TB sources to display, 0 left (default) / 1 right
+
+Implementation notes:
+ - The projection/multiview overrides are applied to vd->fmt in Open()
+   before vout_display_opengl_New() consumes it, so the tex converter
+   program, viewpoint init and mesh selection all see the override.
+ - BuildSphere() gains a coverage parameter: the mesh longitude window is
+   centered on phi=PI (where u=0.5 maps, i.e. the initial view direction),
+   degenerating to the exact upstream geometry for 360.
+ - BuildSphere() texture coordinates now honor the left/top window offsets
+   (previously only width/height were applied). Without this, showing the
+   right eye of an SBS/TB source sampled the LEFT eye pixels stretched over
+   the window. Uncropped sources (left=top=0) are unaffected.
+ - TextureCropForStereo() picks the eye from vr_right_eye instead of
+   hardcoding the left one.
+ - libvlc_get_changeset() returns a 'piliplus-vr1' marker so embedding apps
+   can feature-detect the patch at runtime; the real revision is still
+   logged at startup by src/misc/messages.c.
+
+Options are inherited through the standard VLC config chain, therefore they
+work both as LibVLC arguments and as per-media options
+(libvlc_media_add_option(":vr-layout=2") etc.).
+---
+ lib/core.c                                |  8 ++-
+ modules/video_output/opengl/display.c     | 62 +++++++++++++++++++++++
+ modules/video_output/opengl/vout_helper.c | 57 +++++++++++++++++----
+ modules/video_output/opengl/vout_helper.h | 11 ++++
+ 4 files changed, 127 insertions(+), 11 deletions(-)
+
+diff --git a/lib/core.c b/lib/core.c
+index 5e8c614c83..60ba477293 100644
+--- a/lib/core.c
++++ b/lib/core.c
+@@ -168,8 +168,12 @@ const char * libvlc_get_compiler(void)
+ 
+ const char * libvlc_get_changeset(void)
+ {
+-    extern const char psz_vlc_changeset[];
+-    return psz_vlc_changeset;
++    /* [PiliPlus VR] Runtime feature-detection marker: apps check that the
++     * changeset starts with "piliplus-vr" to know that the VR options
++     * (vr-projection / vr-layout / vr-coverage / vr-eye) are supported.
++     * The real upstream revision is still logged at startup by
++     * src/misc/messages.c via psz_vlc_changeset. */
++    return "piliplus-vr1";
+ }
+ 
+ void libvlc_free( void *ptr )
+diff --git a/modules/video_output/opengl/display.c b/modules/video_output/opengl/display.c
+index ec671109bc..adc7aa9427 100644
+--- a/modules/video_output/opengl/display.c
++++ b/modules/video_output/opengl/display.c
+@@ -42,6 +42,31 @@ static void Close (vlc_object_t *);
+ #define PROVIDER_LONGTEXT N_( \
+     "Extension through which to use the Open Graphics Library (OpenGL).")
+ 
++/* [PiliPlus VR] Manual overrides for immersive video. Many VR files carry no
++ * projection/multiview metadata, and libvlc 3.x has no way to select the eye
++ * of a stereo (SBS/TB) source nor to render 180° (half-dome) equirectangular
++ * content. These options are settable per media (":vr-projection=1" etc. via
++ * libvlc_media_add_option) and are inherited down to this display module. */
++#define VR_PROJECTION_TEXT N_("VR projection override")
++#define VR_PROJECTION_LONGTEXT N_( \
++    "0: use projection metadata (default). " \
++    "1: force equirectangular (360/180 immersive). " \
++    "2: force rectangular (flat, disables immersive rendering).")
++#define VR_LAYOUT_TEXT N_("VR stereo layout override")
++#define VR_LAYOUT_LONGTEXT N_( \
++    "0: use multiview metadata (default). " \
++    "1: mono (no eye cropping). " \
++    "2: side by side (show one eye). " \
++    "3: top bottom (show one eye).")
++#define VR_COVERAGE_TEXT N_("VR horizontal coverage")
++#define VR_COVERAGE_LONGTEXT N_( \
++    "Horizontal coverage of equirectangular sources, in degrees: " \
++    "360 (full sphere, default) or 180 (half dome).")
++#define VR_EYE_TEXT N_("VR eye selection")
++#define VR_EYE_LONGTEXT N_( \
++    "Which eye to display for side by side / top bottom sources: " \
++    "0 = left (default), 1 = right.")
++
+ vlc_module_begin ()
+ #if defined (USE_OPENGL_ES2)
+ # define API VLC_OPENGL_ES2
+@@ -68,6 +93,14 @@ vlc_module_begin ()
+     add_module ("gl", "opengl", NULL,
+                 GL_TEXT, PROVIDER_LONGTEXT, true)
+ #endif
++    add_integer_with_range ("vr-projection", 0, 0, 2,
++                            VR_PROJECTION_TEXT, VR_PROJECTION_LONGTEXT, true)
++    add_integer_with_range ("vr-layout", 0, 0, 3,
++                            VR_LAYOUT_TEXT, VR_LAYOUT_LONGTEXT, true)
++    add_integer_with_range ("vr-coverage", 360, 180, 360,
++                            VR_COVERAGE_TEXT, VR_COVERAGE_LONGTEXT, true)
++    add_integer_with_range ("vr-eye", 0, 0, 1,
++                            VR_EYE_TEXT, VR_EYE_LONGTEXT, true)
+     add_glopts ()
+ vlc_module_end ()
+ 
+@@ -142,8 +175,37 @@ static int Open (vlc_object_t *obj)
+     if (vlc_gl_MakeCurrent (sys->gl))
+         goto error;
+ 
++    /* [PiliPlus VR] Apply per-media overrides BEFORE the format is consumed by
++     * vout_display_opengl_New(): the tex converter program, the viewpoint
++     * initialization and the mesh selection all derive from vd->fmt. Media
++     * options set via libvlc_media_add_option() are stored as variables on the
++     * input object; var_Inherit* walks up display -> vout -> input and falls
++     * back to the module config defaults declared above. */
++    {
++        const int vr_projection = var_InheritInteger (vd, "vr-projection");
++        const int vr_layout = var_InheritInteger (vd, "vr-layout");
++        if (vr_projection == 1)
++            vd->fmt.projection_mode = PROJECTION_MODE_EQUIRECTANGULAR;
++        else if (vr_projection == 2)
++            vd->fmt.projection_mode = PROJECTION_MODE_RECTANGULAR;
++        if (vr_layout == 1)
++            vd->fmt.multiview_mode = MULTIVIEW_2D;
++        else if (vr_layout == 2)
++            vd->fmt.multiview_mode = MULTIVIEW_STEREO_SBS;
++        else if (vr_layout == 3)
++            vd->fmt.multiview_mode = MULTIVIEW_STEREO_TB;
++    }
++
+     sys->vgl = vout_display_opengl_New (&vd->fmt, &spu_chromas, sys->gl,
+                                         &vd->cfg->viewpoint);
++    if (sys->vgl != NULL)
++    {
++        /* [PiliPlus VR] coverage (180/360) and eye selection are consumed at
++         * mesh build / texture crop time, i.e. strictly after New(). */
++        vout_display_opengl_SetVrParams (sys->vgl,
++                                         var_InheritInteger (vd, "vr-coverage"),
++                                         var_InheritInteger (vd, "vr-eye"));
++    }
+     vlc_gl_ReleaseCurrent (sys->gl);
+ 
+     if (sys->vgl == NULL)
+diff --git a/modules/video_output/opengl/vout_helper.c b/modules/video_output/opengl/vout_helper.c
+index 13d65e04c8..a3a041c66a 100644
+--- a/modules/video_output/opengl/vout_helper.c
++++ b/modules/video_output/opengl/vout_helper.c
+@@ -171,6 +171,11 @@ struct vout_display_opengl_t {
+     float f_z;    /* Position of the camera on the shpere radius vector */
+     float f_z_min;
+     float f_sar;
++
++    /* [PiliPlus VR] immersive rendering parameters, see
++     * vout_display_opengl_SetVrParams() */
++    unsigned vr_coverage_deg; /* horizontal coverage of equirect: 360 or 180 */
++    int vr_right_eye;         /* SBS/TB sources: 1 = display the right eye */
+ };
+ 
+ static const GLfloat identity[] = {
+@@ -751,6 +756,9 @@ vout_display_opengl_t *vout_display_opengl_New(video_format_t *fmt,
+         return NULL;
+ 
+     vgl->gl = gl;
++    /* [PiliPlus VR] defaults: full sphere, left eye (upstream behavior) */
++    vgl->vr_coverage_deg = 360;
++    vgl->vr_right_eye = 0;
+ 
+ #if defined(USE_OPENGL_ES2) || defined(HAVE_GL_CORE_SYMBOLS)
+ #define GET_PROC_ADDR_CORE(name) vgl->vt.name = gl##name
+@@ -1107,6 +1115,17 @@ void vout_display_opengl_SetWindowAspectRatio(vout_display_opengl_t *vgl,
+     getViewpointMatrixes(vgl, vgl->fmt.projection_mode, vgl->prgm);
+ }
+ 
++/* [PiliPlus VR] See vout_helper.h. Plain field writes: the values are read
++ * back when the mesh is (re)built (BuildSphere via SetupCoords) and when the
++ * stereo texture window is computed (TextureCropForStereo), both of which
++ * happen at display time, i.e. after this call. */
++void vout_display_opengl_SetVrParams(vout_display_opengl_t *vgl,
++                                     unsigned coverage_deg, int right_eye)
++{
++    vgl->vr_coverage_deg = (coverage_deg == 180) ? 180 : 360;
++    vgl->vr_right_eye = right_eye ? 1 : 0;
++}
++
+ void vout_display_opengl_Viewport(vout_display_opengl_t *vgl, int x, int y,
+                                   unsigned width, unsigned height)
+ {
+@@ -1257,11 +1276,21 @@ static int BuildSphere(unsigned nbPlanes,
+                         GLfloat **vertexCoord, GLfloat **textureCoord, unsigned *nbVertices,
+                         GLushort **indices, unsigned *nbIndices,
+                         const float *left, const float *top,
+-                        const float *right, const float *bottom)
++                        const float *right, const float *bottom,
++                        unsigned coverage_deg)
+ {
+     unsigned nbLatBands = 128;
+     unsigned nbLonBands = 128;
+ 
++    /* [PiliPlus VR] horizontal coverage of the mesh: 2*PI for full 360°
++     * sources (identical to upstream), PI for 180° (half dome) sources.
++     * The window is centered on phi = PI so that texture coordinate u = 0.5
++     * keeps facing the initial viewpoint (yaw = 0 looks towards -X in this
++     * parameterization, see vout_display_opengl_SetViewpoint()). */
++    const float coverage = (coverage_deg == 180) ? (float) M_PI
++                                                 : 2.f * (float) M_PI;
++    const float phi0 = (float) M_PI - coverage / 2.f;
++
+     *nbVertices = (nbLatBands + 1) * (nbLonBands + 1);
+     *nbIndices = nbLatBands * nbLonBands * 3 * 2;
+ 
+@@ -1289,7 +1318,7 @@ static int BuildSphere(unsigned nbPlanes,
+         sincosf(theta, &sinTheta, &cosTheta);
+ 
+         for (unsigned lon = 0; lon <= nbLonBands; lon++) {
+-            float phi = lon * 2 * (float) M_PI / nbLonBands;
++            float phi = phi0 + lon * coverage / nbLonBands;
+             float sinPhi, cosPhi;
+ 
+             sincosf(phi, &sinPhi, &cosPhi);
+@@ -1309,8 +1338,13 @@ static int BuildSphere(unsigned nbPlanes,
+                                 + lat * (nbLonBands + 1) + lon) * 2;
+                 float width = right[p] - left[p];
+                 float height = bottom[p] - top[p];
+-                float u = (float)lon / nbLonBands * width;
+-                float v = (float)lat / nbLatBands * height;
++                /* [PiliPlus VR] add the left/top window offsets: without them
++                 * the texture window origin was ignored, which broke any
++                 * crop that does not start at (0,0) - most notably showing
++                 * the RIGHT eye of SBS/TB stereo sources. For uncropped
++                 * sources (left = top = 0) this is a no-op. */
++                float u = left[p] + (float)lon / nbLonBands * width;
++                float v = top[p] + (float)lat / nbLatBands * height;
+                 (*textureCoord)[off2] = u;
+                 (*textureCoord)[off2 + 1] = v;
+             }
+@@ -1542,7 +1576,8 @@ static int SetupCoords(vout_display_opengl_t *vgl,
+         i_ret = BuildSphere(vgl->prgm->tc->tex_count,
+                             &vertexCoord, &textureCoord, &nbVertices,
+                             &indices, &nbIndices,
+-                            left, top, right, bottom);
++                            left, top, right, bottom,
++                            vgl->vr_coverage_deg);
+         break;
+     case PROJECTION_MODE_CUBEMAP_LAYOUT_STANDARD:
+         i_ret = BuildCube(vgl->prgm->tc->tex_count,
+@@ -1649,20 +1684,24 @@ static void TextureCropForStereo(vout_display_opengl_t *vgl,
+     float stereoCoefs[2];
+     float stereoOffsets[2];
+ 
++    /* [PiliPlus VR] eye selection: upstream hardcoded the left eye, there is
++     * now an option to display the right one instead. */
++    const float eyeOffset = vgl->vr_right_eye ? 0.5f : 0.f;
++
+     switch (vgl->fmt.multiview_mode)
+     {
+     case MULTIVIEW_STEREO_TB:
+-        // Display only the left eye.
++        // Display only the selected eye.
+         stereoCoefs[0] = 1; stereoCoefs[1] = 0.5;
+-        stereoOffsets[0] = 0; stereoOffsets[1] = 0;
++        stereoOffsets[0] = 0; stereoOffsets[1] = eyeOffset;
+         GetTextureCropParamsForStereo(vgl->prgm->tc->tex_count,
+                                       stereoCoefs, stereoOffsets,
+                                       left, top, right, bottom);
+         break;
+     case MULTIVIEW_STEREO_SBS:
+-        // Display only the left eye.
++        // Display only the selected eye.
+         stereoCoefs[0] = 0.5; stereoCoefs[1] = 1;
+-        stereoOffsets[0] = 0; stereoOffsets[1] = 0;
++        stereoOffsets[0] = eyeOffset; stereoOffsets[1] = 0;
+         GetTextureCropParamsForStereo(vgl->prgm->tc->tex_count,
+                                       stereoCoefs, stereoOffsets,
+                                       left, top, right, bottom);
+diff --git a/modules/video_output/opengl/vout_helper.h b/modules/video_output/opengl/vout_helper.h
+index 48014b454c..bc49086266 100644
+--- a/modules/video_output/opengl/vout_helper.h
++++ b/modules/video_output/opengl/vout_helper.h
+@@ -254,6 +254,17 @@ picture_pool_t *vout_display_opengl_GetPool(vout_display_opengl_t *vgl, unsigned
+ 
+ int vout_display_opengl_SetViewpoint(vout_display_opengl_t *vgl, const vlc_viewpoint_t*);
+ 
++/* [PiliPlus VR] Set immersive rendering parameters that are consumed at mesh
++ * build / texture crop time:
++ *  - coverage_deg: horizontal coverage of equirectangular sources (360 or
++ *    180; any other value is clamped to 360),
++ *  - right_eye: for SBS/TB multiview sources, display the right eye (1)
++ *    instead of the default left eye (0).
++ * Must be called after vout_display_opengl_New() and before the first
++ * vout_display_opengl_Display(). */
++void vout_display_opengl_SetVrParams(vout_display_opengl_t *vgl,
++                                     unsigned coverage_deg, int right_eye);
++
+ void vout_display_opengl_SetWindowAspectRatio(vout_display_opengl_t *vgl,
+                                               float f_sar);
+ 
+-- 
+2.39.5
+

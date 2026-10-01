@@ -244,6 +244,7 @@ abstract final class SettingBoxKey {
       vlcSavedShares = 'vlcSavedShares',
       vlcMediaSort = 'vlcMediaSort',
       localMediaShowHidden = 'localMediaShowHidden',
+      vrAutoDetect = 'vrAutoDetect',
       localMediaLibrary = 'localMediaLibrary',
       localMediaScanTime = 'localMediaScanTime',
       navBarSortMigratedLocal = 'navBarSortMigratedLocal';

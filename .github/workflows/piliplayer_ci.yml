@@ -53,8 +53,10 @@ env:
         lib/pages/local_media
         lib/models/local_media
         lib/services/vlc
+        lib/services/log_collector.dart
         lib/pages/video/vlc
         test/models/vlc_media_test.dart
+        test/models/vr_format_test.dart
 
 jobs:
     check:

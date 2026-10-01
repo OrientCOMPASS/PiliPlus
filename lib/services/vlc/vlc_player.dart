@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:PiliPlus/models/local_media/vr_format.dart';
+import 'package:PiliPlus/services/log_collector.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 
@@ -57,8 +59,19 @@ class VlcPlayerController extends GetxController {
   final Rx<Duration> length = Duration.zero.obs;
   final RxnString error = RxnString();
 
-  /// 是否 360°/全景片源(libvlc 解析轨道 projection 元数据得出)
+  /// 是否处于沉浸式环视(auto 时由 libvlc 解析轨道 projection 元数据得出;
+  /// 强制格式时按所选格式)
   final RxBool is360 = false.obs;
+
+  /// VR 状态(docs §18): 当前生效格式/眼位/覆盖角, onPrepared 事件回写
+  final Rx<VrFormat> vrFormat = VrFormat.auto.obs;
+  final RxBool vrRightEye = false.obs;
+  final RxInt coverageDeg = 360.obs;
+
+  /// 引擎是否为 VR 补丁版(LibVLC.changeset() 含 `piliplus-vr` 标记)。
+  /// null = 尚未探测。官方引擎下强制格式会被静默忽略, UI 据此提示。
+  final RxnBool enginePatched = RxnBool();
+  final RxnString engineVersion = RxnString();
   final RxBool gyroOn = false.obs;
   final RxBool gyroUnavailable = false.obs;
   final Rx<VlcVideoSize> videoSize = VlcVideoSize.none.obs;
@@ -96,6 +109,12 @@ class VlcPlayerController extends GetxController {
               length.value = Duration(milliseconds: len);
             }
             is360.value = args['is360'] as bool? ?? false;
+            final cov = (args['coverage'] as num?)?.toInt() ?? 360;
+            coverageDeg.value = cov;
+            final mode = (args['vrMode'] as num?)?.toInt() ?? 0;
+            vrFormat.value = VrFormat.values.elementAtOrNull(mode) ??
+                VrFormat.auto;
+            vrRightEye.value = ((args['vrEye'] as num?)?.toInt() ?? 0) == 1;
           }
           ready.value = true;
         case 'onPosition':
@@ -121,6 +140,7 @@ class VlcPlayerController extends GetxController {
         case 'onError':
           error.value = (args is Map ? args['message'] as String? : null) ??
               'VLC 播放失败';
+          NativeLogCollector.push('VlcPlayer', error.value!);
           playing.value = false;
           buffering.value = false;
         case 'onBuffering':
@@ -170,16 +190,23 @@ class VlcPlayerController extends GetxController {
   void Function()? onEnded;
 
   /// 打开媒体并起播。[uri] 为 libvlc 可识别的地址(file:///…、smb://…、http://…)。
+  /// [vrFormat]/[vrRightEye] 下发 VR 补丁选项(官方引擎忽略, 无害)。
   /// 返回 Flutter Texture id; 失败返回 null(错误经 [error] 暴露)。
   Future<int?> open(
     String uri, {
     Duration start = Duration.zero,
     double rate = 1.0,
+    VrFormat vrFormat = VrFormat.auto,
+    bool vrRightEye = false,
   }) async {
     _bindHandler();
     ready.value = false;
     error.value = null;
-    is360.value = false;
+    // 乐观写回(强制格式立即反映到 UI; auto 等 onPrepared 按元数据校正)
+    this.vrFormat.value = vrFormat;
+    this.vrRightEye.value = vrRightEye;
+    is360.value = vrFormat.forcesImmersive;
+    coverageDeg.value = vrFormat.coverageH.round();
     buffering.value = true;
     bufferingPercent.value = 0;
     try {
@@ -187,13 +214,34 @@ class VlcPlayerController extends GetxController {
         'uri': uri,
         'startMs': start.inMilliseconds,
         'rate': rate,
+        'vrMode': vrFormat.bridgeMode,
+        'vrEye': vrRightEye ? 1 : 0,
       });
       textureId = id;
       this.rate.value = rate;
       return id;
     } catch (e) {
       error.value = 'VLC 打开失败: $e';
+      NativeLogCollector.push('VlcPlayer', 'open 失败: $e');
       return null;
+    }
+  }
+
+  /// 探测引擎信息(版本/changeset), 结果缓存。changeset 以 `piliplus-vr`
+  /// 开头 = VR 补丁版(支持强制 180/360、SBS/TB、眼位切换)。
+  Future<void> fetchEngineInfo() async {
+    if (enginePatched.value != null) {
+      return;
+    }
+    try {
+      final res = await _ch.invokeMethod<Map<dynamic, dynamic>>('engineInfo');
+      final changeset = res?['changeset'] as String? ?? '';
+      final version = res?['version'] as String? ?? '';
+      engineVersion.value = version.isEmpty ? changeset : '$version ($changeset)';
+      enginePatched.value = changeset.startsWith('piliplus-vr');
+    } catch (e) {
+      enginePatched.value = false;
+      engineVersion.value = '探测失败: $e';
     }
   }
 

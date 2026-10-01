@@ -36,6 +36,9 @@ android {
     }
 
     packagingOptions.jniLibs.useLegacyPackaging = true
+    // libvlc-all 与 medialibrary-all 各自携带一份 libc++_shared.so(同一 NDK
+    // 工具链产物), 取其一即可
+    packagingOptions.jniLibs.pickFirsts += "lib/*/libc++_shared.so"
 
     val keyProperties = Properties().also {
         val properties = rootProject.file("key.properties")
@@ -99,4 +102,12 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // 本地/局域网媒体的 VLC 引擎(完整 libvlc: 全部编解码器 + smb/ftp/nfs/upnp
+    // 协议 + 字幕引擎 + 360° 渲染)与 VLC 媒体库, 均为 videolan 官方发布产物。
+    // 见 docs/piliplayer.md §17。
+    implementation("org.videolan.android:libvlc-all:3.7.6")
+    implementation("org.videolan.android:medialibrary-all:0.13.21")
 }

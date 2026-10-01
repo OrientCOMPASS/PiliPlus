@@ -219,6 +219,11 @@ dependencies {
     // files(taskProvider) 会自动建立任务依赖, 打包前先完成下载+校验)。
     // medialibrary 不需要补丁, 仍用官方发布版。见 docs/piliplayer.md §18。
     implementation(files(downloadLibVlcVr))
-    implementation("org.videolan.android:medialibrary-all:0.13.21")
+    // medialibrary-all 传递依赖官方 libvlc-all:3.7.4 —— files() 的 AAR 不是
+    // 模块依赖, 不参与版本仲裁, 不排除就会在 mergeNativeLibs 撞出两份
+    // lib/arm64-v8a/libvlc.so(真机 CI 实测报错)
+    implementation("org.videolan.android:medialibrary-all:0.13.21") {
+        exclude(group = "org.videolan.android", module = "libvlc-all")
+    }
 }
 

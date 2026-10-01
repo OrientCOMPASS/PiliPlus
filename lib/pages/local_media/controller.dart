@@ -7,7 +7,7 @@ import 'package:PiliPlus/utils/storage_key.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:PiliPlus/utils/permission_handler.dart';
 
 /// 「本地」板块控制器: 数据全部来自 VLC 引擎(libmedialibrary 索引 +
 /// libvlc MediaBrowser 网络发现/浏览), 见 docs/piliplayer.md §17。

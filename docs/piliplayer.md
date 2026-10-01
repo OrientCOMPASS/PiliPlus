@@ -1520,3 +1520,108 @@ VR 从此就是主播放器的一种输出模式：弹幕（Flutter 层）、字
 而新仓库不会自动进入 token 的授权列表，所以后续对它的一切操作（含删除）都被拒。
 若不希望 token 具备建仓能力，把 Administration 权限降为 No access 即可
 （本仓库的推送/发布/触发 CI 只需要 Contents:write + Actions，均不受影响）。
+
+## 17. 第十二轮：本地板块整体移植 VLC，mpv VR 路线退役
+
+### 17.1 决策
+
+需求方三个决定（原话要点）：
+1. **抛弃现有的本地视频实现**，把 VLC 完整移植过来试一试；
+2. 集成方式：**先用 videolan 官方产物**，将来需要改内核时再上源码构建管线；
+3. 范围：**彻底替换**——媒体库(libmedialibrary) + 网络发现/浏览(MediaBrowser)
+   + 播放(libvlc)全部用 VLC；本地 VR/360 交给 VLC 原生环视，
+   **并移除第十轮的 mpv VR 补丁**。
+
+于是本轮做了两件大事：**接入 VLC 引擎**与**退役两条旧路线**
+（mpv VR 补丁 + Dart 自研本地栈）。在线 B 站播放不动（弹幕/B 站交互都在
+media_kit/mpv 上，与本轮无关）。
+
+### 17.2 为什么官方 AAR 就是"完整 VLC"
+
+`org.videolan.android:libvlc-all:3.7.6`（Maven Central，videolan 官方 CI 产物，
+即 VLC 安卓 app 使用的引擎本体）：
+- arm64 `libvlc.so` 46MB，**全部编解码器 + 协议**(smb/ftp/nfs/upnp/http…)
+  + 字幕引擎 + 360° 球面渲染都在里面；
+- Kotlin API 经 AAR 内 classes.jar 核实（javap 逐个确认过签名）：
+  `MediaPlayer.updateViewpoint(yaw,pitch,roll,fov,absolute)`（360° 视角）、
+  `IVLCVout.setVideoSurface(SurfaceTexture)`（外部纹理渲染，Flutter 合成）、
+  `MediaBrowser.discoverNetworkShares()/browse(uri,flags)`（网络发现/浏览）、
+  `IMedia.VideoTrack.projection`（360° 元数据检测）、`addSlave`（外挂字幕）、
+  `Dumper`（下载）；
+- `org.videolan.android:medialibrary-all:0.13.21`：libml 媒体库
+  （`init/start/discover`、`getVideos`、`setLastTime` 续播持久化、
+  `addToHistory` 历史、`forceRescan`），与 VLC app 同一套索引存储。
+
+源码构建管线暂不建（VLC contrib 工具链单次构建 1~2 小时起）；
+一旦需要给 VLC 打补丁，按 `tool/libmpv-vr` 的模式入库即可（§17.6 已留好接缝：
+所有 VLC 依赖集中在 `android/app/build.gradle.kts` 两行 + Kotlin 桥三个文件）。
+
+### 17.3 新架构
+
+```
+Flutter「本地」板块
+ ├─ 媒体库 Tab ── VlcLibrary ──(MethodChannel piliplus/vlc_library)──> libmedialibrary
+ │     自动索引存储卷 · 文件夹归组 · 续播/历史由 libml 原生持久化
+ ├─ 网络 Tab ──── VlcBrowser ──(piliplus/vlc_browser)──> libvlc MediaBrowser
+ │     SMB 共享自动发现 · smb/ftp/nfs 逐层浏览 · Dumper 下载
+ └─ 播放 ──────── VlcPlayerPage + VlcPlayerController ──(piliplus/vlc_player)──> libvlc MediaPlayer
+       SurfaceTexture → Flutter Texture(与 media_kit/mpv 同款外部纹理合成)
+       360°: libvlc 原生投影, 拖拽/陀螺仪(GAME_ROTATION_VECTOR)/视场角逐帧 updateViewpoint
+```
+
+Kotlin 桥（`android/app/src/main/kotlin/com/example/piliplus/vlc/`）：
+| 文件 | 职责 |
+| --- | --- |
+| `VlcCore.kt` | LibVLC 单例（`--no-video-title-show`、`--network-caching=1500`） |
+| `VlcPlayerBridge.kt` | 播放/轨道/倍速/缩放/360 视角/陀螺仪；纹理主线程建、解析与 stop 后台线程做（沿用 §10.5 的 ANR 教训）；`OnNewVideoLayoutListener` 里 `setDefaultBufferSize`（§11.1 的纯色画面教训） |
+| `VlcBrowserBridge.kt` | MediaBrowser 发现/浏览 + Dumper 下载；会话 token 作废旧事件 |
+| `VlcLibraryBridge.kt` | libml 生命周期、视频/历史查询、续播写入、存储卷枚举（应用私有目录反推卷根，与旧 Dart 实现同技巧） |
+
+Dart 侧：`lib/services/vlc/`（三个门面）+ `lib/models/local_media/vlc_media.dart`
+（模型）+ `lib/pages/local_media/`（板块重写）+ `lib/pages/video/vlc/vlc_player_page.dart`
+（播放页）。播放页能力：手势（横向拖动=90s/屏 seek 预览、左亮度右音量、
+双击两侧 ±10s）、倍速滑条+预设 chip（含 2.5X）、音轨/字幕选择（libvlc
+自动探测同名字幕）、画面比例循环、旋转、列表连播+循环、每 5s 续播落盘
+（libml）、360° 时自动切换为环视操作（拖拽/双指视场角/陀螺仪/摆正）。
+
+### 17.4 移除清单
+
+- **mpv VR 路线（第十轮）整体退役**：`tool/libmpv-vr/**`、libmpv_vr 工作流、
+  `libmpv-vr` 滚动 release、vendored `third_party/media_kit_libs_android_video`
+  （pubspec 还原为上游 git 依赖）、Dart VR 层（vr_projection/vr_control_layer/
+  控制器 VR 段/设置项/键）。在线播放器回到**上游原版 libmpv**（20260906 jar）。
+  补丁与文档保留在 git 历史（a031ef4..404891c），随时可考古/复活。
+  mpv 补丁本身（球面网格/EKF C 转写/热参数免重建）是可复用资产。
+- **Dart 自研本地栈（第一~八轮）整体移除**：`lib/services/smb/**`（SMB2 客户端、
+  NTLM、回环代理、会话池）、`local_media_service.dart`、`local_media_progress.dart`、
+  旧 models、旧 library/browser 页面、`VideoDetailPage` 的本地媒体管线
+  （initLocalMediaSource/外置字幕自动加载/进度上报旁路等）、相关测试。
+  本地播放不再经过 `VideoDetailPage`/mpv。
+- **本地 VR 能力变化（明示）**：360 单目等距柱状 → VLC 原生环视（拖拽+陀螺仪+视场角）；
+  **SBS/TB 立体 360、180°、Cardboard 分屏不再有**（libvlc 3.x 不支持立体 360，
+  这类片源会按普通平面视频播放）。在线源 VR 同理（mpv 补丁已退役）。
+- 局域网 seek 风暴（§16.1）随代理一并消失：VLC 对 smb:// 就是 libsmb2 定位读，
+  network-caching=1500ms，与 VLC 安卓端行为一致。
+
+### 17.5 代价与已知边界
+
+- **APK 体积**：arm64 增加约 55MB（libvlc 46MB + libc++_shared 9.3MB，
+  libc++_shared 与 medialibrary AAR 共用一份，gradle pickFirst）。
+- 媒体库首次索引在后台进行（libml），大存储卡需要几分钟，结果边扫边出；
+  续播位置/历史改由 libml 持久化，**旧版本的 `local:<crc32>` 进度记录不迁移**
+  （格式不同源，直接重新积累）。
+- 缩略图暂未接（libml `requestThumbnail` 是异步回调链，v1 用图标占位）。
+- 网络浏览无跨目录递归检索（旧实现有 BFS 检索）；当前目录内过滤可用。
+- 媒体库排序为本机内存排序（名称/时长/进度/文件夹），不走 libml 的分组 API。
+- **未经真机验证**：Kotlin/Dart 全部经 CI 编译（debug+release），
+  行为（SurfaceTexture 方向、smb 认证 URI、libml 扫描权限时序、360 检测）
+  需真机确认；播放器桥的诊断路径：`onError` 事件会把 libvlc 错误带到页面。
+
+### 17.6 构建/CI
+
+- gradle 依赖：`libvlc-all:3.7.6` + `medialibrary-all:0.13.21`（Maven Central，
+  CI 首拉后走 gradle 缓存）；
+- `piliplayer_ci.yml` 不变（check + release 构建），STRICT_PATHS 换成本轮新路径
+  （lib/services/vlc、lib/pages/video/vlc、lib/pages/local_media、
+  lib/models/local_media、test/models/vlc_media_test.dart）；
+- 发布流程不变：删旧 `v2.1.5-test` release+tag → 重打 tag → CI 出 arm64 包。

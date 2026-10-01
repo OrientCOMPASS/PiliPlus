@@ -65,8 +65,8 @@ class VlcPlayerController extends GetxController {
 
   final RxList<VlcTrack> audioTracks = <VlcTrack>[].obs;
   final RxList<VlcTrack> spuTracks = <VlcTrack>[].obs;
-  final RxInt curAudio = -1.obs;
-  final RxInt curSpu = -1.obs;
+  final RxInt curAudio = (-1).obs;
+  final RxInt curSpu = (-1).obs;
 
   final RxDouble rate = 1.0.obs;
 

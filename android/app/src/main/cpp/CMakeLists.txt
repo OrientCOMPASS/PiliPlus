@@ -67,13 +67,10 @@ target_link_libraries(xl_vr
 target_compile_options(xl_vr PRIVATE
         # 上游 build.gradle 的 cppFlags "-frtti -fexceptions"
         -frtti -fexceptions
-        # 上游源码是 2017 年写的，靠当年 NDK 头文件的间接包含拿到一些声明，新 NDK 不一定还给：
-        #   · xl_tracker.c 用 gettimeofday/struct timeval 却没 include <sys/time.h>
-        #   · xl_video_render_types.h 用 pthread_mutex_t / uint8_t 却没 include <pthread.h>/<stdint.h>
-        # 用编译选项统一前置包含，这样上游文件可以保持逐字不动。
-        -include sys/time.h
-        -include pthread.h
-        -include stdint.h
+        # 上游源码是 2017 年写的，有些声明靠当年 NDK 头文件的间接包含才拿得到，
+        # NDK r28 不一定还给（sys/time.h、pthread.h、stdint.h）—— 统一用一个前置头补，
+        # 这样上游文件可以保持逐字不动。只能有一个 -include，理由见该头文件注释。
+        -include ${CMAKE_CURRENT_SOURCE_DIR}/compat/xl_prelude.h
         -Wno-unused-parameter
         -Wno-comment
         )

@@ -52,6 +52,9 @@
 #include "xl/xl_video/xl_video_render.h"
 
 #define TAG "VrXl"
+/* 上游 xl_macro.h（经 xl_model.h 等间接引入）已定义过 LOGE，这里接管成自己的 TAG，
+ * 先 #undef 消掉 -Wmacro-redefined。 */
+#undef LOGE
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)

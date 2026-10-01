@@ -87,7 +87,13 @@ void *ekf_thread(__attribute__((unused)) void *data) {
     int events;
     struct android_poll_source* source;
     while(run){
-        while (run && (ident=ALooper_pollAll(-1, NULL, &events, (void**)&source)) >= 0) {
+        /* [PiliPlus 移植改动] 上游此处是 ALooper_pollAll(-1, ...)。NDK r28 给 pollAll 标了
+         * __REMOVED_IN(1)（对 ALooper_wake 不可靠，直接编译报错），官方迁移指引就是
+         * "循环调用 ALooper_pollOnce"。对本循环（只等传感器队列、无 callback）两者等价：
+         * 阻塞等事件 → 返回 LOOPER_ID_USER → 下面排空所有 pending 事件再继续 poll。
+         * xl_tracker_stop() 里的 ALooper_wake() 会让 pollOnce 返回负值，内层循环退出，
+         * 外层 while(run) 看到 run==false 结束线程，行为与上游一致。 */
+        while (run && (ident=ALooper_pollOnce(-1, NULL, &events, (void**)&source)) >= 0) {
             if(ident < 0){
                 LOGI("looper poll all  ident < 0");
             }

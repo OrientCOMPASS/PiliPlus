@@ -24,7 +24,11 @@
 extern "C" {
 #endif
 
-/* 上游只会解引用这几个字段（软解路径 + update_frame_*），其余一律用不到。 */
+/* 上游只会解引用这几个字段（软解路径 + update_frame_*），其余一律用不到。
+ * 另外两个字段是上游 xl_macro.h 的"借位"宏要求的：
+ *   #define HW_BUFFER_ID  pkt_pos      （硬解路径把 buffer id 塞进 pkt_pos）
+ *   #define FRAME_ROTATION sample_rate （xl_model_rect.c 把旋转角塞进音频字段 sample_rate）
+ * 我们走 OES 硬解纹理，运行时不会真用到，但类型定义里必须有，否则编译不过。 */
 typedef struct AVFrame {
     uint8_t *data[8];
     int linesize[8];
@@ -32,6 +36,8 @@ typedef struct AVFrame {
     int height;
     int format;
     int64_t pts;
+    int64_t pkt_pos;
+    int sample_rate;
 } AVFrame;
 
 /* 只列出渲染层出现过的三个取值；数值本身无所谓（我们永远不会送 YUV/NV12 帧进来），

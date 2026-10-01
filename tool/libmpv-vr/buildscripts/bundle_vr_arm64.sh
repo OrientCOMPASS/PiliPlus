@@ -60,8 +60,17 @@ cp -L "$NEW_SO" "$work/lib/arm64-v8a/libmpv.so"
 
 mkdir -p ../output
 rm -f ../output/default-arm64-v8a.jar
-(cd "$work/lib" && zip -q -r ../default-arm64-v8a.jar arm64-v8a)
+# NOTE: entries must keep the lib/<abi>/ prefix (AGP native-libs-in-jar
+# convention, same as the upstream jar) — zipping from $work, not $work/lib.
+(cd "$work" && zip -q -r default-arm64-v8a.jar lib/arm64-v8a)
 mv "$work/default-arm64-v8a.jar" ../output/default-arm64-v8a.jar
+
+# verify the layout before publishing: AGP silently ignores jars whose native
+# entries lack the lib/ prefix, which would ship an APK without libmpv.so
+unzip -l ../output/default-arm64-v8a.jar | grep -q "lib/arm64-v8a/libmpv.so"
+unzip -l ../output/default-arm64-v8a.jar | grep -q "lib/arm64-v8a/libmedia_kit_native_event_loop.so"
+unzip -l ../output/default-arm64-v8a.jar | grep -q "lib/arm64-v8a/libmediakitandroidhelper.so"
+test "$(unzip -l ../output/default-arm64-v8a.jar | tail -1 | awk '{print $2}')" = "4"
 
 (cd ../output && sha256sum default-arm64-v8a.jar | tee default-arm64-v8a.jar.sha256)
 unzip -l ../output/default-arm64-v8a.jar

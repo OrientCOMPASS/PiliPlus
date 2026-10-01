@@ -87,9 +87,14 @@ jobs:
             - name: Collect artifacts
               run: |
                   set -e
-                  AAR=$(ls build-libvlc/libvlcjni/libvlc/build/outputs/aar/libvlc-arm64-v8a-*.aar | head -1)
+                  AAR=$(ls build-libvlc/libvlcjni/libvlc/build/outputs/aar/*.aar | head -1)
                   cp "$AAR" "$AAR_NAME"
                   sha256sum "$AAR_NAME" > "$AAR_NAME.sha256"
+                  # Verify the VR extension actually landed in the binary
+                  mkdir -p /tmp/aarcheck && (cd /tmp/aarcheck && unzip -o -q "$GITHUB_WORKSPACE/$AAR_NAME" 'jni/*')
+                  nm -D /tmp/aarcheck/jni/arm64-v8a/libvlc.so | grep -q libvlc_pili_vr_version
+                  nm -D /tmp/aarcheck/jni/arm64-v8a/libvlc.so | grep -q libvlc_media_player_set_vr_mode
+                  echo "VR symbols verified in libvlc.so"
                   {
                     echo "artifact=$AAR_NAME"
                     echo "base_aar=$(basename "$AAR")"

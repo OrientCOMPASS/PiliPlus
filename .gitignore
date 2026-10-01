@@ -150,3 +150,6 @@ pili_release.json
 dist
 
 test*/build-libvlc/
+
+# PiliPlus test signing key (intentionally committed for stable CI test builds)
+!android/keystore/pili-test.jks

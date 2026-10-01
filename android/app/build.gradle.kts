@@ -52,6 +52,17 @@ android {
             enableV1Signing = true
             enableV2Signing = true
         }
+    } ?: file("keystore/pili-test.jks").takeIf { it.exists() }?.let { ks ->
+        // PiliPlus test signing key (committed on purpose): keeps CI-built
+        // test APKs on a stable signature so they can update each other.
+        signingConfigs.create("release") {
+            storeFile = ks
+            storePassword = "piliplus-test"
+            keyAlias = "piliplus"
+            keyPassword = "piliplus-test"
+            enableV1Signing = true
+            enableV2Signing = true
+        }
     }
 
     buildFeatures {
@@ -99,4 +110,18 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // Local media playback engine (libvlc).
+    // CI places the PiliPlus-patched AAR (VR projection extensions) at
+    // app/libs/libvlc-pvr.aar; when absent (e.g. quick local builds) fall
+    // back to the stock artifact from Maven Central. The Dart/native bridge
+    // detects the missing VR extension at runtime and surfaces a notice.
+    val pvrAar = file("libs/libvlc-pvr.aar")
+    if (pvrAar.exists()) {
+        implementation(files(pvrAar))
+    } else {
+        implementation("org.videolan.android:libvlc-all:3.7.7")
+    }
 }

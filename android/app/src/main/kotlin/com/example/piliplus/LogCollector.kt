@@ -18,7 +18,7 @@ import java.util.regex.Pattern
  *  1. [add] / [e] / [w] / [i]: 代码里显式记录(带堆栈), 同时镜像到 logcat
  *     方便 adb; 抓取线程会跳过这些自有 tag, 不会产生重复。
  *  2. 后台守护线程 `logcat -v threadtime` 抓**本进程**的行, 只保留
- *     W/E/F 级别以及 VLC 引擎相关 tag(libvlc / VLC/* / medialibrary / mla),
+ *     W/E/F 级别以及 VLC 引擎相关 tag(libvlc、VLC/xxx、medialibrary、mla),
  *     于是 native 崩溃前的引擎报错、`MedialibraryImpl` 的 JNI 日志都能进缓冲。
  *
  * 环形缓冲上限 [MAX_LINES] 行(进程内, 不落盘; 导出时由 Dart 侧合成文件)。

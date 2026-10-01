@@ -145,6 +145,31 @@ List<SettingsModel> get playSettings => [
     getSubtitle: () => '当前选择偏好：${Pref.subtitlePreferenceV2.desc}',
     onTap: _showSubtitleDialog,
   ),
+  // ---- 本地板块（VLC 本地/局域网播放） ----
+  if (Platform.isAndroid)
+    const SwitchModel(
+      title: 'VR文件名自动识别',
+      subtitle: '本地播放按文件名识别 360/180、左右/上下等 VR 格式；'
+          '已防止把 360p/1080p 等清晰度误判为全景',
+      leading: Icon(Icons.vrpano),
+      setKey: LocalSettingKey.vrAutoDetect,
+      defaultVal: true,
+    ),
+  if (Platform.isAndroid)
+    const SwitchModel(
+      title: 'VR默认开启陀螺仪',
+      subtitle: '播放全景视频时自动开启陀螺仪环视',
+      leading: Icon(Icons.explore_outlined),
+      setKey: LocalSettingKey.localGyroDefault,
+      defaultVal: false,
+    ),
+  if (Platform.isAndroid)
+    NormalModel(
+      title: '引擎日志',
+      subtitle: '查看/导出本地播放引擎（libvlc）日志与诊断文件',
+      leading: const Icon(Icons.engineering_outlined),
+      onTap: (context, setState) => Get.toNamed('/engineLogs'),
+    ),
   if (PlatformUtils.isDesktop)
     SwitchModel(
       title: '最小化时暂停/还原时播放',

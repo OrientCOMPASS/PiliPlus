@@ -113,7 +113,7 @@ abstract final class Pref {
   static List<double> get speedList => List<double>.from(
     _video.get(
       VideoBoxKey.speedsList,
-      defaultValue: const [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0],
+      defaultValue: const [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 8.0],
     ),
   );
 
@@ -1047,4 +1047,47 @@ abstract final class Pref {
 
   static bool get enableEmoteTooltip =>
       _setting.get(SettingBoxKey.enableEmoteTooltip, defaultValue: false);
+
+  // ---- 本地板块（local media module） ----
+
+  /// 文件名自动识别 VR 格式（默认开、可关）。
+  static bool get localVrAutoDetect =>
+      _setting.get(LocalSettingKey.vrAutoDetect, defaultValue: true);
+  static set localVrAutoDetect(bool value) =>
+      _setting.put(LocalSettingKey.vrAutoDetect, value);
+
+  /// VR 播放默认启用陀螺仪环视。
+  static bool get localGyroDefault =>
+      _setting.get(LocalSettingKey.localGyroDefault, defaultValue: false);
+
+  /// 网络来源书签（含凭据，仅存本机，界面展示一律脱敏）。
+  static List<NetBookmarkData> get localNetBookmarks {
+    final raw = _setting.get(LocalSettingKey.netBookmarks);
+    if (raw is! List) return [];
+    return raw
+        .whereType<Map>()
+        .map((e) => NetBookmarkData(
+              name: e['name'] as String? ?? '',
+              url: e['url'] as String? ?? '',
+            ))
+        .toList();
+  }
+
+  static set localNetBookmarks(List<NetBookmarkData> value) => _setting.put(
+        LocalSettingKey.netBookmarks,
+        value.map((e) => e.toMap()).toList(),
+      );
+}
+
+class NetBookmarkData {
+  final String name;
+  final String url;
+  const NetBookmarkData({required this.name, required this.url});
+
+  Map<String, String> toMap() => {'name': name, 'url': url};
+
+  String get redactedUrl => url.replaceFirstMapped(
+        RegExp(r'://([^/@:]+):([^@/]+)@'),
+        (m) => '://${m.group(1)}:***@',
+      );
 }

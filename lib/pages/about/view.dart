@@ -204,6 +204,16 @@ Commit Hash: ${BuildConfig.commitHash}''',
             trailing: Icon(Icons.arrow_forward, size: 16, color: outline),
           ),
           ListTile(
+            onTap: () => Get.toNamed('/engineLogs'),
+            leading: const Icon(Icons.engineering_outlined),
+            title: const Text('引擎日志'),
+            subtitle: Text(
+              '本地播放引擎/Native 日志，可导出一键诊断文件',
+              style: subTitleStyle,
+            ),
+            trailing: Icon(Icons.arrow_forward, size: 16, color: outline),
+          ),
+          ListTile(
             onTap: () {
               if (cacheSize.value.isNotEmpty) {
                 showConfirmDialog(

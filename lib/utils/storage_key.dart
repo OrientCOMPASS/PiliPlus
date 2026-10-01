@@ -256,5 +256,22 @@ abstract final class VideoBoxKey {
       playSpeedDefault = 'playSpeedDefault',
       longPressSpeedDefault = 'longPressSpeedDefault',
       speedsList = 'speedsList',
-      cacheVideoFit = 'cacheVideoFit';
+      cacheVideoFit = 'cacheVideoFit',
+      speedsListMigratedV2 = 'speedsListMigratedV2';
+}
+
+/// Keys for the local media module (box: localMedia).
+abstract final class LocalBoxKey {
+  /// Playback resume records: 'p:<uri>' -> {pos, dur, cnt, ts}
+  static const String progressPrefix = 'p:';
+
+  /// Per-source VR overrides: 'vr:<uri>' -> {proj, stereo, eye}
+  static const String vrOverridePrefix = 'vr:';
+}
+
+abstract final class LocalSettingKey {
+  static const String vrAutoDetect = 'localVrAutoDetect',
+      navBarLocalMigrated = 'navBarLocalMigrated',
+      netBookmarks = 'localNetBookmarks',
+      localGyroDefault = 'localGyroDefault';
 }

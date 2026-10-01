@@ -22,6 +22,7 @@ abstract final class GStorage {
   static late final Box<dynamic> setting;
   static late final Box<dynamic> video;
   static late final Box<int> watchProgress;
+  static late final Box<dynamic> localMedia;
   static late final Box<Uint8List>? reply;
 
   static Future<void> init() async {
@@ -62,6 +63,13 @@ abstract final class GStorage {
           return deletedEntries > 4;
         },
       ).then((res) => watchProgress = res),
+      // 本地媒体模块（续播记录 / VR 覆盖等，仅存本机，绝不上传）
+      Hive.openBox(
+        'localMedia',
+        compactionStrategy: (entries, deletedEntries) {
+          return deletedEntries > 32;
+        },
+      ).then((res) => localMedia = res),
     ]);
 
     if (Pref.saveReply) {

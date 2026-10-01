@@ -61,6 +61,8 @@ import 'package:PiliPlus/pages/setting/pages/play_speed_set.dart';
 import 'package:PiliPlus/pages/setting/view.dart';
 import 'package:PiliPlus/pages/settings_search/view.dart';
 import 'package:PiliPlus/pages/space_setting/view.dart';
+import 'package:PiliPlus/pages/local/engine_logs_view.dart';
+import 'package:PiliPlus/pages/local_player/view.dart';
 import 'package:PiliPlus/pages/sponsor_block/view.dart';
 import 'package:PiliPlus/pages/subscription/view.dart';
 import 'package:PiliPlus/pages/subscription_detail/view.dart';
@@ -142,6 +144,10 @@ class Routes {
     GetPage(name: '/memberDynamics', page: () => const MemberDynamicsPage()),
     // 日志
     GetPage(name: '/logs', page: () => const LogsPage()),
+    // 本地播放引擎日志（含诊断导出）
+    GetPage(name: '/engineLogs', page: () => const EngineLogsPage()),
+    // 本地/局域网播放页
+    GetPage(name: '/localPlayer', page: () => const LocalPlayerPage()),
     // 订阅
     GetPage(name: '/subscription', page: () => const SubPage()),
     // 订阅详情

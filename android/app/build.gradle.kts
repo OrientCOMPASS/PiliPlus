@@ -1,5 +1,7 @@
 import com.android.build.gradle.internal.api.ApkVariantOutputImpl
 import org.jetbrains.kotlin.konan.properties.Properties
+import java.net.HttpURLConnection
+import java.net.URI
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
@@ -121,6 +123,37 @@ val libvlcVrBaseUrl =
     "https://github.com/OrientCOMPASS/PiliPlus/releases/download/libvlc-vr"
 val libvlcVrDir = layout.buildDirectory.dir("libvlc-vr")
 
+fun downloadFollowingRedirects(url: String, dest: File) {
+    var current = url
+    repeat(6) {
+        val conn = URI(current).toURL().openConnection() as HttpURLConnection
+        conn.instanceFollowRedirects = false // 手动跟随, 跨主机/协议都可控
+        conn.connectTimeout = 30_000
+        conn.readTimeout = 300_000
+        conn.setRequestProperty("User-Agent", "PiliPlus-Gradle")
+        val code = conn.responseCode
+        if (code in 300..399) {
+            val loc = conn.getHeaderField("Location")
+            conn.disconnect()
+            if (loc == null) {
+                throw GradleException("HTTP $code 但没有 Location 头: $current")
+            }
+            current = URI(current).resolve(loc).toString()
+            return@repeat
+        }
+        if (code != 200) {
+            conn.disconnect()
+            throw GradleException("HTTP $code: $current")
+        }
+        conn.inputStream.use { input ->
+            dest.outputStream().use { output -> input.copyTo(output) }
+        }
+        conn.disconnect()
+        return
+    }
+    throw GradleException("重定向次数过多: $url")
+}
+
 val downloadLibVlcVr = tasks.register("downloadLibVlcVr") {
     description = "Fetch the VR-patched libvlc-all AAR from the rolling libvlc-vr release"
     val aarFile = libvlcVrDir.map { it.file(libvlcVrAsset) }
@@ -139,30 +172,21 @@ val downloadLibVlcVr = tasks.register("downloadLibVlcVr") {
             try {
                 tmp.delete()
                 shaTmp.delete()
-                ant.withGroovyBuilder {
-                    "get"(
-                        "src" to "$libvlcVrBaseUrl/$libvlcVrAsset",
-                        "dest" to tmp,
-                        "usessession" to false,
-                        "retries" to 2,
-                    )
-                    "get"(
-                        "src" to "$libvlcVrBaseUrl/$libvlcVrAsset.sha256",
-                        "dest" to shaTmp,
-                        "usessession" to false,
-                        "retries" to 2,
-                    )
-                }
+                // 不用 ant.get(在 runner 上对 GitHub 的 302→签名URL 链路快速失败
+                // 且拿不到原因), 手动跟随重定向并在报错里带上真实 HTTP 状态
+                downloadFollowingRedirects("$libvlcVrBaseUrl/$libvlcVrAsset", tmp)
+                downloadFollowingRedirects("$libvlcVrBaseUrl/$libvlcVrAsset.sha256", shaTmp)
                 lastError = null
                 break
             } catch (e: Exception) {
                 lastError = e
-                logger.warn("libvlc-vr 下载第 $attempt 次失败: ${e.message}")
+                logger.warn("libvlc-vr 下载第 $attempt 次失败: $e")
             }
         }
         if (lastError != null) {
             throw GradleException(
                 "无法下载 VR 版 libvlc AAR: $libvlcVrBaseUrl/$libvlcVrAsset\n" +
+                    "原因: $lastError\n" +
                     "该资产由 .github/workflows/libvlc_vr.yml 构建并发布到滚动 release `libvlc-vr`。",
                 lastError,
             )

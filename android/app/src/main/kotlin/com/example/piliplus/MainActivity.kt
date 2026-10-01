@@ -23,6 +23,9 @@ class MainActivity : AudioServiceActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         val messenger = flutterEngine.dartExecutor.binaryMessenger
+        // 错误日志收集(logcat 抓取 + 环形缓冲 + piliplus/log_collector 通道),
+        // 供 设置→日志 查看/导出, 见 docs/piliplayer.md §18
+        LogCollector.install(messenger)
         vlcPlayer = VlcPlayerBridge(this, messenger, flutterEngine.renderer)
         vlcBrowser = VlcBrowserBridge(this, messenger)
         vlcLibrary = VlcLibraryBridge(this, messenger)

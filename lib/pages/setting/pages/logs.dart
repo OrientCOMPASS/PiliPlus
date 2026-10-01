@@ -1,10 +1,13 @@
 import 'dart:async' show Timer;
 import 'dart:convert' show jsonDecode;
+import 'dart:io';
 
+import 'package:PiliPlus/build_config.dart';
 import 'package:PiliPlus/common/constants.dart';
 import 'package:PiliPlus/common/widgets/button/icon_button.dart';
 import 'package:PiliPlus/common/widgets/loading_widget/loading_widget.dart';
 import 'package:PiliPlus/common/widgets/selection_text.dart';
+import 'package:PiliPlus/services/log_collector.dart';
 import 'package:PiliPlus/services/logger.dart';
 import 'package:PiliPlus/utils/date_utils.dart';
 import 'package:PiliPlus/utils/page_utils.dart';
@@ -15,7 +18,12 @@ import 'package:PiliPlus/utils/utils.dart';
 import 'package:catcher_2/catcher_2.dart';
 import 'package:catcher_2/utils/log_printer.dart';
 import 'package:flutter/foundation.dart';
+import 'package:get/get.dart';
+import 'package:intl/intl.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 const _snackBarDisplayDuration = Duration(seconds: 1);
 
@@ -88,7 +96,50 @@ class _LogsPageState extends State<LogsPage> {
     }
   }
 
+  /// 导出一份完整诊断文件: 应用/构建信息 + catcher 错误报告 + 原生引擎日志
+  /// (logcat 环形缓冲, 含 VLC 引擎与三个桥的错误), 经系统分享面板发出。
+  Future<void> exportLogs() async {
+    final native = await NativeLogCollector.dump();
+    final pkg = await PackageInfo.fromPlatform();
+    final now = DateFormat('yyyy-MM-dd HH:mm:ss').format(DateTime.now());
+    final buf = StringBuffer()
+      ..writeln('PiliPlus 日志导出')
+      ..writeln('导出时间: $now')
+      ..writeln('版本: ${pkg.version}+${pkg.buildNumber} (${pkg.packageName})')
+      ..writeln('Commit: ${BuildConfig.commitHash}')
+      ..writeln('构建时间戳: ${BuildConfig.buildTime}')
+      ..writeln()
+      ..writeln('===== Dart 错误报告 (catcher, ${logsContent.length} 条) =====');
+    for (final item in logsContent) {
+      buf
+        ..writeln(item.toString())
+        ..writeln();
+    }
+    buf
+      ..writeln('===== 原生引擎日志 (logcat 环形缓冲) =====')
+      ..writeln(native.isEmpty ? '(空 — 仅 Android 且有 W/E 级日志或引擎输出时非空)' : native);
+    try {
+      final dir = await getTemporaryDirectory();
+      final ts = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+      final file = File('${dir.path}${Platform.pathSeparator}piliplus_logs_$ts.txt');
+      await file.writeAsString(buf.toString(), flush: true);
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path, mimeType: 'text/plain')],
+          subject: 'PiliPlus 日志',
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('导出失败: $e')),
+        );
+      }
+    }
+  }
+
   Future<void> clearLogs() async {
+    await NativeLogCollector.clear();
     if (await LoggerUtils.clearLogs()) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -142,6 +193,14 @@ class _LogsPageState extends State<LogsPage> {
               PopupMenuItem(
                 onTap: copyLogs,
                 child: const Text('复制日志'),
+              ),
+              PopupMenuItem(
+                onTap: exportLogs,
+                child: const Text('导出日志(含引擎日志)'),
+              ),
+              PopupMenuItem(
+                onTap: () => Get.to(() => const NativeEngineLogsPage()),
+                child: const Text('引擎日志(native)'),
               ),
               PopupMenuItem(
                 onTap: () =>
@@ -462,4 +521,94 @@ class _ExpandedItem<T> {
 
   @override
   String toString() => item.toString();
+}
+
+/// 原生引擎日志页: 展示 Kotlin `LogCollector` 环形缓冲(logcat W/E/F +
+/// VLC 引擎 tag + 桥层显式记录)。VLC 媒体库初始化失败这类问题以前只能
+/// 靠 adb 看, 现在装机就能自查/导出(docs §18)。
+class NativeEngineLogsPage extends StatefulWidget {
+  const NativeEngineLogsPage({super.key});
+
+  @override
+  State<NativeEngineLogsPage> createState() => _NativeEngineLogsPageState();
+}
+
+class _NativeEngineLogsPageState extends State<NativeEngineLogsPage> {
+  String _content = '';
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    final text = await NativeLogCollector.dump();
+    if (mounted) {
+      setState(() {
+        _content = text;
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _clear() async {
+    await NativeLogCollector.clear();
+    await _load();
+  }
+
+  void _copy() {
+    Utils.copyText(_content, needToast: false);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('复制成功')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('引擎日志'),
+        actions: [
+          IconButton(
+            tooltip: '刷新',
+            icon: const Icon(Icons.refresh),
+            onPressed: _loading ? null : _load,
+          ),
+          IconButton(
+            tooltip: '复制',
+            icon: const Icon(Icons.copy_all_outlined),
+            onPressed: _loading || _content.isEmpty ? null : _copy,
+          ),
+          IconButton(
+            tooltip: '清空缓冲',
+            icon: const Icon(Icons.delete_outline),
+            onPressed: _loading ? null : _clear,
+          ),
+          const SizedBox(width: 6),
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _content.isEmpty
+          ? const Center(child: Text('缓冲为空(没有捕获到警告/错误)'))
+          : SafeArea(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 32),
+                child: SelectionText(
+                  _content,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    height: 1.35,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ),
+            ),
+    );
+  }
 }

@@ -3,11 +3,10 @@ package com.example.piliplus.vlc
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
+import com.example.piliplus.LogCollector
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
-import org.videolan.medialibrary.MedialibraryImpl
 import org.videolan.medialibrary.interfaces.Medialibrary
 import org.videolan.medialibrary.interfaces.media.MediaWrapper
 import java.io.File
@@ -20,7 +19,20 @@ import java.util.concurrent.Executors
  * 与 VLC 安卓端同一套索引引擎: 自动扫描存储卷、按文件元数据建库、
  * 记忆每个媒体的续播位置([setLastTime])与播放历史。
  *
+ * 初始化序列严格对齐 vlc-android 的 MediaParsingService(§18.1 的教训——
+ * 之前跳过 construct() 直接 init(), MedialibraryImpl 会抛
+ * "Medialibrary construct has to be called before init", 真机上必失败):
+ *
+ *   Medialibrary.getInstance()      // 单例(MLServiceLocator 默认给真实现)
+ *   → construct(context)            // 加载 libmla/libc++_shared、注册 JNI、定 db/缩略图路径
+ *   → addDevice(uuid, path, removable) × 每个存储卷   // 必须在 init 前登记设备
+ *   → init(context)                 // 打开/建库; 状态码 0/1/3/4 可用, 2/5 失败
+ *   → setLibVLCInstance(ptr)        // libml 解析元数据/缩略图要用
+ *   → start()                       // 起后台任务
+ *   → banFolder(Android/) + discover(每个卷)
+ *
  * 所有查询都在后台线程执行(libml 是 JNI 同步调用), 结果 post 回主线程。
+ * 所有失败路径都写 [LogCollector](设置 → 日志 可查看/导出)。
  */
 class VlcLibraryBridge(
     private val context: Context,
@@ -30,6 +42,7 @@ class VlcLibraryBridge(
     companion object {
         const val CHANNEL = "piliplus/vlc_library"
         private const val TAG = "VlcLibraryBridge"
+        private const val PRIMARY_ROOT = "/storage/emulated/0"
     }
 
     private val channel = MethodChannel(messenger, CHANNEL)
@@ -37,11 +50,17 @@ class VlcLibraryBridge(
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
 
     @Volatile
-    private var ml: MedialibraryImpl? = null
+    private var ml: Medialibrary? = null
+
+    /** construct() 每进程只许成功执行一次(nativeConstruct 会重复注册 JNI) */
+    @Volatile
+    private var constructed = false
+    private var listenerAdded = false
     private var disposed = false
 
     private val readyListener = object : Medialibrary.OnMedialibraryReadyListener {
         override fun onMedialibraryReady() {
+            LogCollector.i(TAG, "medialibrary ready")
             emit("onReady", mapOf("ok" to true))
         }
 
@@ -64,8 +83,11 @@ class VlcLibraryBridge(
                 // finalize 兜底(dispose 只在引擎销毁时发生)
                 ml?.removeOnMedialibraryReadyListener(readyListener)
                 ml?.pauseBackgroundOperations()
-            } catch (_: Throwable) {}
+            } catch (t: Throwable) {
+                LogCollector.w(TAG, "dispose: ${t.message}")
+            }
             ml = null
+            listenerAdded = false
         }
         worker.shutdown()
     }
@@ -74,26 +96,10 @@ class VlcLibraryBridge(
         when (call.method) {
             "init" -> worker.execute {
                 val reply = try {
-                    var inst = ml
-                    if (inst == null) {
-                        inst = MedialibraryImpl()
-                        val status = inst.init(context)
-                        inst.addOnMedialibraryReadyListener(readyListener)
-                        inst.start()
-                        for (root in storageRoots()) {
-                            try {
-                                inst.banFolder(root + "/Android")
-                            } catch (_: Throwable) {}
-                            inst.discover(root)
-                        }
-                        ml = inst
-                        mapOf("status" to status, "roots" to storageRoots())
-                    } else {
-                        mapOf("status" to 0, "roots" to storageRoots())
-                    }
-                } catch (e: Throwable) {
-                    Log.e(TAG, "init failed", e)
-                    mapOf("error" to "${e.message}")
+                    doInit()
+                } catch (t: Throwable) {
+                    LogCollector.e(TAG, "init failed", t)
+                    mapOf("error" to "${t.javaClass.simpleName}: ${t.message}")
                 }
                 main.post { result.success(reply) }
             }
@@ -101,8 +107,8 @@ class VlcLibraryBridge(
             "videos" -> worker.execute {
                 val list = try {
                     (ml?.getVideos() ?: emptyArray()).map { describe(it) }
-                } catch (e: Throwable) {
-                    Log.w(TAG, "videos: ${e.message}")
+                } catch (t: Throwable) {
+                    LogCollector.w(TAG, "videos: ${t.message}")
                     emptyList()
                 }
                 main.post { result.success(list) }
@@ -111,8 +117,8 @@ class VlcLibraryBridge(
             "history" -> worker.execute {
                 val list = try {
                     (ml?.history(Medialibrary.HISTORY_TYPE_LOCAL) ?: emptyArray()).map { describe(it) }
-                } catch (e: Throwable) {
-                    Log.w(TAG, "history: ${e.message}")
+                } catch (t: Throwable) {
+                    LogCollector.w(TAG, "history: ${t.message}")
                     emptyList()
                 }
                 main.post { result.success(list) }
@@ -124,8 +130,8 @@ class VlcLibraryBridge(
                 val timeMs = (call.argument<Number>("timeMs") ?: 0).toLong()
                 val ok = try {
                     id >= 0 && (ml?.setLastTime(id, timeMs) ?: -1) == 0
-                } catch (e: Throwable) {
-                    Log.w(TAG, "setProgress: ${e.message}")
+                } catch (t: Throwable) {
+                    LogCollector.w(TAG, "setProgress: ${t.message}")
                     false
                 }
                 main.post { result.success(ok) }
@@ -136,8 +142,8 @@ class VlcLibraryBridge(
                 val title = call.argument<String>("title") ?: ""
                 val ok = try {
                     uri.isNotEmpty() && ml?.addToHistory(uri, title) == true
-                } catch (e: Throwable) {
-                    Log.w(TAG, "addHistory: ${e.message}")
+                } catch (t: Throwable) {
+                    LogCollector.w(TAG, "addHistory: ${t.message}")
                     false
                 }
                 main.post { result.success(ok) }
@@ -146,8 +152,8 @@ class VlcLibraryBridge(
             "rescan" -> worker.execute {
                 try {
                     if (call.argument<Boolean>("full") == true) ml?.forceRescan() else ml?.reload()
-                } catch (e: Throwable) {
-                    Log.w(TAG, "rescan: ${e.message}")
+                } catch (t: Throwable) {
+                    LogCollector.w(TAG, "rescan: ${t.message}")
                 }
                 main.post { result.success(null) }
             }
@@ -156,12 +162,101 @@ class VlcLibraryBridge(
                 val path = call.argument<String>("path") ?: ""
                 try {
                     if (path.isNotEmpty()) ml?.banFolder(path)
-                } catch (_: Throwable) {}
+                } catch (t: Throwable) {
+                    LogCollector.w(TAG, "banFolder: ${t.message}")
+                }
                 main.post { result.success(null) }
             }
 
             else -> result.notImplemented()
         }
+    }
+
+    // ------------------------------------------------------------------ init
+
+    /** worker 线程调用; 返回给 Dart 的 map(status/roots 或 error)。 */
+    private fun doInit(): Map<String, Any> {
+        val inst = ml ?: Medialibrary.getInstance()
+
+        if (!constructed) {
+            LogCollector.i(TAG, "medialibrary construct()…")
+            val ok = try {
+                inst.construct(context)
+            } catch (t: Throwable) {
+                LogCollector.e(TAG, "construct threw", t)
+                false
+            }
+            constructed = ok
+            if (!ok) {
+                LogCollector.e(
+                    TAG,
+                    "construct failed: libmla/libc++_shared 加载失败, 或存储目录不可用" +
+                        "(externalFilesDir 不存在 / 私有 db 目录不可写)",
+                )
+                return mapOf(
+                    "error" to "媒体库原生组件加载失败(construct), 详见 设置→关于→日志→引擎日志",
+                )
+            }
+        }
+
+        if (!inst.isInitiated) {
+            val roots = storageRoots()
+            // vlc-android 在 init 之前逐卷登记设备(主存储 uuid 固定 main-storage)
+            for (root in roots) {
+                val uuid = if (root == PRIMARY_ROOT) "main-storage" else root.substringAfterLast('/')
+                try {
+                    inst.addDevice(uuid, root, root != PRIMARY_ROOT)
+                } catch (t: Throwable) {
+                    LogCollector.w(TAG, "addDevice($root): ${t.message}")
+                }
+            }
+            val status = try {
+                inst.init(context)
+            } catch (t: Throwable) {
+                LogCollector.e(TAG, "init threw", t)
+                return mapOf("error" to "媒体库初始化异常: ${t.javaClass.simpleName}: ${t.message}")
+            }
+            LogCollector.i(
+                TAG,
+                "medialibrary init status=$status " +
+                    "(0=success 1=already 2=failed 3=db_reset 4=db_corrupted 5=unrecoverable)",
+            )
+            if (status == Medialibrary.ML_INIT_FAILED ||
+                status == Medialibrary.ML_INIT_DB_UNRECOVERABLE
+            ) {
+                return mapOf("error" to "媒体库数据库初始化失败(status=$status), 详见 设置→关于→日志→引擎日志")
+            }
+            try {
+                inst.setLibVLCInstance(VlcCore.get(context).instance)
+            } catch (t: Throwable) {
+                // 不影响扫描, 只影响 libml 的元数据解析/缩略图
+                LogCollector.w(TAG, "setLibVLCInstance failed: ${t.message}")
+            }
+        }
+
+        try {
+            if (!inst.isStarted) {
+                inst.start()
+            }
+            if (!listenerAdded) {
+                inst.addOnMedialibraryReadyListener(readyListener)
+                listenerAdded = true
+            }
+            for (root in storageRoots()) {
+                try {
+                    inst.banFolder(root + "/Android")
+                } catch (_: Throwable) {
+                }
+                inst.discover(root)
+            }
+        } catch (t: Throwable) {
+            LogCollector.e(TAG, "start/discover failed", t)
+            return mapOf("error" to "媒体库启动扫描失败: ${t.javaClass.simpleName}: ${t.message}")
+        }
+
+        ml = inst
+        LogCollector.i(TAG, "medialibrary init 完成, roots=${storageRoots()}")
+        return mapOf("status" to 0, "roots" to storageRoots())
     }
 
     private fun describe(m: MediaWrapper): Map<String, Any> {
@@ -182,8 +277,8 @@ class VlcLibraryBridge(
             height = m.getHeight()
             playCount = m.getPlayCount()
             fileName = m.getFileName() ?: ""
-        } catch (e: Throwable) {
-            Log.w(TAG, "describe: ${e.message}")
+        } catch (t: Throwable) {
+            LogCollector.w(TAG, "describe: ${t.message}")
         }
         return mapOf(
             "id" to m.getId(),
@@ -217,11 +312,11 @@ class VlcLibraryBridge(
                     roots.add(f.absolutePath)
                 }
             }
-        } catch (e: Throwable) {
-            Log.w(TAG, "storageRoots: ${e.message}")
+        } catch (t: Throwable) {
+            LogCollector.w(TAG, "storageRoots: ${t.message}")
         }
         if (roots.isEmpty()) {
-            roots.add("/storage/emulated/0")
+            roots.add(PRIMARY_ROOT)
         }
         return roots.toList()
     }

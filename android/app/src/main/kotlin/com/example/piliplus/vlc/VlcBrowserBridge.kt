@@ -1,10 +1,10 @@
 package com.example.piliplus.vlc
 
 import android.content.Context
+import com.example.piliplus.LogCollector
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -106,7 +106,7 @@ class VlcBrowserBridge(
                         dumper = d
                         d.start()
                     } catch (e: Throwable) {
-                        Log.e(TAG, "dump failed", e)
+                        LogCollector.e(TAG, "dump failed", e)
                         emit(0, "onDumpFinished", mapOf("ok" to false))
                     }
                 }
@@ -156,7 +156,7 @@ class VlcBrowserBridge(
                     b.browse(Uri.parse(uri), flags)
                 }
             } catch (e: Throwable) {
-                Log.e(TAG, "browse failed", e)
+                LogCollector.e(TAG, "browse failed", e)
                 emit(token, "onError", mapOf("message" to "${e.message}"))
             }
         }

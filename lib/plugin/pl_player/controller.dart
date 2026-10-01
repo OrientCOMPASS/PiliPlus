@@ -1353,7 +1353,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         // 本地/局域网网络源: VLC 式小缓冲。在线档的 cache-secs 会被 mpv
         // 抬成前向预读目标, 大跨度 seek 后等于把十几秒内容重新下载一遍;
         // 局域网随机访问廉价(Range -> 带偏移 SMB2 READ), 小缓冲即可
-        ...Pref.initLocalBuffer(),
+        ...Pref.initLocalBuffer()
       else if (isLive)
         ...liveBuffer
       else

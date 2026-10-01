@@ -124,8 +124,9 @@ abstract final class Pref {
     8.0,
   ];
 
-  /// 本轮预设调整中从默认档位移除的值(一次性迁移用)
-  static const Set<double> kRetiredSpeeds = {0.75, 1.25, 1.75};
+  /// 本轮预设调整中从默认档位移除的值(一次性迁移用; const Set 不允许
+  /// double 元素, 用 List + contains)
+  static const List<double> kRetiredSpeeds = [0.75, 1.25, 1.75];
 
   static List<double> get speedList {
     final saved = _video.get(VideoBoxKey.speedsList);

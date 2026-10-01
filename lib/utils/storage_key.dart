@@ -240,12 +240,6 @@ abstract final class SettingBoxKey {
       liveCdnUrl = 'liveCdnUrl',
       saveReply = 'saveReply',
       appFont = 'appFont',
-      // VR / 全景
-      vrAutoDetect = 'vrAutoDetect',
-      vrDefaultFov = 'vrDefaultFov',
-      vrEye = 'vrEye',
-      vrGyro = 'vrGyro',
-      vrStereoOutput = 'vrStereoOutput',
       // 本地板块
       localMediaSources = 'localMediaSources',
       localMediaSort = 'localMediaSort',

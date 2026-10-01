@@ -11,7 +11,6 @@ import 'package:PiliPlus/pages/setting/widgets/slider_dialog.dart';
 import 'package:PiliPlus/plugin/pl_player/models/bottom_progress_behavior.dart';
 import 'package:PiliPlus/plugin/pl_player/models/fullscreen_mode.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
-import 'package:PiliPlus/plugin/pl_player/models/vr_projection.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
@@ -297,69 +296,7 @@ List<SettingsModel> get playSettings => [
     setKey: SettingBoxKey.tempPlayerConf,
     defaultVal: false,
   ),
-  // VR / 全景
-  const SwitchModel(
-    title: 'VR/全景自动识别',
-    subtitle: '按文件名关键词(360、VR、equirect、SBS 等)自动进入全景模式',
-    leading: Icon(Icons.vrpano_outlined),
-    setKey: SettingBoxKey.vrAutoDetect,
-    defaultVal: true,
-  ),
-  NormalModel(
-    title: 'VR 默认视场角',
-    subtitle: '进入全景模式时的水平视场角, 播放中可双指缩放',
-    leading: const Icon(Icons.center_focus_strong_outlined),
-    getSubtitle: () => '当前:「${Pref.vrDefaultFov.toStringAsFixed(0)}°」',
-    onTap: _showVrFovDialog,
-  ),
-  const SwitchModel(
-    title: 'VR 立体分屏输出',
-    subtitle:
-        '左右眼分屏 + 镜头畸变，供 Cardboard 类头显使用；'
-        '手机/平板裸屏观看请保持关闭(单眼画面)',
-    leading: Icon(Icons.view_in_ar_outlined),
-    setKey: SettingBoxKey.vrStereoOutput,
-    defaultVal: false,
-  ),
-  const SwitchModel(
-    title: 'VR 陀螺仪视角',
-    subtitle: '进入 VR 操作模式后转动设备环视(参考头追), 播放中可随时开关',
-    leading: Icon(Icons.screen_rotation_outlined),
-    setKey: SettingBoxKey.vrGyro,
-    defaultVal: true,
-  ),
-  PopupModel(
-    title: 'VR 立体片源眼位',
-    leading: const Icon(Icons.visibility_outlined),
-    value: () => Pref.vrEye,
-    items: VrEye.values,
-    onSelected: (value, setState) => GStorage.setting
-        .put(SettingBoxKey.vrEye, value.index)
-        .whenComplete(setState),
-  ),
 ];
-
-Future<void> _showVrFovDialog(
-  BuildContext context,
-  VoidCallback setState,
-) async {
-  final res = await showDialog<double>(
-    context: context,
-    builder: (context) => SliderDialog(
-      title: const Text('VR 默认视场角'),
-      min: VrViewState.minFov,
-      max: VrViewState.maxFov,
-      divisions: (VrViewState.maxFov - VrViewState.minFov).round(),
-      precise: 0,
-      value: Pref.vrDefaultFov,
-      suffix: '°',
-    ),
-  );
-  if (res != null) {
-    await GStorage.setting.put(SettingBoxKey.vrDefaultFov, res);
-    setState();
-  }
-}
 
 Future<void> _showSubtitleDialog(
   BuildContext context,

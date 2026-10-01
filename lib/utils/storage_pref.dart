@@ -34,7 +34,6 @@ import 'package:PiliPlus/plugin/pl_player/models/bottom_progress_behavior.dart';
 import 'package:PiliPlus/plugin/pl_player/models/fullscreen_mode.dart';
 import 'package:PiliPlus/plugin/pl_player/models/hwdec_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
-import 'package:PiliPlus/plugin/pl_player/models/vr_projection.dart';
 import 'package:PiliPlus/utils/device_utils.dart';
 import 'package:PiliPlus/utils/extension/iterable_ext.dart';
 import 'package:PiliPlus/utils/global_data.dart';
@@ -1118,26 +1117,6 @@ abstract final class Pref {
   static bool get enableEmoteTooltip =>
       _setting.get(SettingBoxKey.enableEmoteTooltip, defaultValue: false);
 
-  // VR / 全景
-
-  /// 按文件名关键词自动识别全景片源
-  static bool get vrAutoDetect =>
-      _setting.get(SettingBoxKey.vrAutoDetect, defaultValue: true);
-
-  /// VR 默认水平视场角
-  static double get vrDefaultFov =>
-      _setting.get(SettingBoxKey.vrDefaultFov, defaultValue: 90.0);
-
-  /// 进入 VR 操作模式时默认开启陀螺仪视角
-  static bool get vrGyro =>
-      _setting.get(SettingBoxKey.vrGyro, defaultValue: true);
-
-  /// VR 立体分屏输出(Cardboard 头显模式): 左右眼各渲染一次并做镜头畸变。
-  ///
-  /// 默认关(手机裸屏用单眼画面即可), 播放中可在 VR 控制面板随时切换。
-  static bool get vrStereoOutput =>
-      _setting.get(SettingBoxKey.vrStereoOutput, defaultValue: false);
-
   // 本地板块
 
   /// 列表排序方式
@@ -1154,15 +1133,4 @@ abstract final class Pref {
   /// 是否显示隐藏文件(以 . 开头)
   static bool get localMediaShowHidden =>
       _setting.get(SettingBoxKey.localMediaShowHidden, defaultValue: false);
-
-  /// 双目片源默认眼位
-  static VrEye get vrEye {
-    final index = _setting.get(SettingBoxKey.vrEye);
-    if (index is int) {
-      if (VrEye.values.elementAtOrNull(index) case final eye?) {
-        return eye;
-      }
-    }
-    return VrEye.left;
-  }
 }

@@ -39,7 +39,6 @@ import 'package:PiliPlus/pages/video/introduction/local_media/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/data_source.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
-import 'package:PiliPlus/plugin/pl_player/models/vr_projection.dart';
 import 'package:PiliPlus/services/shutdown_timer_service.dart'
     show shutdownTimerService, ShutdownPanel;
 import 'package:PiliPlus/utils/accounts.dart';
@@ -501,129 +500,6 @@ class HeaderControlState extends State<HeaderControl>
                   descPosType: .subtitle,
                   descStyle: subTitleStyle,
                 ),
-                PopupListTile<VrProjection>(
-                  dense: true,
-                  leading: const Icon(Icons.vrpano_outlined, size: 20),
-                  title: const Text('VR/全景', style: titleStyle),
-                  titleStyle: theme.textTheme.bodyLarge,
-                  value: () {
-                    final value = plPlayerController.vrProjection.value;
-                    return (value, value.label);
-                  },
-                  itemBuilder: (_) => enumItemBuilder(VrProjection.values),
-                  onSelected: (value, setState) {
-                    // VR 重投影在定制 libmpv 内完成, 选布局即生效,
-                    // 弹幕/字幕/手势等播放器能力全部保留
-                    plPlayerController.setVrProjection(value);
-                    setState();
-                  },
-                  descPosType: .subtitle,
-                  descStyle: subTitleStyle,
-                ),
-                if (plPlayerController.vrEnabled) ...[
-                  ListTile(
-                    dense: true,
-                    onTap: () {
-                      Get.back();
-                      plPlayerController.setVrControlMode(
-                        !plPlayerController.vrControlMode.value,
-                      );
-                    },
-                    leading: const Icon(Icons.gesture_outlined, size: 20),
-                    title: const Text('VR 操作模式', style: titleStyle),
-                    subtitle: Text(
-                      plPlayerController.vrControlMode.value
-                          ? '已接管手势：拖拽环视、双指缩放视场角'
-                          : '未接管：拖拽仍是进退/音量，点击开启后再操作视角',
-                      style: subTitleStyle,
-                    ),
-                  ),
-                  Obx(
-                    () => ListTile(
-                      dense: true,
-                      onTap: () => plPlayerController.setVrGyro(
-                        !plPlayerController.vrGyroEnabled.value,
-                      ),
-                      leading: const Icon(
-                        Icons.screen_rotation_outlined,
-                        size: 20,
-                      ),
-                      title: const Text('陀螺仪视角', style: titleStyle),
-                      subtitle: Text(
-                        plPlayerController.vrGyroEnabled.value
-                            ? '已开启：转动设备环视(头追在 mpv 内逐帧运行)'
-                            : '未开启：开启后转动设备即可环视',
-                        style: subTitleStyle,
-                      ),
-                      trailing: Icon(
-                        plPlayerController.vrGyroEnabled.value
-                            ? Icons.toggle_on
-                            : Icons.toggle_off,
-                        size: 32,
-                        color: plPlayerController.vrGyroEnabled.value
-                            ? theme.colorScheme.primary
-                            : null,
-                      ),
-                    ),
-                  ),
-                  Obx(
-                    () => ListTile(
-                      dense: true,
-                      onTap: () => plPlayerController.setVrStereoOutput(
-                        !plPlayerController.vrStereoOutput.value,
-                      ),
-                      leading: const Icon(Icons.view_in_ar_outlined, size: 20),
-                      title: const Text('立体分屏输出', style: titleStyle),
-                      subtitle: Text(
-                        plPlayerController.vrStereoOutput.value
-                            ? '已开启：左右眼分屏 + 镜头畸变(Cardboard 头显)'
-                            : '未开启：单眼画面, 适合手机/平板裸屏观看',
-                        style: subTitleStyle,
-                      ),
-                      trailing: Icon(
-                        plPlayerController.vrStereoOutput.value
-                            ? Icons.toggle_on
-                            : Icons.toggle_off,
-                        size: 32,
-                        color: plPlayerController.vrStereoOutput.value
-                            ? theme.colorScheme.primary
-                            : null,
-                      ),
-                    ),
-                  ),
-                  if (plPlayerController.vrProjection.value.isStereo &&
-                      !plPlayerController.vrStereoOutput.value)
-                    PopupListTile<VrEye>(
-                      dense: true,
-                      leading: const Icon(Icons.visibility_outlined, size: 20),
-                      title: const Text('VR 眼位', style: titleStyle),
-                      titleStyle: theme.textTheme.bodyLarge,
-                      value: () {
-                        final value = plPlayerController.vrEye.value;
-                        return (value, value.label);
-                      },
-                      itemBuilder: (_) => enumItemBuilder(VrEye.values),
-                      onSelected: (value, setState) {
-                        plPlayerController.setVrEye(value);
-                        setState();
-                      },
-                      descPosType: .subtitle,
-                      descStyle: subTitleStyle,
-                    ),
-                  ListTile(
-                    dense: true,
-                    onTap: () {
-                      Get.back();
-                      plPlayerController.resetVrView();
-                      SmartDialog.showToast('视角已摆正，双指可缩放');
-                    },
-                    leading: const Icon(
-                      Icons.center_focus_strong_outlined,
-                      size: 20,
-                    ),
-                    title: const Text('VR 重置视角', style: titleStyle),
-                  ),
-                ],
                 if (PlatformUtils.isMobile)
                   if (plPlayerController.videoPlayerController
                       case final player?)

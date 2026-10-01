@@ -29,7 +29,6 @@ import 'package:PiliPlus/plugin/pl_player/models/heart_beat_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/models/video_fit_type.dart';
-import 'package:PiliPlus/plugin/pl_player/models/vr_projection.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/accounts.dart';
@@ -619,27 +618,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     bool autoFullScreenFlag = false,
     // 本地/局域网媒体: 关闭一切 B 站上报与请求
     bool isLocalMedia = false,
-    // VR/全景片源布局, 为 null 时按设置自动识别
-    VrProjection? vrProjection,
-
-    /// 用于 VR 自动识别的"文件名"。
-    ///
-    /// 不能一律拿 `dataSource.videoSource` 去猜: SMB 播放走本机回环代理,
-    /// 地址形如 `http://127.0.0.1:54321/s/<token>`, 里面根本没有原文件名,
-    /// `360`/`sbs` 之类关键词全部丢失, 自动识别必然失效。
-    String? mediaName,
   }) async {
     try {
       _processing = true;
       this.isLive = isLive;
       this.isLocalMedia = isLocalMedia;
-      // 自动识别只对本地/局域网媒体生效: 在线视频地址里常带 360/1080p 之类
-      // 的清晰度字样, 误判会直接把正常视频弄花, 在线内容请手动开启
-      _initVrState(
-        vrProjection,
-        mediaName ?? dataSource.videoSource,
-        autoDetect: isLocalMedia,
-      );
       _videoType = videoType ?? VideoType.ugc;
       this.width = width;
       this.height = height;
@@ -728,8 +711,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         setting.put(SettingBoxKey.superResolutionType, type.index);
       }
     }
-    // VR 重投影在 mpv 渲染链末端做(平面画面 -> 球面), 用户着色器作用在
-    // 之前的 MAIN 阶段, 两者不再互斥, 超分辨率对全景片源照常生效。
     pp ??= _videoPlayerController!;
     switch (type) {
       case SuperResolutionType.disable:
@@ -883,378 +864,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     );
   }
 
-  // ==================== VR / 全景 ====================
-  //
-  // VR 重投影在 **mpv 内部**完成(本分支定制的 libmpv, 构建见 tool/libmpv-vr,
-  // 设计见 docs/piliplayer.md §15): 硬解之后的常规渲染链先输出"平面画面",
-  // 再由球面网格重投影到屏幕(渲染数学与 Cardboard OrientationEKF 头追移植自
-  // xl_player); 头追在 libmpv 的 native 侧逐帧运行, 不经过 Dart。
-  // Dart 侧只负责下发 mpv 属性:
-  //
-  //   vr / vr-layout / vr-projection / vr-eye / vr-stereo-output
-  //   vr-fov / vr-yaw / vr-pitch / vr-head-tracking / vr-reset-view
-  //
-  // 这些属性在 mpv 侧是"热参数": 改动**不会**触发渲染链重建或 GLSL 重编译
-  // (那是旧用户着色器方案的根本限制, 见 docs/piliplayer.md §9.1),
-  // 拖拽跟手下发即可, 也不再有"变体预算"。
-
-  /// 当前片源的立体布局, [VrProjection.off] 表示普通视频
-  final Rx<VrProjection> vrProjection = Rx<VrProjection>(VrProjection.off);
-
-  /// VR 操作模式(参考 PiliPlus#364 提出的"切换操作模式"方案)。
-  ///
-  /// 开启后由 `VrControlLayer` 接管手势, 播放器原有手势(左右进退、
-  /// 上下亮度/音量、上下滑全屏、双指缩放画面)全部让位, 因此不会与
-  /// PiliPlus 自身的双指缩放冲突; 退出后立刻恢复常规操作(方便进退/调音量)。
-  final RxBool vrControlMode = RxBool(false);
-
-  /// 屏幕按钮的步进量: 每次转动 10°, 视场角每次变化 8°
-  static const double vrStepDeg = 10.0;
-  static const double vrFovStep = 8.0;
-
-  /// 双目片源渲染哪只眼睛(单屏输出只显示一只; 立体分屏输出时忽略)
-  late final Rx<VrEye> vrEye = Rx<VrEye>(Pref.vrEye);
-
-  /// 立体分屏输出(Cardboard 头显模式): 左右眼各渲染一次并做镜头畸变。
-  /// 默认关, 手机裸屏直接观看用单眼画面。
-  late final RxBool vrStereoOutput = RxBool(Pref.vrStereoOutput);
-
-  /// 当前视角(手动分量)。头追开启时实际画面朝向 = 头姿 × 手动偏移,
-  /// 头姿在 native 侧维护; 这里只记录手动部分, 供读数显示与拖拽。
-  late final Rx<VrViewState> vrView = Rx<VrViewState>(
-    VrViewState(fov: Pref.vrDefaultFov),
-  );
-
-  bool get vrEnabled => vrProjection.value.enabled;
-
-  /// 当前 libmpv 是否带 VR 渲染补丁(本分支 CI 构建的安卓 arm64 包)。
-  /// 播放器创建后探测一次; 未打补丁的平台(桌面)或旧包上, VR 入口会明确
-  /// 提示不可用, 而不是静默没反应。
-  final RxBool vrMpvSupported = RxBool(false);
-
-  /// 新播放器实例创建后需要先探测一次 VR 支持(见 `_createVideoController`)
-  bool _vrProbePending = false;
-
-  /// 本 fork 的 media_kit 里 `Player` 就是 `NativePlayer`(typedef),
-  /// setProperty/getProperty 都是直连 libmpv 的同步 FFI 调用。
-  NativePlayer? get _vrNativePlayer => _videoPlayerController;
-
-  /// 探测 libmpv 是否支持 VR: 补丁把 `vr` 注册成了全局属性(flag, 读到
-  /// yes/no); 未打补丁的 libmpv 对不存在的属性返回空串。
-  void _detectVrSupport() {
-    final player = _vrNativePlayer;
-    if (player == null) {
-      vrMpvSupported.value = false;
-      return;
-    }
-    try {
-      final probe = player.getProperty('vr');
-      vrMpvSupported.value = probe == 'yes' || probe == 'no';
-    } catch (_) {
-      vrMpvSupported.value = false;
-    }
-    if (!vrMpvSupported.value && vrEnabled && Platform.isAndroid) {
-      vrControlMode.value = false;
-      setVrGyro(false, persist: false, toast: false);
-      SmartDialog.showToast('当前 libmpv 不含 VR 渲染支持，请安装本分支 CI 构建的包');
-    }
-  }
-
-  /// 节流: setProperty 是直连 FFI 的同步调用, 单次开销可忽略, 但每次属性
-  /// 写入都会让 mpv 请求一次重绘, 拖拽期间合并到 ~30ms 一次,
-  /// 手势结束用 force 尾随补发, 保证最终视角与手指位置一致。
-  static const int vrApplyIntervalMs = 30;
-  int _vrLastApplyMs = 0;
-  Timer? _vrApplyTimer;
-
-  void _initVrState(
-    VrProjection? hint,
-    String source, {
-    bool autoDetect = false,
-  }) {
-    var projection = hint;
-    if (projection == null && autoDetect && Pref.vrAutoDetect) {
-      final detected = VrProjection.detectFromName(mediaName(source));
-      if (detected.enabled) {
-        projection = detected;
-      }
-    }
-    vrProjection.value = projection ?? VrProjection.off;
-    vrView.value = VrViewState(fov: Pref.vrDefaultFov);
-    _vrLastApplyMs = 0;
-    if (!vrEnabled) {
-      vrControlMode.value = false;
-      setVrGyro(false, persist: false, toast: false);
-      return;
-    }
-    if (!Platform.isAndroid) {
-      // 桌面端 libmpv 未打 VR 补丁: 明确提示, 不进入操作模式
-      vrControlMode.value = false;
-      setVrGyro(false, persist: false, toast: false);
-      SmartDialog.showToast('当前平台的 libmpv 不支持 VR 渲染(仅安卓)');
-      return;
-    }
-    vrControlMode.value = true;
-    setVrGyro(Pref.vrGyro, persist: false, toast: false);
-    SmartDialog.showToast(
-      '已识别为${vrProjection.value.label}片源，已进入 VR 操作模式\n'
-      '单指拖拽环视，双指缩放视场角，也可用屏幕按钮微调',
-      displayTime: const Duration(milliseconds: 3000),
-    );
-  }
-
-  /// 从路径/URL 中取出文件名
-  static String mediaName(String source) {
-    var name = source;
-    final query = name.indexOf('?');
-    if (query >= 0) {
-      name = name.substring(0, query);
-    }
-    final slash = name.lastIndexOf('/');
-    return slash >= 0 ? name.substring(slash + 1) : name;
-  }
-
-  /// 进入/退出 VR 操作模式
-  void setVrControlMode(bool value) {
-    if (value && !vrEnabled) {
-      SmartDialog.showToast('请先在「播放器设置 → VR/全景」选择片源布局');
-      return;
-    }
-    if (vrControlMode.value == value) {
-      return;
-    }
-    vrControlMode.value = value;
-    if (value) {
-      // 进入时强制下发一次: 单例播放器可能在属性下发之前就已创建
-      applyVrView(force: true);
-      // 头追跟随设置项自动启停(退出控制模式即停, 不与常规手势抢方向)
-      setVrGyro(Pref.vrGyro, persist: false, toast: false);
-      SmartDialog.showToast(
-        'VR 操作模式：单指拖拽环视，双指缩放视场角\n点按顶部提示条可退回常规操作',
-        displayTime: const Duration(milliseconds: 3000),
-      );
-    } else {
-      setVrGyro(false, persist: false, toast: false);
-    }
-  }
-
-  /// 切换片源布局
-  Future<void> setVrProjection(
-    VrProjection projection, {
-    bool resetView = true,
-  }) async {
-    if (projection.enabled && !vrMpvSupported.value) {
-      SmartDialog.showToast(
-        Platform.isAndroid
-            ? '当前 libmpv 不含 VR 渲染支持，请安装本分支 CI 构建的包'
-            : '当前平台的 libmpv 不支持 VR 渲染(仅安卓)',
-      );
-      return;
-    }
-    vrProjection.value = projection;
-    if (resetView) {
-      vrView.value = VrViewState(fov: vrView.value.fov);
-    }
-    if (projection.enabled) {
-      applyVrView(force: true);
-      // 选定布局即进入 VR 操作模式, 可随时退出以使用常规手势
-      vrControlMode.value = true;
-      setVrGyro(Pref.vrGyro, persist: false, toast: false);
-    } else {
-      vrControlMode.value = false;
-      setVrGyro(false, persist: false, toast: false);
-      // 退出 VR: 下发 vr=no, 画面回到常规渲染(超分辨率着色器与 VR
-      // 不再互斥, 无需恢复处理)
-      applyVrView(force: true);
-    }
-  }
-
-  Future<void> setVrEye(VrEye eye) async {
-    if (vrEye.value == eye) {
-      return;
-    }
-    vrEye.value = eye;
-    applyVrView(force: true);
-  }
-
-  /// 立体分屏输出开关(Cardboard 头显模式)
-  void setVrStereoOutput(bool value, {bool persist = true}) {
-    if (persist) {
-      GStorage.setting.put(SettingBoxKey.vrStereoOutput, value);
-    }
-    if (vrStereoOutput.value == value) {
-      return;
-    }
-    vrStereoOutput.value = value;
-    applyVrView(force: true);
-  }
-
-  /// 屏幕按钮步进: 偏航/俯仰/视场角
-  void vrStep({double dyaw = 0, double dpitch = 0, double dfov = 0}) {
-    if (!vrEnabled) {
-      return;
-    }
-    final cur = vrView.value;
-    vrView.value = cur
-        .copyWith(
-          yaw: cur.yaw + dyaw,
-          pitch: cur.pitch + dpitch,
-          fov: (cur.fov + dfov).clamp(
-            VrViewState.minFov,
-            VrViewState.maxFov,
-          ),
-        )
-        .clamped(vrProjection.value);
-    applyVrView();
-  }
-
-  /// 单指拖拽环视
-  void onVrLook(
-    double dx,
-    double dy, {
-    required double width,
-    required double height,
-  }) {
-    if (!vrEnabled) {
-      return;
-    }
-    final cur = vrView.value;
-    // 一屏宽度对应 1.5 倍水平视场角
-    final scale = cur.fov * 1.5;
-    vrView.value = cur
-        .copyWith(
-          yaw: cur.yaw - dx * scale / max(width, 1.0),
-          pitch: cur.pitch + dy * scale / max(height, 1.0),
-        )
-        .clamped(vrProjection.value);
-    applyVrView();
-  }
-
-  /// 设置水平视场角(双指缩放的绝对映射)
-  void setVrFov(double fov) {
-    if (!vrEnabled) {
-      return;
-    }
-    vrView.value = vrView.value
-        .copyWith(fov: fov.clamp(VrViewState.minFov, VrViewState.maxFov))
-        .clamped(vrProjection.value);
-    applyVrView();
-  }
-
-  /// 双指缩放的相对映射
-  void onVrZoom(double factor) {
-    if (!vrEnabled || factor <= 0) {
-      return;
-    }
-    setVrFov(vrView.value.fov / factor);
-  }
-
-  // ==================== VR 头追 ====================
-
-  /// 头追开关(运行时; 新会话的默认值见 `Pref.vrGyro`)。
-  /// 实现在 libmpv native 侧(NDK 传感器线程 + Cardboard OrientationEKF,
-  /// 移植自 xl_player, 含 33ms 前视补偿), Dart 只下发 `vr-head-tracking`
-  /// 属性; 拖拽/按钮的手动偏移与头姿在 native 侧叠加。
-  final RxBool vrGyroEnabled = RxBool(false);
-
-  void setVrGyro(bool value, {bool persist = true, bool toast = true}) {
-    if (value && !vrEnabled) {
-      if (toast) {
-        SmartDialog.showToast('请先在「播放器设置 → VR/全景」选择片源布局');
-      }
-      return;
-    }
-    if (persist) {
-      GStorage.setting.put(SettingBoxKey.vrGyro, value);
-    }
-    if (vrGyroEnabled.value == value) {
-      return;
-    }
-    vrGyroEnabled.value = value;
-    applyVrView(force: true);
-  }
-
-  /// 重置视角: 手动偏移清零, 并让 native 以当前头姿作为新的参考朝向
-  /// (`vr-reset-view` 是递增计数, mpv 侧检测到变化才动作)
-  int _vrResetSeq = 0;
-  void resetVrView() {
-    vrView.value = VrViewState(fov: vrView.value.fov);
-    _vrResetSeq++;
-    final player = _vrNativePlayer;
-    if (player != null && vrMpvSupported.value) {
-      try {
-        player.setProperty('vr-reset-view', '$_vrResetSeq');
-      } catch (_) {
-        // 下发失败不阻断: 手动偏移已经清零
-      }
-    }
-    applyVrView(force: true);
-  }
-
-  /// 把当前视角/布局应用到 mpv(节流 + 尾随下发)
-  void applyVrView({bool force = false}) {
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final elapsed = now - _vrLastApplyMs;
-    if (!force && elapsed < vrApplyIntervalMs) {
-      _vrApplyTimer?.cancel();
-      _vrApplyTimer = Timer(
-        Duration(milliseconds: vrApplyIntervalMs - elapsed),
-        () {
-          _vrApplyTimer = null;
-          _vrLastApplyMs = DateTime.now().millisecondsSinceEpoch;
-          _applyVrProperties();
-        },
-      );
-      return;
-    }
-    _vrApplyTimer?.cancel();
-    _vrApplyTimer = null;
-    _vrLastApplyMs = now;
-    _applyVrProperties();
-  }
-
-  /// 全量下发 VR 属性。setProperty 是同步 FFI 调用, 一轮十来个,
-  /// 开销可忽略; 属性值没变化时 mpv 内部也不会产生额外动作。
-  void _applyVrProperties() {
-    final player = _vrNativePlayer;
-    if (player == null || !vrMpvSupported.value) {
-      return;
-    }
-    final projection = vrProjection.value;
-    final view = vrView.value;
-    try {
-      player.setProperty('vr', projection.enabled ? 'yes' : 'no');
-      if (!projection.enabled) {
-        return;
-      }
-      player.setProperty('vr-layout', projection.mpvLayout);
-      player.setProperty('vr-projection', projection.mpvCoverage);
-      player
-          .setProperty('vr-eye', vrEye.value == VrEye.left ? 'left' : 'right');
-      player
-          .setProperty('vr-stereo-output', vrStereoOutput.value ? 'yes' : 'no');
-      player.setProperty('vr-fov', view.fov.toStringAsFixed(2));
-      player.setProperty('vr-yaw', view.yaw.toStringAsFixed(2));
-      player.setProperty('vr-pitch', view.pitch.toStringAsFixed(2));
-      player
-          .setProperty('vr-head-tracking', vrGyroEnabled.value ? 'yes' : 'no');
-      vrError.value = null;
-    } catch (err) {
-      _reportVrError('下发 VR 属性失败: $err');
-    }
-  }
-
-  void _reportVrError(String message) {
-    vrError.value = message;
-    SmartDialog.showToast(
-      'VR 未生效: $message',
-      displayTime: const Duration(seconds: 6),
-    );
-  }
-
-  /// 最近一次 VR 相关错误, 便于定位"操作没反应"的问题
-  final RxnString vrError = RxnString();
-
   Future<Player> _initPlayer() async {
     assert(_videoPlayerController == null);
 
@@ -1300,7 +909,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     _startListeners(player);
 
-    _vrProbePending = true;
     return player;
   }
 
@@ -1332,18 +940,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       if (isAnim && superResolutionType.value != .disable) {
         await setShader();
       }
-    }
-
-    // VR 属性每次装载新源都要重新下发: PlPlayerController 是单例,
-    // 切集/换视频时播放器不会重建; 非 VR 片源也要下发一次 vr=no,
-    // 防止复用播放器上残留着上一个片源的 VR 状态。
-    // (新播放器先探测一次 libmpv 是否带 VR 补丁)
-    if (_vrProbePending) {
-      _vrProbePending = false;
-      _detectVrSupport();
-    }
-    if (vrMpvSupported.value) {
-      _applyVrProperties();
     }
 
     final Map<String, String> extras = {
@@ -2103,15 +1699,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     danmakuController = null;
     mpvTracks.value = const Tracks();
     currentTrack.value = const Track();
-    // VR 状态是单次播放会话的, 播放器销毁后复位
-    // (头追随 mpv 实例一起销毁, Dart 侧没有需要停的传感器)
-    vrProjection.value = VrProjection.off;
-    vrControlMode.value = false;
-    vrError.value = null;
-    vrGyroEnabled.value = false;
-    vrMpvSupported.value = false;
-    _vrApplyTimer?.cancel();
-    _vrApplyTimer = null;
     isLocalMedia = false;
     _stopOrientationListener();
     _disableAutoEnterPip();

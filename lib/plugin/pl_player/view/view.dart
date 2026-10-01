@@ -50,7 +50,6 @@ import 'package:PiliPlus/plugin/pl_player/widgets/common_btn.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/forward_seek.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/mpv_convert_webp.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/play_pause_btn.dart';
-import 'package:PiliPlus/plugin/pl_player/widgets/vr_control_layer.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
 import 'package:PiliPlus/utils/cache_manager.dart';
 import 'package:PiliPlus/utils/connectivity_utils.dart';
@@ -1394,13 +1393,6 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   }
 
   void _onPointerDown(PointerDownEvent event) {
-    // VR 操作模式: 手势全部让位给 VrControlLayer(它在控件树上层)。
-    // 这里的 Listener 仍会收到 pointer down(子节点也参与命中测试),
-    // 只要不再把 pointer 喂给 tap/双击/长按/拖拽识别器, 竞技场里就只剩
-    // VR 层的手势, 单指拖拽不会再被进度/音量/亮度抢走。
-    if (plPlayerController.vrControlMode.value) {
-      return;
-    }
     if (PlatformUtils.isDesktop) {
       final buttons = event.buttons;
       final isSecondaryBtn = buttons == kSecondaryMouseButton;
@@ -1859,40 +1851,6 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                 )
               : const SizedBox.shrink(),
         ),
-        // VR: 未进入操作模式时给出入口(进入后由控制层自己提供退出入口)
-        Obx(
-          () =>
-              plPlayerController.vrEnabled &&
-                      !plPlayerController.vrControlMode.value &&
-                      plPlayerController.showControls.value
-              ? Align(
-                  alignment: Alignment.bottomCenter,
-                  child: Padding(
-                    padding: const EdgeInsets.only(bottom: 145),
-                    child: FilledButton.tonal(
-                      style: FilledButton.styleFrom(
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        backgroundColor: colorScheme.secondaryContainer
-                            .withValues(alpha: 0.8),
-                        visualDensity: VisualDensity.compact,
-                        padding: const EdgeInsets.all(15),
-                        shape: const RoundedRectangleBorder(
-                          borderRadius: BorderRadius.all(
-                            Radius.circular(6),
-                          ),
-                        ),
-                      ),
-                      // VR 在 mpv 内重投影(定制 libmpv), 按钮只是接管手势,
-                      // 全程留在本页: 弹幕/字幕/常规控件都还在
-                      onPressed: () =>
-                          plPlayerController.setVrControlMode(true),
-                      child: const Text('VR 操作'),
-                    ),
-                  ),
-                )
-              : const SizedBox.shrink(),
-        ),
-
         /// 进度条 live模式下禁用
         if (!isLive)
           Positioned(
@@ -2211,22 +2169,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       width: maxWidth,
       height: maxHeight,
       color: widget.fill,
-      child: Obx(() {
-        final viewer = _buildInteractiveViewer();
-        // VR 操作模式: 套上自带手势与按钮的控制层, 且 _onPointerDown 不再
-        // 把指针喂给底层识别器(见其注释), 手势由 VrControlLayer 独占,
-        // 双指缩放/单指拖拽不会被播放器的进度/音量/亮度/画面缩放抢走
-        // (参考 PiliPlus#364 的切换操作模式方案)。
-        if (plPlayerController.vrControlMode.value) {
-          return VrControlLayer(
-            controller: plPlayerController,
-            width: maxWidth,
-            height: maxHeight,
-            child: viewer,
-          );
-        }
-        return viewer;
-      }),
+      child: _buildInteractiveViewer(),
     );
   }
 

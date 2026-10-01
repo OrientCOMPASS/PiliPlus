@@ -192,10 +192,10 @@ dependency_overrides:
       path: media_kit
       ref: native
   media_kit_libs_android_video:
-    # vendored: 安卓 arm64-v8a 的 libmpv 换成本仓库 CI 构建的 VR 补丁版
-    # (见 third_party/media_kit_libs_android_video/README.md 与
-    #  .github/workflows/libmpv_vr.yml), 其余平台仍用上游 fork 的 git 依赖
-    path: third_party/media_kit_libs_android_video
+    git:
+      url: https://github.com/My-Responsitories/media-kit.git
+      path: libs/android/media_kit_libs_android_video
+      ref: native
   media_kit_libs_ios_video:
     git:
       url: https://github.com/My-Responsitories/media-kit.git

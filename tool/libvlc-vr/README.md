@@ -2,8 +2,8 @@
 
 给官方 `libvlc-all:3.7.6` 打上 VR 补丁后重新构建 arm64-v8a 的 native 库,
 再以「换心」方式组装回官方 AAR(其余 ABI、classes.jar、assets、res 逐字节保留)。
-产物发布到本仓库滚动 release **`libvlc-vr`**, app 的 gradle
-(`android/app/build.gradle.kts`)按 sha256 钉死下载。
+产物发布到本仓库滚动 release **`libvlc-vr`**(AAR + 同名 `.sha256` 边车),
+app 的 gradle(`android/app/build.gradle.kts`)下载后按边车校验完整性。
 
 设计沿革与决策记录见 `docs/piliplayer.md` §18;整体模式沿用第十轮的
 `tool/libmpv-vr`(补丁入库 + CI 按需拉源码 + 滚动 release + 换心)。
@@ -74,8 +74,9 @@ display→vout→input 链继承,已在 `src/misc/variables.c`/`src/input/item.c
 libc++_shared)→ `strings` 自检(`vr-coverage`、`piliplus-vr1` 必须编进
 libvlc.so)→ 发布到滚动 release `libvlc-vr`。
 
-资产名固定为 `libvlc-all-3.7.6-pvr1-arm64-v8a.aar`:**同名资产内容永不变更**
-(补丁迭代一律升 `pvr2`、`pvr3`…),因此 app 侧 gradle 可以 sha256 钉死。
+资产名固定为 `libvlc-all-3.7.6-pvr1-arm64-v8a.aar`,附 `.sha256` 边车:
+app 侧 gradle 下载后按边车校验(构建不是字节级可重现的, 不做跨构建钉死;
+补丁语义迭代一律升 `pvr2`、`pvr3`… 新资产名, 旧名内容不再变更)。
 
 ## 本地复现(不在沙盒内做,仅供参考)
 

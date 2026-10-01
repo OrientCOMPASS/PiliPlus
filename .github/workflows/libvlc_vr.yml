@@ -191,6 +191,9 @@ jobs:
               run: |
                   set -euo pipefail
                   cd out
+                  # publish 作业没有 checkout, gh 需要显式 --repo(否则报
+                  # "not a git repository")
+                  gh_repo=(-R "$GITHUB_REPOSITORY")
                   sha="$(cut -d' ' -f1 "$ASSET_NAME.sha256")"
                   notes="VR 版 libvlc-all (arm64-v8a) — 由 PiliPlus 提交 ${GITHUB_SHA} 构建。
 
@@ -198,14 +201,14 @@ jobs:
                   - 补丁: tool/libvlc-vr/patches/vlc/0001(vr-projection / vr-layout / vr-coverage / vr-eye + changeset 标记 piliplus-vr1)
                   - 换心: 仅替换 jni/arm64-v8a/{libvlc,libvlcjni,libc++_shared}.so, AAR 其余内容与官方逐字节一致
                   - sha256: ${sha}"
-                  if ! gh release view libvlc-vr >/dev/null 2>&1; then
-                    gh release create libvlc-vr --prerelease \
+                  if ! gh release view libvlc-vr "${gh_repo[@]}" >/dev/null 2>&1; then
+                    gh release create libvlc-vr "${gh_repo[@]}" --prerelease \
                       --title "libvlc VR (arm64-v8a) 滚动构建" --notes "$notes"
                   else
-                    gh release edit libvlc-vr --notes "$notes"
+                    gh release edit libvlc-vr "${gh_repo[@]}" --notes "$notes"
                   fi
-                  gh release upload libvlc-vr --clobber "$ASSET_NAME" "$ASSET_NAME.sha256"
+                  gh release upload libvlc-vr "${gh_repo[@]}" --clobber "$ASSET_NAME" "$ASSET_NAME.sha256"
                   echo "::notice::已发布 ${ASSET_NAME} (sha256 ${sha}) 到 release libvlc-vr"
                   echo "### libvlc-vr 已发布" >> "$GITHUB_STEP_SUMMARY"
                   echo "- 资产: \`${ASSET_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
-                  echo "- sha256: \`${sha}\`(把它填进 android/app/build.gradle.kts 的 LIBVLC_VR_SHA256)" >> "$GITHUB_STEP_SUMMARY"
+                  echo "- sha256: \`${sha}\`(app 侧 gradle 按同名 .sha256 边车校验, 无需改动)" >> "$GITHUB_STEP_SUMMARY"

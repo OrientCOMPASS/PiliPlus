@@ -407,7 +407,7 @@ class _VlcPlayerPageState extends State<VlcPlayerPage> {
   List<Widget> _buildControls() {
     return [
       // 顶栏(渐变底, 白字)
-      Container(
+      DecoratedBox(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter,
@@ -421,7 +421,7 @@ class _VlcPlayerPageState extends State<VlcPlayerPage> {
             children: [
               IconButton(
                 icon: const Icon(Icons.arrow_back, color: Colors.white),
-                onPressed: () => Get.back(),
+                onPressed: Get.back,
               ),
               Expanded(
                 child: Text(
@@ -525,7 +525,7 @@ class _VlcPlayerPageState extends State<VlcPlayerPage> {
         left: 8,
         right: 8,
         bottom: 0,
-        child: Container(
+        child: DecoratedBox(
           decoration: const BoxDecoration(
             gradient: LinearGradient(
               begin: Alignment.bottomCenter,

@@ -77,7 +77,6 @@ class VlcPlayerController extends GetxController {
 
   bool _handlerBound = false;
   bool _closed = false;
-  double _rateToApply = 1.0;
 
   void _bindHandler() {
     if (_handlerBound) {
@@ -178,7 +177,6 @@ class VlcPlayerController extends GetxController {
     double rate = 1.0,
   }) async {
     _bindHandler();
-    _rateToApply = rate;
     ready.value = false;
     error.value = null;
     is360.value = false;
@@ -213,7 +211,6 @@ class VlcPlayerController extends GetxController {
 
   Future<void> setRate(double value) async {
     rate.value = value;
-    _rateToApply = value;
     await _invoke('setRate', {'rate': value});
   }
 

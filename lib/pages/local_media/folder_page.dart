@@ -30,7 +30,7 @@ class LocalFolderPage extends StatelessWidget {
           IconButton(
             tooltip: '刷新',
             icon: const Icon(Icons.refresh),
-            onPressed: () => controller.refreshVideos(),
+            onPressed: controller.refreshVideos,
           ),
         ],
       ),

@@ -89,7 +89,7 @@ class _LocalMediaPageState extends State<LocalMediaPage>
                         )
                       : const Icon(Icons.refresh),
                 ),
-                onPressed: () => _controller.rescan(),
+                onPressed: _controller.rescan,
               ),
             ),
             PopupMenuButton<VlcMediaSort>(
@@ -159,12 +159,12 @@ class _LocalMediaPageState extends State<LocalMediaPage>
           icon: Icons.video_library_outlined,
           text: '还没有索引到视频\n下拉或点右上角刷新开始扫描',
           actionLabel: '扫描',
-          onAction: () => _controller.rescan(),
+          onAction: _controller.rescan,
         );
       }
       final groups = _controller.folderGroups();
       return RefreshIndicator(
-        onRefresh: () => _controller.refreshVideos(),
+        onRefresh: _controller.refreshVideos,
         child: ListView(
           padding: const EdgeInsets.only(bottom: 24),
           children: [
@@ -310,7 +310,7 @@ class _LocalMediaPageState extends State<LocalMediaPage>
         ),
         actions: [
           TextButton(
-            onPressed: () => Get.back(),
+            onPressed: Get.back,
             child: const Text('取消'),
           ),
           FilledButton(

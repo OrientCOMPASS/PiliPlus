@@ -52,7 +52,7 @@ android {
             enableV1Signing = true
             enableV2Signing = true
         }
-    } ?: file("keystore/pili-test.jks").takeIf { it.exists() }?.let { ks ->
+    } ?: rootProject.file("keystore/pili-test.jks").takeIf { it.exists() }?.let { ks ->
         // PiliPlus test signing key (committed on purpose): keeps CI-built
         // test APKs on a stable signature so they can update each other.
         signingConfigs.create("release") {

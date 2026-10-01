@@ -1,7 +1,6 @@
 package com.example.piliplus.vlc
 
 import android.content.Context
-import android.graphics.SurfaceTexture
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener

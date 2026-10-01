@@ -24,7 +24,7 @@ import 'package:PiliPlus/models/common/video/live_quality.dart';
 import 'package:PiliPlus/models/common/video/subtitle_pref_type.dart';
 import 'package:PiliPlus/models/common/video/video_decode_type.dart';
 import 'package:PiliPlus/models/common/video/video_quality.dart';
-import 'package:PiliPlus/models/local_media/local_media_sort.dart';
+import 'package:PiliPlus/models/local_media/vlc_media.dart';
 import 'package:PiliPlus/models/user/danmaku_rule.dart';
 import 'package:PiliPlus/models/user/info.dart';
 import 'package:PiliPlus/pages/setting/pages/fullscreen_sc_size.dart'
@@ -1119,15 +1119,15 @@ abstract final class Pref {
 
   // 本地板块
 
-  /// 列表排序方式
-  static LocalMediaSort get localMediaSort {
-    final index = _setting.get(SettingBoxKey.localMediaSort);
+  /// 媒体库列表排序方式(VLC 媒体库)
+  static VlcMediaSort get vlcMediaSort {
+    final index = _setting.get(SettingBoxKey.vlcMediaSort);
     if (index is int) {
-      if (LocalMediaSort.values.elementAtOrNull(index) case final sort?) {
+      if (VlcMediaSort.values.elementAtOrNull(index) case final sort?) {
         return sort;
       }
     }
-    return LocalMediaSort.name;
+    return VlcMediaSort.folder;
   }
 
   /// 是否显示隐藏文件(以 . 开头)

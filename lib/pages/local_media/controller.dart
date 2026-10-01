@@ -1,523 +1,283 @@
-import 'package:PiliPlus/http/loading_state.dart';
-import 'package:PiliPlus/models/local_media/local_media_item.dart';
-import 'package:PiliPlus/models/local_media/local_media_source.dart';
-import 'package:PiliPlus/pages/local_media/browser.dart';
-import 'package:PiliPlus/pages/local_media/library.dart';
-import 'package:PiliPlus/pages/local_media/widgets/smb_dialogs.dart';
-import 'package:PiliPlus/pages/local_media/widgets/source_editor.dart';
-import 'package:PiliPlus/services/local_media_service.dart';
-import 'package:PiliPlus/services/smb/smb2_client.dart';
-import 'package:PiliPlus/services/smb/smb_browse.dart';
-import 'package:PiliPlus/services/smb/smb_discovery.dart';
-import 'package:PiliPlus/services/smb/smb_name.dart';
+import 'package:PiliPlus/models/local_media/vlc_media.dart';
+import 'package:PiliPlus/pages/video/vlc/vlc_player_page.dart';
+import 'package:PiliPlus/services/vlc/vlc_browser.dart';
+import 'package:PiliPlus/services/vlc/vlc_library.dart';
+import 'package:PiliPlus/utils/storage.dart';
+import 'package:PiliPlus/utils/storage_key.dart';
+import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
-import 'package:material_ui/material_ui.dart';
+import 'package:permission_handler/permission_handler.dart';
 
-/// 「本地」板块控制器: 本机媒体库(按文件夹归组) + 局域网发现 + 已保存的来源。
+/// 「本地」板块控制器: 数据全部来自 VLC 引擎(libmedialibrary 索引 +
+/// libvlc MediaBrowser 网络发现/浏览), 见 docs/piliplayer.md §17。
 class LocalMediaController extends GetxController {
-  final LocalMediaLibrary library = LocalMediaLibrary();
+  /// VLC 媒体库(libml): 扫描/索引/续播都在 native 侧持久化
+  final VlcLibrary library = VlcLibrary.instance;
 
-  /// 本机存储卷(主存储 + SD 卡/U 盘)
-  final RxList<LocalMediaSource> deviceSources = <LocalMediaSource>[].obs;
+  /// 媒体库全部视频条目(索引完成前会随扫描进度增长)
+  final RxList<VlcMediaItem> videos = <VlcMediaItem>[].obs;
 
-  /// 用户添加的网络共享(SMB / WebDAV / HTTP / FTP)
-  final RxList<LocalMediaSource> savedSources = <LocalMediaSource>[].obs;
+  /// 最近播放(libml 历史, 含无 id 的网络流)
+  final RxList<VlcMediaItem> history = <VlcMediaItem>[].obs;
 
-  /// 自动发现的 SMB 主机
-  final RxList<SmbHost> discovered = <SmbHost>[].obs;
+  final RxBool libraryLoading = false.obs;
 
-  /// 本机目录的书签(浏览页里手动收藏的)
-  List<LocalMediaSource> get deviceShortcuts => [
-    for (final s in savedSources)
-      if (s.type == LocalMediaSourceType.device) s,
-  ];
-
-  /// 网络来源的书签: 连接过的主机 + 收藏的共享/目录 + 直链
-  List<LocalMediaSource> get networkShortcuts => [
-    for (final s in savedSources)
-      if (s.type != LocalMediaSourceType.device) s,
-  ];
-
-  final RxBool scanningNetwork = false.obs;
-  final RxInt scanDone = 0.obs;
-  final RxInt scanTotal = 0.obs;
+  /// 自动发现的 SMB 共享
+  final RxList<VlcBrowseItem> shares = <VlcBrowseItem>[].obs;
+  final RxBool discovering = false.obs;
   final RxnString networkError = RxnString();
+
+  /// 手动保存的共享书签
+  final RxList<VlcSavedShare> savedShares = <VlcSavedShare>[].obs;
 
   @override
   void onInit() {
     super.onInit();
-    library.loadCache();
-    savedSources.value = LocalMediaService.loadSources();
-    refreshDevices();
-    // 第一次进入且没有缓存时自动扫描一次
-    if (library.folders.isEmpty) {
-      library.scan();
-    } else if (library.isStale) {
-      // 缓存过期(>30min)后台静默重扫: 新拷入设备/存储卡的文件应自动
-      // 出现, 而不是只有记得手动点刷新才认得。只探测权限、不弹授权框,
-      // 没权限就保持展示旧缓存(scan 自身会把错误写进 lastError, 这里跳过)。
-      _staleRescan();
+    _loadSavedShares();
+    bootstrap();
+  }
+
+  /// 权限 + 媒体库初始化 + 首次拉取(onInit 不能 await, 单独一个入口)
+  Future<void> bootstrap() async {
+    if (!await _ensurePermission()) {
+      library.lastError.value = '未获得存储读取权限，无法扫描本机视频';
+      return;
     }
+    final ok = await library.init();
+    if (!ok) {
+      return;
+    }
+    await refreshVideos();
+    // libml 的索引完成事件到达后再刷一次(边扫边出)
+    ever(library.ready, (_) => refreshVideos());
+    ever(library.busy, (busy) {
+      if (!busy) {
+        refreshVideos();
+      }
+    });
+  }
+
+  Future<bool> _ensurePermission() async {
+    try {
+      var status = await Permission.videos.status;
+      if (!status.isGranted && !status.isLimited) {
+        status = await Permission.videos.request();
+      }
+      if (status.isGranted || status.isLimited) {
+        return true;
+      }
+      // 安卓 12 及以下没有 videos 权限, 退回 storage
+      final legacy = await Permission.storage.request();
+      return legacy.isGranted || legacy.isLimited;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> refreshVideos() async {
+    libraryLoading.value = true;
+    try {
+      videos.value = await library.videos();
+      history.value = await library.history();
+    } finally {
+      libraryLoading.value = false;
+    }
+  }
+
+  Future<void> rescan({bool full = false}) async {
+    if (!await _ensurePermission()) {
+      SmartDialog.showToast('未获得存储读取权限，无法扫描本机视频');
+      return;
+    }
+    await library.rescan(full: full);
+  }
+
+  // ---------------------------------------------------------------- 排序/归组
+
+  final Rx<VlcMediaSort> sort = Rx<VlcMediaSort>(Pref.vlcMediaSort);
+
+  void setSort(VlcMediaSort value) {
+    sort.value = value;
+    GStorage.setting.put(SettingBoxKey.vlcMediaSort, value.index);
+  }
+
+  /// 按文件夹归组(参照 VLC 安卓版的文件夹视图)
+  List<VlcFolderGroup> folderGroups() {
+    final map = <String, List<VlcMediaItem>>{};
+    for (final v in videos) {
+      map.putIfAbsent(v.folderPath, () => []).add(v);
+    }
+    final groups = [
+      for (final e in map.entries)
+        VlcFolderGroup(
+          path: e.key,
+          name: _folderName(e.key),
+          items: _sorted(e.value),
+        ),
+    ]..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return groups;
+  }
+
+  List<VlcMediaItem> _sorted(List<VlcMediaItem> items) {
+    final list = List<VlcMediaItem>.of(items);
+    switch (sort.value) {
+      case VlcMediaSort.name:
+        list.sort(
+          (a, b) => a.displayName.toLowerCase().compareTo(
+            b.displayName.toLowerCase(),
+          ),
+        );
+      case VlcMediaSort.duration:
+        list.sort((a, b) => b.lengthMs.compareTo(a.lengthMs));
+      case VlcMediaSort.progress:
+        list.sort((a, b) => b.timeMs.compareTo(a.timeMs));
+      case VlcMediaSort.folder:
+        break;
+    }
+    return list;
+  }
+
+  String _folderName(String path) {
+    final i = path.lastIndexOf('/');
+    final name = i >= 0 && i < path.length - 1 ? path.substring(i + 1) : path;
+    return name.isEmpty ? '根目录' : name;
+  }
+
+  /// 某个文件夹下的视频(排序后)
+  List<VlcMediaItem> videosInFolder(String folderPath) => _sorted([
+    for (final v in videos)
+      if (v.folderPath == folderPath) v,
+  ]);
+
+  // ---------------------------------------------------------------- 网络
+
+  /// 发现局域网 SMB 共享(VLC「网络」页同款, libvlc MediaBrowser)
+  Future<void> discoverShares() async {
+    if (discovering.value) {
+      return;
+    }
+    discovering.value = true;
+    networkError.value = null;
+    shares.clear();
+    await VlcBrowser.instance.discoverShares(
+      onItem: (item) {
+        // 去重(发现服务可能重复上报)
+        if (!shares.any((e) => e.uri == item.uri)) {
+          shares.add(item);
+        }
+      },
+      onEnd: () => discovering.value = false,
+      onError: (msg) {
+        networkError.value = msg;
+        discovering.value = false;
+      },
+    );
   }
 
   @override
   void onClose() {
-    library.cancelScan();
+    VlcBrowser.instance.stop();
     super.onClose();
   }
 
-  Future<void> refreshDevices() async {
-    deviceSources.value = await LocalMediaService.deviceSources();
+  void _loadSavedShares() {
+    final raw = GStorage.setting.get(SettingBoxKey.vlcSavedShares);
+    if (raw is List) {
+      savedShares.value = [
+        for (final e in raw)
+          if (e is Map) VlcSavedShare.fromMap(e),
+      ];
+    }
   }
 
-  Future<void> _staleRescan() async {
-    if (!await LocalMediaService.hasDevicePermission()) {
+  void addSavedShare(String name, String uri) {
+    var fixed = uri.trim();
+    if (fixed.isEmpty) {
       return;
     }
-    await library.scan();
+    if (!fixed.contains('://')) {
+      fixed = 'smb://$fixed';
+    }
+    final title = name.trim().isEmpty ? fixed : name.trim();
+    savedShares.add(VlcSavedShare(name: title, uri: fixed));
+    _persistShares();
   }
 
-  Future<void> rescanLibrary() async {
-    if (!await LocalMediaService.ensureDevicePermission()) {
-      SmartDialog.showToast('未获得存储读取权限，无法扫描本机视频');
-      return;
-    }
-    await library.scan();
-    if (library.lastError.value case final err?) {
-      SmartDialog.showToast(err);
-    }
+  void removeSavedShare(VlcSavedShare share) {
+    savedShares.removeWhere((e) => e.uri == share.uri && e.name == share.name);
+    _persistShares();
   }
 
-  /// 扫描局域网里开着 SMB(445) 端口的主机
-  Future<void> discoverNetwork() async {
-    if (scanningNetwork.value) {
-      return;
-    }
-    scanningNetwork.value = true;
-    networkError.value = null;
-    scanDone.value = 0;
-    scanTotal.value = 0;
-    try {
-      final hosts = await SmbDiscovery.scan(
-        onProgress: (done, total) {
-          scanDone.value = done;
-          scanTotal.value = total;
-        },
-      );
-      discovered.value = hosts;
-      if (hosts.isEmpty) {
-        networkError.value =
-            '没有发现开启 SMB(445) 的主机。请确认与 NAS/电脑在同一局域网，'
-            '或手动添加共享地址。';
-      }
-    } catch (err) {
-      networkError.value = err.toString();
-    } finally {
-      scanningNetwork.value = false;
-    }
-  }
-
-  // ==================== 打开 ====================
-
-  /// 媒体库里的文件夹 -> 浏览页
-  Future<void> openFolder(LocalMediaFolder folder) async {
-    final source = LocalMediaSource(
-      type: LocalMediaSourceType.device,
-      name: folder.name,
-      url: folder.path,
-    );
-    final items = await library.itemsOf(folder);
-    Get.to(
-      () => LocalMediaBrowserPage(
-        source: source,
-        path: folder.path,
-        title: folder.name,
-        initialItems: items,
-      ),
+  void _persistShares() {
+    GStorage.setting.put(
+      SettingBoxKey.vlcSavedShares,
+      savedShares.map((e) => e.toMap()).toList(),
     );
   }
 
-  /// 本机存储卷 -> 浏览页
-  Future<void> openDevice(LocalMediaSource source) async {
-    if (!await LocalMediaService.ensureDevicePermission()) {
-      SmartDialog.showToast('未获得存储读取权限，无法浏览本机文件');
-      return;
-    }
-    _browse(source, source.rootPath, source.name);
-  }
+  // ---------------------------------------------------------------- 播放入口
 
-  /// 已保存的网络来源
-  Future<void> openSource(LocalMediaSource source) async {
-    if (!source.canBrowse) {
-      // 直链来源: 没有目录可浏览, 直接播放
-      final item = LocalMediaItem(
-        name: source.name,
-        uri: source.playbackBase,
-        source: source,
-      );
-      Get.to(
-        () => LocalMediaBrowserPage(
-          source: source,
-          path: '',
-          title: source.name,
-          initialItems: [item],
+  /// 播放媒体库条目(播放列表 = 同文件夹的全部视频, 起点 = libml 续播位置)
+  void playLibraryItem(VlcMediaItem item) {
+    final siblings = videosInFolder(item.folderPath);
+    final playlist = [
+      for (final s in siblings)
+        VlcPlaylistEntry(
+          uri: s.uri,
+          title: s.displayName,
+          mlId: s.id,
+          startMs: s.id == item.id && !s.finished ? s.timeMs : 0,
         ),
-      );
-      return;
-    }
-    _browse(source, source.rootPath, source.name);
-  }
-
-  void _browse(LocalMediaSource source, String path, String title) {
+    ];
+    final index = playlist.indexWhere((e) => e.uri == item.uri);
     Get.to(
-      () => LocalMediaBrowserPage(source: source, path: path, title: title),
-    );
+      () => VlcPlayerPage(playlist: playlist, initialIndex: index < 0 ? 0 : index),
+    )?.then((_) => refreshVideos());
   }
 
-  /// 连接一台发现的主机。
-  ///
-  /// **主机即目录**(第四轮改的交互, 与 VLC/资源管理器一致): 连接后直接进入
-  /// 这台主机, 它共享出来的每个目录就是里面的一级子目录。
-  /// 之前的做法是"枚举共享 -> 弹窗让用户挑一个 -> 存成一条快捷路径 -> 打开",
-  /// 想换另一个共享就得退回来重选, 而且共享列表会越攒越长。
-  /// 现在只有用户自己按浏览页右上角的「添加到快捷方式」时才会新增收藏。
-  ///
-  /// 这里仍然先做一次共享枚举, 但目的不是让用户挑, 而是:
-  ///   1. 拿服务端自报的权威主机名(NTLM CHALLENGE 的 AV_PAIR), 存成
-  ///      `smb://<主机名>` 而不是 `smb://<IP>`(IP 会变, 名字不会);
-  ///   2. 提前知道要不要账号(匿名被拒就弹一次凭据框);
-  ///   3. 把结果当作浏览页根目录的 initialItems, 省掉第二次往返。
-  /// 枚举本身失败(服务端禁用 RPC 等)才退回"手动输入共享地址"。
-  Future<void> openDiscoveredHost(
-    BuildContext context,
-    SmbHost host,
-  ) async {
-    final saved = _savedSourceForHost(host);
-    // 已经收藏过这台主机: 直接进入, 不再重新枚举、不再弹窗
-    if (saved != null && saved.isSmbHostRoot) {
-      openSource(saved);
-      return;
-    }
-    // 复用同主机已保存来源的凭据(可能是旧版本按共享保存的), 免得每次都输
-    String? user = saved?.username;
-    String? password = saved?.password;
-    var domain = saved?.domain ?? '';
-    var askedForCredentials = false;
-
-    while (true) {
-      SmartDialog.showLoading(msg: '正在连接「${host.displayName}」…');
-      try {
-        final result = await SmbBrowse.listShares(
-          host: host.address,
-          port: host.port,
-          user: user,
-          password: password,
-          domain: domain,
-        );
-        SmartDialog.dismiss();
-        if (!context.mounted) {
-          return;
-        }
-        final serverName = result.serverInfo?.bestName ?? host.name;
-        final urlHost = _urlSafeHostName(serverName) ?? host.address;
-        final source = LocalMediaSource(
-          type: LocalMediaSourceType.smb,
-          name: serverName ?? host.address,
-          // 主机级地址: 没有共享名, 浏览页把根目录解释为"列共享"
-          url: SmbBrowse.hostUri(host: urlHost, port: host.port),
-          username: user,
-          password: (password == null || password.isEmpty) ? null : password,
-          domain: domain.isEmpty ? null : domain,
-          address: SmbName.isIpLiteral(host.address) ? host.address : null,
-        );
-        await addSource(source);
-        // 共享列表已经拿到了, 直接当根目录内容用(过滤规则与服务层一致)
-        final shares = <LocalMediaItem>[
-          for (final share in result.browsable)
-            LocalMediaItem(
-              name: share.name,
-              uri: SmbBrowse.uri(
-                host: urlHost,
-                port: host.port,
-                share: share.name,
-                remotePath: '',
-              ),
-              source: source,
-              remotePath: share.name,
-              isDirectory: true,
-            ),
-        ];
-        Get.to(
-          () => LocalMediaBrowserPage(
-            source: source,
-            path: '',
-            title: source.name,
-            initialItems: shares,
+  /// 单独播放一个媒体库条目(可指定从头播); 续播仍会写回 libml
+  void playLibraryItemSingle(VlcMediaItem item, {bool fromStart = false}) {
+    Get.to(
+      () => VlcPlayerPage(
+        playlist: [
+          VlcPlaylistEntry(
+            uri: item.uri,
+            title: item.displayName,
+            mlId: item.id,
+            startMs: fromStart || item.finished ? 0 : item.timeMs,
           ),
-        );
-        return;
-      } on SmbException catch (e) {
-        SmartDialog.dismiss();
-        if (e.isAuthFailure && !askedForCredentials) {
-          askedForCredentials = true;
-          if (!context.mounted) {
-            return;
-          }
-          final creds = await showSmbCredentialsDialog(
-            context,
-            hostLabel: host.displayName,
-            initialUser: user,
-          );
-          if (creds == null) {
-            return;
-          }
-          user = creds.user.isEmpty ? null : creds.user;
-          password = creds.password;
-          domain = creds.domain;
-          continue;
-        }
-        if (!context.mounted) {
-          return;
-        }
-        // 连得上但共享枚举不可用(服务端禁用 RPC / 权限不足): 退回手动输入
-        SmartDialog.showToast('获取共享列表失败: ${e.statusText}');
-        await _manualAddHost(context, host, null, user, password, domain);
-        return;
-      } catch (e) {
-        SmartDialog.dismiss();
-        if (!context.mounted) {
-          return;
-        }
-        SmartDialog.showToast('连接失败: $e');
-        await _manualAddHost(context, host, null, user, password, domain);
-        return;
-      }
-    }
+        ],
+      ),
+    )?.then((_) => refreshVideos());
   }
 
-  /// 浏览页里把当前目录收藏成快捷方式(VLC 的 bookmark 行为)。
-  ///
-  /// 返回 null 表示当前层级不适合收藏(直链来源、或就在来源根目录上)。
-  /// 做成静态纯函数是为了能单测(不依赖 GetX/Hive)。
-  static LocalMediaSource? shortcutFor({
-    required LocalMediaSource source,
-    required String path,
-    required String title,
-  }) {
-    final name = title.isEmpty ? source.name : title;
-    return switch (source.type) {
-      LocalMediaSourceType.device => path.isEmpty
-          ? null
-          : LocalMediaSource(
-              type: LocalMediaSourceType.device,
-              name: name,
-              url: path,
-            ),
-      LocalMediaSourceType.smb => _smbShortcut(source, path, name),
-      LocalMediaSourceType.webdav => path.isEmpty || path == '/'
-          ? null
-          : LocalMediaSource(
-              type: LocalMediaSourceType.webdav,
-              name: name,
-              url: LocalMediaService.joinUrl(source.url, path),
-              username: source.username,
-              password: source.password,
-            ),
-      // 直链来源没有目录可收藏
-      LocalMediaSourceType.http || LocalMediaSourceType.ftp => null,
-    };
+  /// 播放历史/网络流条目(无播放列表)
+  void playUri(String uri, String title) {
+    Get.to(
+      () => VlcPlayerPage(
+        playlist: [VlcPlaylistEntry(uri: uri, title: title)],
+      ),
+    )?.then((_) {
+      refreshVideos();
+    });
   }
+}
 
-  static LocalMediaSource? _smbShortcut(
-    LocalMediaSource source,
-    String path,
-    String name,
-  ) {
-    final h = source.smbHost;
-    if (h == null) {
-      return null;
-    }
-    // 主机级来源: path 的第一段是共享名; 共享级来源: 共享名在 endpoint 里
-    final String? host;
-    final int port;
-    final String share;
-    final String inner;
-    if (source.isSmbHostRoot) {
-      final (s, i) = SmbBrowse.splitSharePath(path);
-      if (s.isEmpty) {
-        // 就在主机根上, 收藏它等于收藏主机本身
-        return null;
-      }
-      host = h.host;
-      port = h.port;
-      share = s;
-      inner = i;
-    } else {
-      final ep = source.smbEndpoint;
-      if (ep == null) {
-        return null;
-      }
-      host = ep.host;
-      port = ep.port;
-      share = ep.share;
-      inner = path;
-    }
-    return LocalMediaSource(
-      type: LocalMediaSourceType.smb,
-      name: name,
-      url: SmbBrowse.uri(host: host, port: port, share: share, remotePath: inner),
-      username: source.username,
-      password: source.password,
-      domain: source.domain,
-      address: source.address,
-    );
-  }
+/// 媒体库的文件夹归组
+class VlcFolderGroup {
+  const VlcFolderGroup({
+    required this.path,
+    required this.name,
+    required this.items,
+  });
 
-  /// 浏览中弹出凭据框后, 把账号写回来源(否则每进一层都要重输)
-  Future<void> updateCredentials(
-    LocalMediaSource source, {
-    String? user,
-    String? password,
-    String domain = '',
-  }) async {
-    // withCredentials 而不是 copyWith: 传 null 要能真的把旧凭据清掉,
-    // 否则"改用匿名访问"会一直带着上一次的错密码重试
-    final updated = source.withCredentials(
-      username: user,
-      password: password,
-      domain: domain,
-    );
-    final index = savedSources.indexOf(source);
-    if (index >= 0) {
-      savedSources[index] = updated;
-      await _persist();
-    } else {
-      await addSource(updated);
-    }
-  }
+  final String path;
+  final String name;
+  final List<VlcMediaItem> items;
 
-  /// 手动输入共享地址(自动枚举失败时的兜底, 预填已知信息)
-  Future<void> _manualAddHost(
-    BuildContext context,
-    SmbHost host,
-    String? serverName,
-    String? user,
-    String? password,
-    String domain,
-  ) async {
-    final preset = LocalMediaSource(
-      type: LocalMediaSourceType.smb,
-      name: host.displayName,
-      url: 'smb://${_urlSafeHostName(serverName) ?? host.address}/',
-      username: user,
-      password: (password == null || password.isEmpty) ? null : password,
-      domain: domain.isEmpty ? null : domain,
-      address: SmbName.isIpLiteral(host.address) ? host.address : null,
-    );
-    final source = await showSourceEditor(context, initial: preset);
-    if (source == null) {
-      return;
-    }
-    // 编辑器里改过 URL 也不丢 IP 兜底
-    await _testAndOpen(
-      source.address == null && preset.address != null
-          ? source.copyWith(address: preset.address)
-          : source,
-    );
-  }
+  int get count => items.length;
 
-  Future<void> _testAndOpen(LocalMediaSource source) async {
-    SmartDialog.showLoading(msg: '连接中');
-    final res = await LocalMediaService.testConnection(source);
-    SmartDialog.dismiss();
-    switch (res) {
-      case Success():
-        await addSource(source);
-        openSource(source);
-      case Error(:final errMsg):
-        SmartDialog.showToast(errMsg ?? '连接失败');
-      case _:
-        break;
-    }
-  }
-
-  /// 找到同一台主机上已保存的 SMB 来源(按 IP 或主机名匹配)。
-  /// 主机级来源(`smb://NAS`)优先: 它才是"这台主机"本身。
-  LocalMediaSource? _savedSourceForHost(SmbHost host) {
-    LocalMediaSource? fallback;
-    for (final source in savedSources) {
-      if (source.type != LocalMediaSourceType.smb) {
-        continue;
-      }
-      // 主机级来源用 smbHost, 共享级来源用 smbEndpoint
-      final h = source.smbHost;
-      if (h == null) {
-        continue;
-      }
-      final match =
-          h.host == host.address ||
-          source.address == host.address ||
-          (host.name != null && h.host == host.name);
-      if (!match) {
-        continue;
-      }
-      if (source.isSmbHostRoot) {
-        return source;
-      }
-      fallback ??= source;
-    }
-    return fallback;
-  }
-
-  /// 主机名能不能安全地写进 URL(否则退回 IP)
-  static String? _urlSafeHostName(String? name) {
-    if (name == null || name.isEmpty) {
-      return null;
-    }
-    return RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(name) ? name : null;
-  }
-
-  Future<void> addSourceFromDialog(BuildContext context) async {
-    final source = await showSourceEditor(context);
-    if (source != null) {
-      await addSource(source);
-    }
-  }
-
-  // ==================== 来源管理 ====================
-
-  Future<void> addSource(LocalMediaSource source) async {
-    if (!savedSources.contains(source)) {
-      savedSources.add(source);
-    }
-    await _persist();
-  }
-
-  Future<void> replaceSource(
-    LocalMediaSource old,
-    LocalMediaSource updated,
-  ) async {
-    final index = savedSources.indexOf(old);
-    if (index < 0) {
-      return;
-    }
-    savedSources[index] = updated;
-    await _persist();
-  }
-
-  Future<void> removeSource(LocalMediaSource source) async {
-    savedSources.remove(source);
-    await _persist();
-  }
-
-  Future<void> _persist() => LocalMediaService.saveSources(savedSources);
-
-  Future<void> editSource(BuildContext context, LocalMediaSource source) async {
-    final updated = await showSourceEditor(context, initial: source);
-    if (updated != null) {
-      await replaceSource(source, updated);
-    }
-  }
-
+  int get totalLengthMs =>
+      items.fold(0, (sum, e) => sum + e.lengthMs);
 }

@@ -30,8 +30,6 @@ import 'package:PiliPlus/pages/video/ai_conclusion/view.dart';
 import 'package:PiliPlus/pages/video/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/local/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/local/view.dart';
-import 'package:PiliPlus/pages/video/introduction/local_media/controller.dart';
-import 'package:PiliPlus/pages/video/introduction/local_media/view.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/view.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/widgets/intro_detail.dart';
@@ -95,9 +93,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
 
   // intro ctr
   late final CommonIntroController introController =
-      videoDetailController.isLocalMedia
-      ? localMediaIntroController
-      : videoDetailController.isFileSource
+      videoDetailController.isFileSource
       ? localIntroController
       : videoDetailController.isUgc
       ? ugcIntroController
@@ -105,7 +101,6 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   late final UgcIntroController ugcIntroController;
   late final PgcIntroController pgcIntroController;
   late final LocalIntroController localIntroController;
-  late final LocalMediaIntroController localMediaIntroController;
 
   bool get autoExitFullscreen =>
       videoDetailController.plPlayerController.autoExitFullscreen;
@@ -162,12 +157,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       );
     }
 
-    if (videoDetailController.isLocalMedia) {
-      localMediaIntroController = Get.put(
-        LocalMediaIntroController(),
-        tag: heroTag,
-      );
-    } else if (videoDetailController.isFileSource) {
+    if (videoDetailController.isFileSource) {
       localIntroController = Get.put(LocalIntroController(), tag: heroTag);
     } else if (videoDetailController.isUgc) {
       ugcIntroController = Get.put(UgcIntroController(), tag: heroTag);
@@ -961,9 +951,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                     child: tabBarView(
                       controller: videoDetailController.tabCtr,
                       children: [
-                        if (videoDetailController.isLocalMedia)
-                          localMediaIntroPanel()
-                        else if (videoDetailController.isFileSource)
+                        if (videoDetailController.isFileSource)
                           localIntroPanel()
                         else if (showIntro)
                           KeepAliveWrapper(
@@ -1237,12 +1225,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                 videoDetailCtr: videoDetailController,
                 heroTag: heroTag,
               ),
-              // 本地/局域网视频没有弹幕源, 连组件都不挂:
-              // PlDanmaku 的 initState 会走"离线弹幕文件"分支, 而本地媒体的
-              // dataSource 可能是 NetworkSource(SMB 代理/WebDAV/HTTP),
-              // 之前在那里 `as FileSource` 强转直接抛异常。
-              danmuWidget: (isPipMode && pipNoDanmaku) ||
-                      videoDetailController.isLocalMedia
+              danmuWidget: (isPipMode && pipNoDanmaku)
                   ? null
                   : Obx(
                       () => PlDanmaku(
@@ -1407,11 +1390,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                   ),
                 ),
               ),
-            // 本地/局域网视频没有弹幕源, 发弹幕与弹幕开关都不展示
-            if (!videoDetailController.isLocalMedia) ...[
-              SizedBox(
-                height: 32,
-                child: TextButton(
+            SizedBox(
+              height: 32,
+              child: TextButton(
                   style: const ButtonStyle(
                     padding: WidgetStatePropertyAll(.zero),
                   ),
@@ -1455,7 +1436,6 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                   },
                 ),
               ),
-            ],
             const SizedBox(width: 14),
           ],
         ),
@@ -1642,25 +1622,6 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     );
   }
 
-  Widget localMediaIntroPanel({bool needCtr = true}) {
-    return CustomScrollView(
-      controller: needCtr
-          ? videoDetailController.effectiveIntroScrollCtr
-          : null,
-      physics: !needCtr ? platformAlwaysClampingPhysics : null,
-      key: const PageStorageKey(CommonIntroController),
-      slivers: [
-        SliverPadding(
-          padding: EdgeInsets.only(top: 7, bottom: padding.bottom + 100),
-          sliver: LocalMediaIntroPanel(
-            key: videoRelatedKey,
-            heroTag: heroTag,
-          ),
-        ),
-      ],
-    );
-  }
-
   Widget videoIntro({
     double? width,
     double? height,
@@ -1668,9 +1629,6 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     bool needRelated = true,
     bool needCtr = true,
   }) {
-    if (videoDetailController.isLocalMedia) {
-      return localMediaIntroPanel(needCtr: needCtr);
-    }
     if (videoDetailController.isFileSource) {
       return localIntroPanel(needCtr: needCtr);
     }

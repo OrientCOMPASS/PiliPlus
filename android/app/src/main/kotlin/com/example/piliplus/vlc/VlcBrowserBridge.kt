@@ -9,6 +9,7 @@ import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import org.videolan.libvlc.interfaces.IMedia
+import org.videolan.libvlc.util.Dumper
 import org.videolan.libvlc.util.MediaBrowser
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -38,6 +39,7 @@ class VlcBrowserBridge(
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
 
     private var browser: MediaBrowser? = null
+    private var dumper: Dumper? = null
     private var sessionToken = 0
     private var disposed = false
 
@@ -49,7 +51,11 @@ class VlcBrowserBridge(
         if (disposed) return
         disposed = true
         channel.setMethodCallHandler(null)
-        worker.execute { releaseBrowser() }
+        worker.execute {
+            releaseBrowser()
+            try { dumper?.cancel() } catch (_: Throwable) {}
+            dumper = null
+        }
         worker.shutdown()
     }
 
@@ -74,6 +80,43 @@ class VlcBrowserBridge(
             "stop" -> {
                 sessionToken++
                 worker.execute { releaseBrowser() }
+                result.success(null)
+            }
+            // 下载网络文件到本机(libvlc Dumper, 替代原 Dart SMB 下载)
+            "dump" -> {
+                val uri = call.argument<String>("uri")
+                val dest = call.argument<String>("dest")
+                if (uri.isNullOrEmpty() || dest.isNullOrEmpty()) {
+                    result.error("bad_args", "uri/dest required", null)
+                    return
+                }
+                worker.execute {
+                    try {
+                        dumper?.cancel()
+                        val d = Dumper(Uri.parse(uri), dest, object : Dumper.Listener {
+                            override fun onProgress(progress: Float) {
+                                emit(0, "onDumpProgress", mapOf("progress" to progress))
+                            }
+
+                            override fun onFinish(success: Boolean) {
+                                dumper = null
+                                emit(0, "onDumpFinished", mapOf("ok" to success))
+                            }
+                        })
+                        dumper = d
+                        d.start()
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "dump failed", e)
+                        emit(0, "onDumpFinished", mapOf("ok" to false))
+                    }
+                }
+                result.success(null)
+            }
+            "cancelDump" -> {
+                worker.execute {
+                    try { dumper?.cancel() } catch (_: Throwable) {}
+                    dumper = null
+                }
                 result.success(null)
             }
             else -> result.notImplemented()
@@ -164,7 +207,8 @@ class VlcBrowserBridge(
     private fun emit(token: Int, name: String, args: Any?) {
         if (disposed) return
         main.post {
-            if (token != sessionToken) return@post
+            // token < 0: 与会话无关的事件(下载进度), 总是投递
+            if (token >= 0 && token != sessionToken) return@post
             try {
                 channel.invokeMethod(name, args)
             } catch (_: Throwable) {}

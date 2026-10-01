@@ -241,8 +241,8 @@ abstract final class SettingBoxKey {
       saveReply = 'saveReply',
       appFont = 'appFont',
       // 本地板块
-      localMediaSources = 'localMediaSources',
-      localMediaSort = 'localMediaSort',
+      vlcSavedShares = 'vlcSavedShares',
+      vlcMediaSort = 'vlcMediaSort',
       localMediaShowHidden = 'localMediaShowHidden',
       localMediaLibrary = 'localMediaLibrary',
       localMediaScanTime = 'localMediaScanTime',

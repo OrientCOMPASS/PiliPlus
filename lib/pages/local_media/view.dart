@@ -1,10 +1,8 @@
-import 'package:PiliPlus/http/loading_state.dart';
-import 'package:PiliPlus/models/local_media/local_media_source.dart';
+import 'package:PiliPlus/models/local_media/vlc_media.dart';
+import 'package:PiliPlus/pages/local_media/browse_page.dart';
 import 'package:PiliPlus/pages/local_media/controller.dart';
-import 'package:PiliPlus/pages/local_media/library.dart';
-import 'package:PiliPlus/services/local_media_service.dart';
-import 'package:PiliPlus/services/smb/smb_discovery.dart';
-import 'package:PiliPlus/utils/cache_manager.dart';
+import 'package:PiliPlus/pages/local_media/folder_page.dart';
+import 'package:PiliPlus/utils/duration_utils.dart';
 import 'package:PiliPlus/utils/extension/get_ext.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
@@ -12,9 +10,12 @@ import 'package:material_ui/material_ui.dart';
 
 /// 「本地」板块(顶层 Tab 之一): 本机媒体库 + 局域网。
 ///
-/// 组织方式参照 VLC 安卓版:
-///   * 媒体库: 扫描本机视频并**按文件夹排列**, 点进去就是该文件夹的播放列表
-///   * 网络: 自动发现局域网里的 SMB 主机, 也可手动添加 SMB/WebDAV/HTTP/FTP
+/// 第十二轮起由 VLC 引擎驱动(docs/piliplayer.md §17):
+///   * 媒体库: libmedialibrary 自动索引本机视频, 按文件夹归组(参照 VLC 安卓版),
+///     续播位置由 libml 原生持久化;
+///   * 网络: libvlc MediaBrowser 发现/浏览 smb、ftp、nfs、upnp,
+///     不再依赖 Dart 侧 SMB2 客户端与回环代理;
+///   * 播放: 统一进 [VlcPlayerPage](libvlc 硬解 + 原生 360°)。
 class LocalMediaPage extends StatefulWidget {
   const LocalMediaPage({super.key});
 
@@ -39,13 +40,18 @@ class _LocalMediaPageState extends State<LocalMediaPage>
   @override
   void initState() {
     super.initState();
-    // TabController 不是响应式的, 切 Tab 时用 setState 刷新右上角动作按钮
     _tabController.addListener(_onTabChanged);
   }
 
   void _onTabChanged() {
     if (mounted) {
       setState(() {});
+    }
+    // 首次切到网络 Tab 时自动发现一次
+    if (_tabController.index == 1 &&
+        _controller.shares.isEmpty &&
+        !_controller.discovering.value) {
+      _controller.discoverShares();
     }
   }
 
@@ -58,325 +64,301 @@ class _LocalMediaPageState extends State<LocalMediaPage>
 
   @override
   Widget build(BuildContext context) {
-    super.build(context); // AutomaticKeepAliveClientMixin
-    // 这里必须用真正的 `Scaffold` 而不是 `SimpleScaffold`:
-    //
-    // `SimpleScaffold` 用 `BoxConstraints.tightFor(width: ...)`(即**高度无界**)
-    // 去测量 appBar 槽位。不带 bottom 的 AppBar 恰好能自适应高度, 但带
-    // `bottom`(TabBar) 的 AppBar 内部是
-    // `Column(mainAxisSize: max, mainAxisAlignment: spaceBetween)` + `Flexible`,
-    // 高度无界时直接抛 "RenderFlex children have non-zero flex but incoming
-    // height constraints are unbounded", 整页布局失败 -> 板块一片空白。
-    // Flutter 自带的 `Scaffold` 会先用 `AppBar.preferredHeightFor` 把 appBar
-    // 槽位夹成有限高度, 所以 AppBar + bottom 在它是正常的。
-    //
-    // `primary: false`: 本页是顶层 Tab, `MainApp` 已经统一加过状态栏内边距
-    // (见 lib/pages/main/view.dart 的 padding), AppBar 再加一次会多出一条空白。
-    // 同样的写法见 lib/pages/dynamics/view.dart。
+    super.build(context);
+    final isNetworkTab = _tabController.index == 1;
     return Scaffold(
-      primary: false,
-      resizeToAvoidBottomInset: false,
-      backgroundColor: Colors.transparent,
       appBar: AppBar(
-        primary: false,
         title: const Text('本地'),
         bottom: TabBar(
           controller: _tabController,
           tabs: const [Tab(text: '媒体库'), Tab(text: '网络')],
         ),
         actions: [
-          if (_tabController.index == 0)
-            Obx(
-              () => IconButton(
-                tooltip: '重新扫描本机视频',
-                onPressed: _controller.library.scanning.value
-                    ? null
-                    : _controller.rescanLibrary,
-                icon: const Icon(Icons.refresh),
-              ),
-            )
-          else
-            Obx(
-              () => IconButton(
-                tooltip: '扫描局域网 SMB 主机',
-                onPressed: _controller.scanningNetwork.value
-                    ? null
-                    : _controller.discoverNetwork,
-                icon: const Icon(Icons.wifi_find_outlined),
+          if (!isNetworkTab) ...[
+            GestureDetector(
+              // 长按 = 强制全盘重建索引(libml forceRescan)
+              onLongPress: () => _controller.rescan(full: true),
+              child: IconButton(
+                tooltip: '重新扫描(长按: 全盘重建)',
+                icon: Obx(
+                  () => _controller.library.busy.value
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh),
+                ),
+                onPressed: () => _controller.rescan(),
               ),
             ),
-          const SizedBox(width: 6),
+            PopupMenuButton<VlcMediaSort>(
+              tooltip: '排序',
+              icon: const Icon(Icons.sort),
+              initialValue: _controller.sort.value,
+              onSelected: _controller.setSort,
+              itemBuilder: (context) => [
+                for (final s in VlcMediaSort.values)
+                  PopupMenuItem(value: s, child: Text(s.label)),
+              ],
+            ),
+          ] else ...[
+            IconButton(
+              tooltip: '重新发现局域网共享',
+              icon: Obx(
+                () => _controller.discovering.value
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.wifi_tethering),
+              ),
+              onPressed: _controller.discoverShares,
+            ),
+            IconButton(
+              tooltip: '添加共享',
+              icon: const Icon(Icons.add_link),
+              onPressed: () => _showAddShareDialog(context),
+            ),
+          ],
+          const SizedBox(width: 4),
         ],
       ),
       body: TabBarView(
         controller: _tabController,
-        children: [_buildLibrary(context), _buildNetwork(context)],
+        children: [
+          _buildLibraryTab(context),
+          _buildNetworkTab(context),
+        ],
       ),
     );
   }
 
-  // ==================== 媒体库 ====================
+  // ---------------------------------------------------------------- 媒体库
 
-  Widget _buildLibrary(BuildContext context) {
-    final library = _controller.library;
+  Widget _buildLibraryTab(BuildContext context) {
     return Obx(() {
-      final scanning = library.scanning.value;
-      final folders = library.folders;
-      final children = <Widget>[];
-
-      if (scanning) {
-        children.add(
-          ListTile(
-            leading: const SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-            title: const Text('正在扫描本机视频…'),
-            subtitle: Text(
-              '已发现 ${folders.length} 个文件夹 / ${library.scannedFiles.value} 个视频',
-            ),
-          ),
+      final library = _controller.library;
+      if (library.lastError.value case final err? when _controller.videos.isEmpty) {
+        return _EmptyHint(
+          icon: Icons.error_outline,
+          text: err,
+          actionLabel: '重试',
+          onAction: _controller.bootstrap,
         );
       }
-
-      // 直接浏览存储卷(不只是有视频的文件夹)
-      for (final source in _controller.deviceSources) {
-        children.add(
-          ListTile(
-            leading: const Icon(Icons.storage_outlined),
-            title: Text(source.name),
-            subtitle: Text(source.url),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _controller.openDevice(source),
-          ),
+      if (_controller.videos.isEmpty) {
+        if (library.busy.value) {
+          return const _EmptyHint(
+            icon: Icons.travel_explore,
+            text: 'VLC 正在索引本机视频…\n(边扫边出, 稍后自动刷新)',
+          );
+        }
+        return _EmptyHint(
+          icon: Icons.video_library_outlined,
+          text: '还没有索引到视频\n下拉或点右上角刷新开始扫描',
+          actionLabel: '扫描',
+          onAction: () => _controller.rescan(),
         );
       }
+      final groups = _controller.folderGroups();
+      return RefreshIndicator(
+        onRefresh: () => _controller.refreshVideos(),
+        child: ListView(
+          padding: const EdgeInsets.only(bottom: 24),
+          children: [
+            if (_controller.history.isNotEmpty) ...[
+              const _SectionTitle('最近播放'),
+              for (final h in _controller.history.take(6))
+                VideoTile(
+                  item: h,
+                  onTap: () => _controller.playUri(h.uri, h.displayName),
+                ),
+              const Divider(height: 18),
+            ],
+            const _SectionTitle('文件夹'),
+            for (final g in groups)
+              ListTile(
+                leading: const Icon(Icons.folder_outlined),
+                title: Text(g.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: Text(
+                  '${g.count} 个视频 · 共 '
+                  '${DurationUtils.formatDuration(g.totalLengthMs ~/ 1000)}',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () {
+                  Get.to(
+                    () => LocalFolderPage(folderPath: g.path, folderName: g.name),
+                  )?.then((_) => _controller.refreshVideos());
+                },
+              ),
+          ],
+        ),
+      );
+    });
+  }
 
-      // 本机目录的书签(在浏览页里手动收藏的), 与 VLC 的 bookmark 一致
-      final shortcuts = _controller.deviceShortcuts;
-      if (shortcuts.isNotEmpty) {
-        children
-          ..add(const Divider(height: 24))
-          ..add(
+  // ---------------------------------------------------------------- 网络
+
+  Widget _buildNetworkTab(BuildContext context) {
+    return Obx(() {
+      final saved = _controller.savedShares;
+      final shares = _controller.shares;
+      return ListView(
+        padding: const EdgeInsets.only(bottom: 24),
+        children: [
+          if (_controller.networkError.value case final err?)
+            ListTile(
+              leading: const Icon(Icons.error_outline, color: Colors.redAccent),
+              title: Text(err, style: const TextStyle(fontSize: 13)),
+            ),
+          const _SectionTitle('已保存的共享'),
+          if (saved.isEmpty)
             const ListTile(
               leading: Icon(Icons.bookmark_border),
-              title: Text('快捷方式'),
-              subtitle: Text('浏览目录时点右上角书签收藏到这里'),
-            ),
-          );
-        for (final source in shortcuts) {
-          children.add(_buildSource(context, source));
-        }
-      }
-
-      if (!scanning && folders.isEmpty) {
-        children.add(
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 40),
-            child: Column(
-              spacing: 12,
-              children: [
-                const Icon(Icons.video_library_outlined, size: 56),
-                Text(
-                  library.lastError.value ?? '还没有扫描到本机视频',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodyMedium,
+              title: Text(
+                '右上角「添加共享」可保存 smb://user:pass@host/share 之类的地址',
+                style: TextStyle(fontSize: 13),
+              ),
+            )
+          else
+            for (final s in saved)
+              ListTile(
+                leading: const Icon(Icons.bookmark),
+                title: Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: Text(
+                  s.maskedUri,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12),
                 ),
-                FilledButton.tonalIcon(
-                  onPressed: _controller.rescanLibrary,
-                  icon: const Icon(Icons.search),
-                  label: const Text('扫描本机视频'),
+                onTap: () => Get.to(
+                  () => VlcBrowsePage(rootUri: s.uri, rootTitle: s.name),
                 ),
-              ],
+                onLongPress: () => _showSavedShareMenu(context, s),
+              ),
+          const Divider(height: 22),
+          const _SectionTitle('局域网共享 (SMB)'),
+          if (_controller.discovering.value && shares.isEmpty)
+            const ListTile(
+              leading: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              title: Text('正在发现…', style: TextStyle(fontSize: 13)),
             ),
-          ),
-        );
-      }
-
-      for (final folder in folders) {
-        children.add(_buildFolder(context, folder));
-      }
-
-      return ListView(
-        padding: const EdgeInsets.only(bottom: 100),
-        children: children,
+          if (shares.isEmpty && !_controller.discovering.value)
+            const ListTile(
+              leading: Icon(Icons.dns_outlined),
+              title: Text(
+                '未发现共享。设备需开启 SMB 服务并与本机同一局域网;\n'
+                '也可以手动「添加共享」。',
+                style: TextStyle(fontSize: 13),
+              ),
+            )
+          else
+            for (final s in shares)
+              ListTile(
+                leading: const Icon(Icons.dns_outlined),
+                title: Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: Text(
+                  s.uri,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12),
+                ),
+                onTap: () => Get.to(
+                  () => VlcBrowsePage(rootUri: s.uri, rootTitle: s.name),
+                ),
+                onLongPress: () {
+                  _controller.addSavedShare(s.name, s.uri);
+                  SmartDialog.showToast('已保存到共享书签');
+                },
+              ),
+        ],
       );
     });
   }
 
-  Widget _buildFolder(BuildContext context, LocalMediaFolder folder) {
-    final subtitle = <String>[
-      '${folder.count} 个视频',
-      CacheManager.formatSize(folder.totalSize),
-      if (folder.latest case final latest?) _formatDate(latest),
-      folder.path,
-    ].join(' · ');
-    return ListTile(
-      leading: const Icon(Icons.folder_outlined),
-      title: Text(folder.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
-      trailing: const Icon(Icons.chevron_right),
-      onTap: () => _controller.openFolder(folder),
-    );
-  }
-
-  // ==================== 网络 ====================
-
-  Widget _buildNetwork(BuildContext context) {
-    return Obx(() {
-      final children = <Widget>[];
-      final scanning = _controller.scanningNetwork.value;
-
-      children.add(
-        ListTile(
-          leading: const Icon(Icons.dns_outlined),
-          title: const Text('局域网 SMB 主机'),
-          subtitle: Text(
-            scanning
-                ? '扫描中 ${_controller.scanDone.value}/${_controller.scanTotal.value}'
-                : _controller.discovered.isEmpty
-                ? '尚未扫描；点右上角按钮自动发现同一局域网内开启 SMB 的主机'
-                : '发现 ${_controller.discovered.length} 台',
-          ),
-          trailing: scanning
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.wifi_find_outlined),
-          onTap: scanning ? null : _controller.discoverNetwork,
-        ),
-      );
-
-      if (_controller.networkError.value case final err?) {
-        children.add(
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
-            child: Text(
-              err,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ),
-        );
-      }
-
-      for (final host in _controller.discovered) {
-        children.add(_buildHost(context, host));
-      }
-
-      children
-        ..add(const Divider(height: 24))
-        ..add(
-          const ListTile(
-            leading: Icon(Icons.bookmark_border),
-            title: Text('快捷方式'),
-            subtitle: Text(
-              '连接过的主机与收藏的目录；SMB / WebDAV 可浏览，HTTP / FTP 为直链',
-            ),
-          ),
-        );
-      for (final source in _controller.networkShortcuts) {
-        children.add(_buildSource(context, source));
-      }
-      children.add(
-        ListTile(
-          leading: const Icon(Icons.add_circle_outline),
-          title: const Text('添加网络共享'),
-          onTap: () => _controller.addSourceFromDialog(context),
-        ),
-      );
-
-      return ListView(
-        padding: const EdgeInsets.only(bottom: 100),
-        children: children,
-      );
-    });
-  }
-
-  Widget _buildHost(BuildContext context, SmbHost host) {
-    return ListTile(
-      leading: const Icon(Icons.computer_outlined),
-      title: Text(host.displayName),
-      subtitle: Text(
-        '${host.address}:${host.port}'
-        '${host.name == null ? '' : ' · 点击进入主机，共享为其中的子目录'}',
-      ),
-      trailing: const Icon(Icons.chevron_right),
-      onTap: () => _controller.openDiscoveredHost(context, host),
-    );
-  }
-
-  Widget _buildSource(BuildContext context, LocalMediaSource source) {
-    final subtitle = source.type == LocalMediaSourceType.device
-        ? source.url
-        : LocalMediaService.maskedUrl(source.url);
-    return ListTile(
-      leading: Icon(_sourceIcon(source.type)),
-      title: Text(source.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
-      trailing: Icon(
-        source.canBrowse ? Icons.chevron_right : Icons.play_arrow_outlined,
-      ),
-      onTap: () => _controller.openSource(source),
-      onLongPress: () => _showSourceMenu(context, source),
-    );
-  }
-
-  IconData _sourceIcon(LocalMediaSourceType type) => switch (type) {
-    LocalMediaSourceType.device => Icons.smartphone_outlined,
-    LocalMediaSourceType.smb => Icons.folder_shared_outlined,
-    LocalMediaSourceType.webdav => Icons.cloud_outlined,
-    LocalMediaSourceType.http => Icons.language_outlined,
-    LocalMediaSourceType.ftp => Icons.swap_vert_outlined,
-  };
-
-  void _showSourceMenu(BuildContext context, LocalMediaSource source) {
-    showDialog<void>(
+  Future<void> _showAddShareDialog(BuildContext context) async {
+    final nameCtrl = TextEditingController();
+    final uriCtrl = TextEditingController();
+    final result = await showDialog<VlcSavedShare>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(source.name),
-        contentPadding: const EdgeInsets.symmetric(vertical: 8),
+      builder: (context) => AlertDialog(
+        title: const Text('添加共享'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (source.canBrowse)
-              ListTile(
-                dense: true,
-                leading: const Icon(Icons.wifi_tethering_outlined),
-                title: const Text('测试连接'),
-                onTap: () async {
-                  Navigator.of(dialogContext).pop();
-                  SmartDialog.showLoading(msg: '连接中');
-                  final res = await LocalMediaService.testConnection(source);
-                  SmartDialog.dismiss();
-                  switch (res) {
-                    case Success(:final response):
-                      SmartDialog.showToast('连接成功，$response 个条目');
-                    case Error(:final errMsg):
-                      SmartDialog.showToast(errMsg ?? '连接失败');
-                    case _:
-                      break;
-                  }
-                },
+            TextField(
+              controller: nameCtrl,
+              decoration: const InputDecoration(labelText: '名称(可留空)'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: uriCtrl,
+              keyboardType: TextInputType.url,
+              decoration: const InputDecoration(
+                labelText: '地址',
+                hintText: 'smb://user:pass@192.168.1.5/share',
               ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Get.back(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Get.back(
+              result: VlcSavedShare(
+                name: nameCtrl.text,
+                uri: uriCtrl.text.trim(),
+              ),
+            ),
+            child: const Text('添加'),
+          ),
+        ],
+      ),
+    );
+    nameCtrl.dispose();
+    uriCtrl.dispose();
+    if (result != null && result.uri.isNotEmpty) {
+      _controller.addSavedShare(result.name, result.uri);
+    }
+  }
+
+  void _showSavedShareMenu(BuildContext context, VlcSavedShare share) {
+    showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
             ListTile(
-              dense: true,
-              leading: const Icon(Icons.edit_outlined),
-              title: const Text('编辑'),
-              onTap: () async {
-                Navigator.of(dialogContext).pop();
-                await _controller.editSource(context, source);
+              leading: const Icon(Icons.play_arrow),
+              title: const Text('浏览'),
+              onTap: () {
+                Get.back();
+                Get.to(
+                  () => VlcBrowsePage(
+                    rootUri: share.uri,
+                    rootTitle: share.name,
+                  ),
+                );
               },
             ),
             ListTile(
-              dense: true,
               leading: const Icon(Icons.delete_outline),
-              title: const Text('删除'),
+              title: const Text('删除书签'),
               onTap: () {
-                Navigator.of(dialogContext).pop();
-                _controller.removeSource(source);
+                Get.back();
+                _controller.removeSavedShare(share);
               },
             ),
           ],
@@ -384,8 +366,105 @@ class _LocalMediaPageState extends State<LocalMediaPage>
       ),
     );
   }
+}
 
-  static String _formatDate(DateTime t) =>
-      '${t.year}-${t.month.toString().padLeft(2, '0')}-'
-      '${t.day.toString().padLeft(2, '0')}';
+class _SectionTitle extends StatelessWidget {
+  const _SectionTitle(this.text);
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+    child: Text(
+      text,
+      style: TextStyle(
+        fontSize: 13,
+        fontWeight: FontWeight.w600,
+        color: Theme.of(context).colorScheme.outline,
+      ),
+    ),
+  );
+}
+
+class _EmptyHint extends StatelessWidget {
+  const _EmptyHint({
+    required this.icon,
+    required this.text,
+    this.actionLabel,
+    this.onAction,
+  });
+
+  final IconData icon;
+  final String text;
+  final String? actionLabel;
+  final VoidCallback? onAction;
+
+  @override
+  Widget build(BuildContext context) => Center(
+    child: Padding(
+      padding: const EdgeInsets.all(32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 44, color: Theme.of(context).colorScheme.outline),
+          const SizedBox(height: 12),
+          Text(
+            text,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 13,
+              color: Theme.of(context).colorScheme.outline,
+            ),
+          ),
+          if (actionLabel != null && onAction != null) ...[
+            const SizedBox(height: 16),
+            FilledButton.tonal(onPressed: onAction, child: Text(actionLabel!)),
+          ],
+        ],
+      ),
+    ),
+  );
+}
+
+/// 视频条目行(媒体库/文件夹页共用): 标题 + 时长 + 续播进度
+class VideoTile extends StatelessWidget {
+  const VideoTile({
+    super.key,
+    required this.item,
+    required this.onTap,
+    this.onLongPress,
+    this.trailing,
+  });
+
+  final VlcMediaItem item;
+  final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = item.finished ? null : item.progress;
+    return ListTile(
+      leading: const Icon(Icons.movie_outlined),
+      title: Text(
+        item.displayName,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Text(
+        [
+          if (item.lengthMs > 0)
+            DurationUtils.formatDuration(item.lengthMs ~/ 1000),
+          if (item.width > 0) '${item.width}×${item.height}',
+          if (progress != null && progress > Duration.zero)
+            '看到 ${DurationUtils.formatDuration(progress.inSeconds)}',
+          if (item.playCount > 0) '播放过 ${item.playCount} 次',
+        ].join(' · '),
+        style: const TextStyle(fontSize: 12),
+      ),
+      trailing: trailing,
+      onTap: onTap,
+      onLongPress: onLongPress,
+    );
+  }
 }

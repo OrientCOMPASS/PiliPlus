@@ -51,20 +51,10 @@ env:
     # paths added by this branch: analyzed with zero tolerance (infos included)
     STRICT_PATHS: >-
         lib/pages/local_media
-        lib/pages/video/introduction/local_media
-        lib/services/local_media_service.dart
-        lib/services/smb
         lib/models/local_media
-        lib/utils/local_media_progress.dart
-        test/services/local_media_service_test.dart
-        test/utils/local_media_progress_test.dart
-        test/services/smb/smb_protocol_test.dart
-        test/services/smb/smb_live_test.dart
-        test/services/smb/smb_share_enum_test.dart
-        test/services/smb/smb_browse_test.dart
-        test/services/smb/smb_session_pool_test.dart
-        lib/services/smb/smb_session_pool.dart
-        test/services/local_media_source_test.dart
+        lib/services/vlc
+        lib/pages/video/vlc
+        test/models/vlc_media_test.dart
 
 jobs:
     check:

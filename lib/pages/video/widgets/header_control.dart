@@ -35,7 +35,6 @@ import 'package:PiliPlus/pages/video/introduction/ugc/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/widgets/action_item.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/widgets/menu_row.dart';
 import 'package:PiliPlus/pages/video/widgets/header_mixin.dart';
-import 'package:PiliPlus/pages/video/introduction/local_media/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/data_source.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
@@ -339,10 +338,7 @@ class HeaderControlState extends State<HeaderControl>
   late final UgcIntroController ugcIntroController;
   late final PgcIntroController pgcIntroController;
   late final LocalIntroController localIntroController;
-  late final LocalMediaIntroController localMediaIntroController;
-  late CommonIntroController introController = videoDetailCtr.isLocalMedia
-      ? localMediaIntroController
-      : isFileSource
+  late CommonIntroController introController = isFileSource
       ? localIntroController
       : videoDetailCtr.isUgc
       ? ugcIntroController
@@ -358,9 +354,7 @@ class HeaderControlState extends State<HeaderControl>
   @override
   void initState() {
     super.initState();
-    if (videoDetailCtr.isLocalMedia) {
-      introController = Get.find<LocalMediaIntroController>(tag: heroTag);
-    } else if (isFileSource) {
+    if (isFileSource) {
       introController = Get.find<LocalIntroController>(tag: heroTag);
     } else if (videoDetailCtr.isUgc) {
       introController = Get.find<UgcIntroController>(tag: heroTag);
@@ -1918,10 +1912,10 @@ class HeaderControlState extends State<HeaderControl>
 
   /// 「本地」板块的媒体(本机/局域网)。
   ///
-  /// 它和离线缓存共用 `isFileSource`(离线语义), 但**不是 B 站内容**, 因此
-  /// 一批只对 B 站视频有意义的入口要单独按它关掉: 弹幕(没有弹幕源)、
-  /// 稍后再看/笔记/举报(全是 B 站接口)。
-  late final isLocalMedia = videoDetailCtr.isLocalMedia;
+  /// 本地/局域网媒体已整体移交 VLC 播放页(docs/piliplayer.md §17),
+  /// 本页只服务 B 站在线视频与离线缓存, 该标记恒为 false;
+  /// 保留常量让下面"B 站专属入口"的条件分支读起来仍然自然。
+  static const bool isLocalMedia = false;
 
   /// 「只听音频」是否可用: 只有视频与音频是**两条独立流**时才有意义。
   ///

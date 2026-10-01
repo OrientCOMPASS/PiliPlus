@@ -25,8 +25,6 @@ import 'package:PiliPlus/models/common/video/source_type.dart';
 import 'package:PiliPlus/models/common/video/video_decode_type.dart';
 import 'package:PiliPlus/models/common/video/video_quality.dart';
 import 'package:PiliPlus/models/common/video/video_type.dart';
-import 'package:PiliPlus/models/local_media/local_media_item.dart';
-import 'package:PiliPlus/models/local_media/local_media_source.dart';
 import 'package:PiliPlus/models/video/play/url.dart';
 import 'package:PiliPlus/models_new/download/bili_download_entry_info.dart';
 import 'package:PiliPlus/models_new/media_list/media_list.dart';
@@ -54,7 +52,6 @@ import 'package:PiliPlus/plugin/pl_player/models/data_source.dart';
 import 'package:PiliPlus/plugin/pl_player/models/heart_beat_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/services/download/download_service.dart';
-import 'package:PiliPlus/services/local_media_service.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/connectivity_utils.dart';
 import 'package:PiliPlus/utils/extension/context_ext.dart';
@@ -62,7 +59,6 @@ import 'package:PiliPlus/utils/extension/iterable_ext.dart';
 import 'package:PiliPlus/utils/extension/nested_scroll_ext.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
 import 'package:PiliPlus/utils/extension/size_ext.dart';
-import 'package:PiliPlus/utils/local_media_progress.dart';
 import 'package:PiliPlus/utils/page_utils.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
@@ -108,9 +104,6 @@ class VideoDetailController extends GetxController
   late bool isFileSource;
 
   /// 「本地」板块媒体(本机文件 / 局域网), 与离线缓存一样走离线分支
-  late bool isLocalMedia;
-  late LocalMediaItem localItem;
-  String? localPlayUrl;
   late bool _mediaDesc = false;
   late final RxList<MediaListItemModel> mediaList = <MediaListItemModel>[].obs;
   late String watchLaterTitle;
@@ -334,17 +327,6 @@ class VideoDetailController extends GetxController
 
   late final watchProgress = GStorage.watchProgress;
   void cacheLocalProgress() {
-    if (isLocalMedia) {
-      // 只写本机记录, 不上报 B 站。
-      // 播放器可能已先于本控制器销毁, 此时 position 取不到, 退回用
-      // 播放过程中周期落盘的值(不会覆盖成 0)。
-      final pos = playedTime ??
-          Duration(milliseconds: plPlayerController.positionInMilliseconds);
-      if (pos > Duration.zero) {
-        _saveLocalProgress(pos);
-      }
-      return;
-    }
     if (plPlayerController.playerStatus.isCompleted) {
       watchProgress.put(cid.value.toString(), entry.totalTimeMilli);
     } else if (playedTime case final playedTime?) {
@@ -373,112 +355,6 @@ class VideoDetailController extends GetxController
     _setVideoHeight();
   }
 
-  /// 本地媒体续播进度的落盘间隔
-  static const int _localProgressSaveIntervalMs = 5000;
-  int _lastLocalProgressSavedMs = 0;
-
-  /// 播放位置回调: 每 5 秒把本地媒体的进度写到本机(不上报 B 站)
-  void _onLocalProgress(Duration position) {
-    if (!isLocalMedia || !plPlayerController.isLocalMedia) {
-      return;
-    }
-    final ms = position.inMilliseconds;
-    if (ms <= 0 || ms - _lastLocalProgressSavedMs < _localProgressSaveIntervalMs) {
-      return;
-    }
-    _lastLocalProgressSavedMs = ms;
-    _saveLocalProgress(position);
-  }
-
-  void _saveLocalProgress(Duration position) {
-    final total = plPlayerController.durationInMilliseconds;
-    LocalMediaProgress.put(
-      localItem.uri,
-      position,
-      duration: total > 0 ? Duration(milliseconds: total) : null,
-    );
-  }
-
-  /// 本地/局域网媒体: 播放地址来自文件系统或 URL, 全程不请求 B 站接口
-  void initLocalMediaSource(LocalMediaItem item, {String? playUrl}) {
-    localItem = item;
-    localPlayUrl = playUrl ?? LocalMediaService.playbackUrl(item);
-    firstVideo = VideoItem(
-      id: 0,
-      // 本地文件没有 B 站画质概念, 这里只是占位(简介面板不展示画质)
-      quality: VideoQuality.fluent360,
-    );
-    data = PlayUrlModel(timeLength: null);
-    // 续播位置来自本机记录
-    defaultST = LocalMediaProgress.get(item.uri);
-    _lastLocalProgressSavedMs = 0;
-    _setVideoHeight();
-  }
-
-  /// 自动加载与视频文件名匹配的外置字幕（本地/局域网媒体）。
-  ///
-  /// 规则（与 VLC / mpv 一致）：同目录下 `movie.srt`、`movie.zh-CN.ass` 这类
-  /// 主名相同的字幕全部加进 mpv 的字幕列表；**如果片源本身没有字幕流**，
-  /// 就自动选中第一个匹配到的外置字幕（有内嵌字幕时不去抢，尊重 sid=auto）。
-  ///
-  /// 全程不能影响播放：找不到、读不到目录、加载失败都只记一条日志。
-  Future<void> _autoloadLocalSubtitles() async {
-    try {
-      final matches = await LocalMediaService.findMatchingSubtitles(localItem);
-      if (matches.isEmpty || isClosed) {
-        return;
-      }
-      // 先看片源自己有没有字幕流(外挂加进去之后这个判断就不准了)
-      final hasInternal = await _waitForInternalSubtitles();
-      final titles = <String>[];
-      for (final item in matches) {
-        if (isClosed) {
-          return;
-        }
-        final url = await LocalMediaService.resolvePlayUrl(item);
-        if (isClosed) {
-          return;
-        }
-        await plPlayerController.addExternalSubtitle(url, title: item.name);
-        // 同时挂到既有的字幕列表上, 顶栏「字幕」面板里就能直接切
-        final index = subtitles.length;
-        vttSubtitles[index] = (isData: false, id: url);
-        subtitles.add(Subtitle(lan: '', lanDoc: item.name));
-        titles.add(item.name);
-      }
-      if (!hasInternal && titles.isNotEmpty) {
-        await plPlayerController.selectSubtitleByTitle(titles.first);
-      }
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('autoload local subtitles failed: $e');
-      }
-    }
-  }
-
-  /// 等 mpv 把片源自带的字幕轨报上来（最多 1.5s）。
-  /// 报不上来就当"没有内嵌字幕"，宁可多选一个外挂字幕，也不要没字幕。
-  Future<bool> _waitForInternalSubtitles() async {
-    for (var i = 0; i < 15; i++) {
-      if (isClosed) {
-        return false;
-      }
-      if (plPlayerController.internalSubtitleTracks.isNotEmpty) {
-        return true;
-      }
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-    }
-    return plPlayerController.internalSubtitleTracks.isNotEmpty;
-  }
-
-  /// 本机文件用 [FileSource](关闭缓存); 局域网用 [NetworkSource](保留缓冲策略)
-  DataSource _localDataSource() {
-    final url = localPlayUrl!;
-    return localItem.source.type == LocalMediaSourceType.device
-        ? FileSource.direct(filePath: url)
-        : NetworkSource(videoSource: url, audioSource: null);
-  }
-
   @override
   void onInit() {
     super.onInit();
@@ -503,25 +379,12 @@ class VideoDetailController extends GetxController
     isVertical = RxBool(args['isVertical'] ?? false);
 
     sourceType = args['sourceType'] ?? SourceType.normal;
-    isLocalMedia = sourceType == SourceType.localMedia;
-    // 本地/局域网媒体与离线缓存共用"离线"语义: 不请求任何 B 站接口,
-    // 不显示评论与相关视频, 不上报播放进度
-    isFileSource = sourceType == SourceType.file || isLocalMedia;
+    // 离线缓存视频沿用"离线"语义: 不请求任何 B 站接口, 不显示评论与
+    // 相关视频, 不上报播放进度。(本地/局域网媒体已整体移交 VLC 播放页,
+    // 不再经过本页, 见 docs/piliplayer.md §17)
+    isFileSource = sourceType == SourceType.file;
     isPlayAll = sourceType != SourceType.normal && !isFileSource;
-    if (isLocalMedia) {
-      // 本地视频强制自动播放: 关掉"自动播放"设置时, 播放页会停在封面占位状态,
-      // 那里挂的是**在线视频**的顶栏菜单(分享/举报/稍后再看...), 对本地文件
-      // 全都不成立。本地点开就是要看, 没有"先不播"的语义。
-      _autoPlay.value = true;
-      initLocalMediaSource(
-        args['localMedia'] as LocalMediaItem,
-        // SMB 之类需要先在本机代理上注册, 由「本地」板块解析好后传进来
-        playUrl: args['localPlayUrl'] as String?,
-      );
-      // 周期性落盘续播进度: 只靠 onClose 保存并不可靠
-      // (进程被杀、后台回收、播放器先于控制器销毁都会丢进度)
-      plPlayerController.addPositionListener(_onLocalProgress);
-    } else if (isFileSource) {
+    if (isFileSource) {
       initFileSource(args['entry']);
     } else if (isPlayAll) {
       watchLaterTitle = args['favTitle'];
@@ -868,9 +731,7 @@ class VideoDetailController extends GetxController
     if (seek == .zero) seek = null;
     seek ??= getFirstSegment();
     await plPlayerController.setDataSource(
-      isLocalMedia
-          ? _localDataSource()
-          : isFileSource
+      isFileSource
           ? FileSource(
               dir: args['dirPath'],
               typeTag: entry.typeTag!,
@@ -896,24 +757,12 @@ class VideoDetailController extends GetxController
       videoType: videoType,
       onInit: () {
         videoState.value = true;
-        // 本地/局域网媒体没有 B 站字幕, 这里一调 setSubtitle(-1) 就会
-        // `setSubtitleTrack(no)` -> mpv `sid=no`, 把片源里**内嵌**的字幕
-        // 一起关掉(表现为"明明有内嵌字幕却看不到")。
-        // 内嵌字幕交给 mpv 的 sid=auto 自选, 用户可在顶栏「字幕」面板改。
-        if (!isLocalMedia) {
-          setSubtitle(vttSubtitlesIndex.value);
-        } else {
-          // 本地视频: 自动找同目录里与视频同名的外置字幕
-          unawaited(_autoloadLocalSubtitles());
-        }
+        setSubtitle(vttSubtitlesIndex.value);
       },
       width: firstVideo.width,
       height: firstVideo.height,
       volume: volume,
       autoFullScreenFlag: autoFullScreenFlag,
-      isLocalMedia: isLocalMedia,
-      // VR 自动识别要靠文件名里的关键词(360/sbs/tb/全景...), 而 SMB 播放
-      // 走本机回环代理, 播放地址里没有原文件名, 必须把条目名传进去
     );
 
     if (isClosed) return;
@@ -1403,9 +1252,6 @@ class VideoDetailController extends GetxController
   @override
   void onClose() {
     cid.close();
-    if (isLocalMedia) {
-      plPlayerController.removePositionListener(_onLocalProgress);
-    }
     if (isFileSource) {
       cacheLocalProgress();
     }

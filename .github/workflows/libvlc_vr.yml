@@ -52,6 +52,9 @@ jobs:
         container:
             # VideoLAN 官方 CI 构建 arm64 libvlc 用的同一镜像(含 NDK 与全部依赖)
             image: registry.videolan.org/vlc-debian-android:20260610055743
+            # 镜像默认用户非 root, 写不了 runner 挂载的 /__w/_temp(checkout 会
+            # EACCES); 以 root 运行容器解决
+            options: --user root
         steps:
             - name: 代码迁出
               uses: actions/checkout@v7
@@ -61,6 +64,7 @@ jobs:
               run: |
                   set -uo pipefail
                   export DEBIAN_FRONTEND=noninteractive
+                  MISSING=""
                   for t in git curl unzip zip sha256sum strings python3; do
                     command -v "$t" >/dev/null || MISSING="$MISSING $t"
                   done
@@ -71,10 +75,11 @@ jobs:
                   echo "--- toolchain env ---"
                   echo "ANDROID_NDK=${ANDROID_NDK:-unset} ANDROID_SDK=${ANDROID_SDK:-unset} ANDROID_HOME=${ANDROID_HOME:-unset}"
                   if [ -z "${ANDROID_NDK:-}" ]; then
+                    ANDROID_NDK=""
                     for c in /opt/android-ndk* /opt/android-sdk/ndk/* "${ANDROID_HOME:-/nonexistent}"/ndk/* /usr/local/android-ndk*; do
-                      [ -f "$c/source.properties" ] && ANDROID_NDK="$c" && break
+                      if [ -f "$c/source.properties" ]; then ANDROID_NDK="$c"; break; fi
                     done
-                    echo "detected ANDROID_NDK=$ANDROID_NDK"
+                    echo "detected ANDROID_NDK=${ANDROID_NDK:-none}"
                   fi
                   if [ -z "${ANDROID_SDK:-}" ] && [ -n "${ANDROID_HOME:-}" ]; then
                     ANDROID_SDK="$ANDROID_HOME"; echo "detected ANDROID_SDK=$ANDROID_SDK"
@@ -83,25 +88,16 @@ jobs:
                     echo "ANDROID_NDK=$ANDROID_NDK"
                     echo "ANDROID_SDK=${ANDROID_SDK:-}"
                   } >> "$GITHUB_ENV"
-                  grep Pkg.Revision "$ANDROID_NDK/source.properties"
-
-            # contribs 预编译包(126MB)按内容寻址缓存: URL 里带着 sha, 命中即免下载
-            - name: 缓存 contribs 包
-              uses: actions/cache@v4
-              with:
-                  path: tool/libvlc-vr/.cache
-                  key: vlc-contrib-aarch64-4d08fe2a37bfba5ea223758ecd033b15ca53400d
-
-            - name: 下载 contribs 包
-              shell: bash
-              run: |
-                  set -euo pipefail
-                  f=tool/libvlc-vr/.cache/vlc-contrib.tar.zst
-                  mkdir -p tool/libvlc-vr/.cache
-                  if [ ! -s "$f" ]; then
-                    curl -fL --retry 3 --retry-delay 5 -o "$f" "$CONTRIB_URL"
+                  if [ -z "${ANDROID_NDK:-}" ] || [ ! -f "$ANDROID_NDK/source.properties" ]; then
+                    echo "::error::找不到 Android NDK(镜像未提供 ANDROID_NDK/ANDROID_HOME)"
+                    exit 1
                   fi
-                  ls -la "$f"
+                  grep Pkg.Revision "$ANDROID_NDK/source.properties"
+                  REL=$(grep -o '^Pkg.Revision.*[0-9]*.*' "$ANDROID_NDK/source.properties" | cut -d ' ' -f 3 | cut -d . -f 1)
+                  case "$REL" in
+                    27|28|29) echo "NDK r$REL OK" ;;
+                    *) echo "::error::compile-libvlc.sh 需要 NDK r27-29, 镜像里是 r$REL"; exit 1 ;;
+                  esac
 
             - name: 准备 vlc 源码并打补丁
               shell: bash

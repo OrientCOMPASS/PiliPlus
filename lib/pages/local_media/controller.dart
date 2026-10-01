@@ -53,6 +53,11 @@ class LocalMediaController extends GetxController {
     // 第一次进入且没有缓存时自动扫描一次
     if (library.folders.isEmpty) {
       library.scan();
+    } else if (library.isStale) {
+      // 缓存过期(>30min)后台静默重扫: 新拷入设备/存储卡的文件应自动
+      // 出现, 而不是只有记得手动点刷新才认得。只探测权限、不弹授权框,
+      // 没权限就保持展示旧缓存(scan 自身会把错误写进 lastError, 这里跳过)。
+      _staleRescan();
     }
   }
 
@@ -64,6 +69,13 @@ class LocalMediaController extends GetxController {
 
   Future<void> refreshDevices() async {
     deviceSources.value = await LocalMediaService.deviceSources();
+  }
+
+  Future<void> _staleRescan() async {
+    if (!await LocalMediaService.hasDevicePermission()) {
+      return;
+    }
+    await library.scan();
   }
 
   Future<void> rescanLibrary() async {

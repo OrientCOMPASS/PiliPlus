@@ -270,5 +270,6 @@ abstract final class VideoBoxKey {
       longPressSpeedDefault = 'longPressSpeedDefault',
       speedsList = 'speedsList',
       speedsListMigrated4x8x = 'speedsListMigrated4x8x',
+      speedsListMigrated2x5 = 'speedsListMigrated2x5',
       cacheVideoFit = 'cacheVideoFit';
 }

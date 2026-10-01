@@ -114,6 +114,24 @@ abstract final class LocalMediaService {
     }
   }
 
+  /// 是否**已经**有存储读取权限(只探测状态, 不弹授权框)。
+  /// 供"缓存过期后台静默重扫"用: 没权限就跳过, 不打扰既有缓存的展示。
+  static Future<bool> hasDevicePermission() async {
+    if (!PlatformUtils.isMobile) {
+      return true;
+    }
+    try {
+      final status = await Permission.videos.status;
+      if (status.isGranted || status.isLimited) {
+        return true;
+      }
+      final legacy = await Permission.storage.status;
+      return legacy.isGranted || legacy.isLimited;
+    } catch (_) {
+      return false;
+    }
+  }
+
   // ==================== 浏览 ====================
 
   /// 列目录。失败时返回 [Error](带人类可读的原因)。

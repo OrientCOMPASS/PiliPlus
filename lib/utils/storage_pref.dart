@@ -112,19 +112,20 @@ abstract final class Pref {
   );
   //   [0.5, 100.0, 2.2 * math.sqrt(50)], // [mass, stiffness, damping]
 
-  /// 默认倍速档位(含 4x / 8x)
+  /// 默认倍速档位(含 2.5x / 4x / 8x; 0.75/1.25/1.75 已按需求移除)
   static const List<double> kDefaultSpeedList = [
     0.5,
-    0.75,
     1.0,
-    1.25,
     1.5,
-    1.75,
     2.0,
+    2.5,
     3.0,
     4.0,
     8.0,
   ];
+
+  /// 本轮预设调整中从默认档位移除的值(一次性迁移用)
+  static const Set<double> kRetiredSpeeds = {0.75, 1.25, 1.75};
 
   static List<double> get speedList {
     final saved = _video.get(VideoBoxKey.speedsList);
@@ -146,6 +147,21 @@ abstract final class Pref {
         _video.put(VideoBoxKey.speedsList, list);
       }
       _video.put(VideoBoxKey.speedsListMigrated4x8x, true);
+    }
+    // 一次性迁移: 预设调整 —— 移除 0.75/1.25/1.75, 补上 2.5
+    if (_video.get(VideoBoxKey.speedsListMigrated2x5) != true) {
+      final before = list.length;
+      list.removeWhere(kRetiredSpeeds.contains);
+      var changed = list.length != before;
+      if (!list.contains(2.5)) {
+        list.add(2.5);
+        changed = true;
+      }
+      if (changed) {
+        list.sort();
+        _video.put(VideoBoxKey.speedsList, list);
+      }
+      _video.put(VideoBoxKey.speedsListMigrated2x5, true);
     }
     return list;
   }
@@ -878,6 +894,26 @@ abstract final class Pref {
       'cache': 'yes',
       'demuxer-max-bytes': (Pref.bufferSize * 0x200000).toStringAsFixed(0),
       'demuxer-max-back-bytes': '0',
+    };
+  }
+
+  /// 本地/局域网媒体的缓存策略(对齐 VLC 安卓端 network-caching≈1.5s 的思路)。
+  ///
+  /// 为什么不能沿用在线流的 [initBuffer]: mpv 对开了 cache 的网络流会把
+  /// **前向预读抬到 cache-secs**(demux.c update_opts:
+  /// `min_secs = max(demuxer-readahead-secs, cache-secs)`), 在线档的
+  /// 16s×倍速意味着每次大跨度 seek 之后都要重新拉十几秒的内容
+  /// (高码率全景片源一次就是上百 MB, 表现为"seek 后疯狂占带宽下载")。
+  /// 而局域网源的随机访问是廉价的: SMB 走回环代理的 Range → 带偏移的
+  /// SMB2 READ(与 VLC/libsmb2 同为定位读), WebDAV/FTP 同理。
+  /// 所以只留一个小缓冲抗抖动, seek 即刻定位, 不再搬运整段文件。
+  static Map<String, String> initLocalBuffer() {
+    return {
+      'cache': 'yes',
+      'cache-secs': '3',
+      'demuxer-hysteresis-secs': '2',
+      'demuxer-max-bytes': (32 * 0x100000).toString(),
+      'demuxer-max-back-bytes': (8 * 0x100000).toString(),
     };
   }
 

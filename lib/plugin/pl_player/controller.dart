@@ -804,6 +804,50 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     await _videoPlayerController?.setSubtitleTrack(track);
   }
 
+  /// 按轨道 id 切换内嵌字幕('auto'=mpv 自选, 'no'=关闭), 供底栏字幕菜单用
+  /// (view 层不必依赖 media_kit 的类型)。
+  Future<void> selectInternalSubtitleById(String id) async {
+    if (id == 'auto') {
+      await setInternalSubtitleTrack(SubtitleTrack.auto());
+      return;
+    }
+    if (id == 'no') {
+      await setInternalSubtitleTrack(SubtitleTrack.no());
+      return;
+    }
+    for (final t in internalSubtitleTracks) {
+      if (t.id == id) {
+        await setInternalSubtitleTrack(SubtitleTrack(t.id, t.title, t.language));
+        return;
+      }
+    }
+  }
+
+  /// 当前生效字幕的展示名(底栏字幕按钮旁的标签)。
+  ///
+  /// 优先级与设置面板一致: B 站 CC/外置字幕([ccLabel] 由调用方给出当前
+  /// 选中项的名字, null 表示未开启) > mpv 内嵌轨道。
+  String currentSubtitleLabel({String? ccLabel}) {
+    if (ccLabel != null) {
+      return ccLabel;
+    }
+    final cur = currentTrack.value.subtitle;
+    if (cur.id == 'no' || cur.id.isEmpty) {
+      return '关闭';
+    }
+    for (final t in internalSubtitleTracks) {
+      if (t.id == cur.id) {
+        return trackLabel(
+          id: t.id,
+          title: t.title,
+          language: t.language,
+          codec: t.codec,
+        );
+      }
+    }
+    return cur.id == 'auto' ? '自动' : cur.id;
+  }
+
   /// 切换内嵌音轨
   Future<void> setInternalAudioTrack(AudioTrack track) async {
     await _videoPlayerController?.setAudioTrack(track);
@@ -1305,6 +1349,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final Map<String, String> extras = {
       if (dataSource is FileSource)
         'cache': 'no'
+      else if (isLocalMedia)
+        // 本地/局域网网络源: VLC 式小缓冲。在线档的 cache-secs 会被 mpv
+        // 抬成前向预读目标, 大跨度 seek 后等于把十几秒内容重新下载一遍;
+        // 局域网随机访问廉价(Range -> 带偏移 SMB2 READ), 小缓冲即可
+        ...Pref.initLocalBuffer(),
       else if (isLive)
         ...liveBuffer
       else

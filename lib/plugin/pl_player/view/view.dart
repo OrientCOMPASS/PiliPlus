@@ -406,7 +406,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
 
     // ==================== 倍速面板 ====================
     //
-    // 原来是个 PopupMenuButton 列预设档位(0.5/0.75/1/1.25/1.5/1.75/2/3/4/8),
+    // 原来是个 PopupMenuButton 列预设档位(现为 0.5/1/1.5/2/2.5/3/4/8),
     // 只能挑那几档。改成**滑动条 + 0.1 步进**: 想 1.3X 听清外语、0.9X 跟唱
     // 都能调到; 预设档位保留成快捷 chip(含滑动条范围外的 8X), 一个都不少。
     const double speedSliderMin = 0.5;
@@ -799,63 +799,138 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         },
       ),
 
-      /// 字幕
+      /// 字幕: 按钮旁展示**当前使用的字幕**; 菜单合并 B 站 CC/外置字幕
+      /// 与 mpv 内嵌轨道(本地片源), 与设置面板的字幕页同一套语义。
       BottomControlType.subtitle => Obx(
         () {
-          if (videoDetailController.subtitles.isNotEmpty) {
-            final val = videoDetailController.vttSubtitlesIndex.value;
-            return PopupMenuButton<int>(
-              tooltip: '字幕',
-              requestFocus: false,
-              initialValue: val,
-              color: Colors.black.withValues(alpha: 0.8),
-              itemBuilder: (context) {
-                return [
-                  PopupMenuItem<int>(
-                    value: 0,
+          final ccSubs = videoDetailController.subtitles;
+          final vttIndex = videoDetailController.vttSubtitlesIndex.value;
+          final inner = plPlayerController.internalSubtitleTracks;
+          if (ccSubs.isEmpty && inner.isEmpty) {
+            return const SizedBox.shrink();
+          }
+          final label = plPlayerController.currentSubtitleLabel(
+            ccLabel: vttIndex > 0 && vttIndex <= ccSubs.length
+                ? (ccSubs[vttIndex - 1].lanDoc ?? ccSubs[vttIndex - 1].lan)
+                : null,
+          );
+          final curId = plPlayerController.currentTrack.value.subtitle.id;
+          const itemStyle = TextStyle(color: Colors.white, fontSize: 13);
+          return PopupMenuButton<String>(
+            tooltip: '字幕',
+            requestFocus: false,
+            initialValue: vttIndex > 0
+                ? 'cc$vttIndex'
+                : (switch (curId) {
+                    '' => null,
+                    'auto' || 'no' => curId,
+                    _ => 't$curId',
+                  }),
+            color: Colors.black.withValues(alpha: 0.8),
+            itemBuilder: (context) {
+              return [
+                if (ccSubs.isNotEmpty) ...[
+                  PopupMenuItem<String>(
+                    value: 'cc0',
                     height: 35,
                     onTap: () => videoDetailController.setSubtitle(0),
-                    child: const Text(
-                      "关闭字幕",
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 13,
-                      ),
+                    child: Text(
+                      inner.isEmpty ? '关闭字幕' : '关闭(CC/外置)',
+                      style: itemStyle,
                     ),
                   ),
-                  ...videoDetailController.subtitles.mapIndexed((i, e) {
-                    return PopupMenuItem<int>(
-                      value: i + 1,
+                  ...ccSubs.mapIndexed((i, e) {
+                    return PopupMenuItem<String>(
+                      value: 'cc${i + 1}',
                       height: 35,
                       onTap: () => videoDetailController.setSubtitle(i + 1),
                       child: Text(
                         e.lanDoc ?? e.lan,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const .new(color: Colors.white, fontSize: 13),
+                        style: itemStyle,
                       ),
                     );
                   }),
-                ];
-              },
-              child: SizedBox(
-                width: widgetWidth,
-                height: 30,
-                child: val == 0
-                    ? const Icon(
-                        Icons.closed_caption_off_outlined,
-                        size: 22,
-                        color: Colors.white,
-                      )
-                    : const Icon(
-                        Icons.closed_caption_off_rounded,
-                        size: 22,
-                        color: Colors.white,
+                ],
+                if (inner.isNotEmpty) ...[
+                  PopupMenuItem<String>(
+                    value: 'auto',
+                    height: 35,
+                    onTap: () =>
+                        plPlayerController.selectInternalSubtitleById('auto'),
+                    child: Text(
+                      ccSubs.isEmpty ? '自动' : '内嵌: 自动',
+                      style: itemStyle,
+                    ),
+                  ),
+                  PopupMenuItem<String>(
+                    value: 'no',
+                    height: 35,
+                    onTap: () =>
+                        plPlayerController.selectInternalSubtitleById('no'),
+                    child: Text(
+                      ccSubs.isEmpty ? '关闭' : '内嵌: 关闭',
+                      style: itemStyle,
+                    ),
+                  ),
+                  for (final t in inner)
+                    PopupMenuItem<String>(
+                      value: 't${t.id}',
+                      height: 35,
+                      onTap: () => plPlayerController
+                          .selectInternalSubtitleById(t.id),
+                      child: Text(
+                        ccSubs.isEmpty
+                            ? PlPlayerController.trackLabel(
+                                id: t.id,
+                                title: t.title,
+                                language: t.language,
+                                codec: t.codec,
+                              )
+                            : '内嵌: ${PlPlayerController.trackLabel(
+                                id: t.id,
+                                title: t.title,
+                                language: t.language,
+                                codec: t.codec,
+                              )}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: itemStyle,
                       ),
+                    ),
+                ],
+              ];
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    label == '关闭'
+                        ? Icons.closed_caption_off_outlined
+                        : Icons.closed_caption,
+                    size: 20,
+                    color: Colors.white,
+                  ),
+                  const SizedBox(width: 3),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 84),
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ],
               ),
-            );
-          }
-          return const SizedBox.shrink();
+            ),
+          );
         },
       ),
 

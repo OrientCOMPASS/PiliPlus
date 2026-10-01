@@ -71,6 +71,10 @@ class LocalMediaLibrary {
   static const int maxFiles = 20000;
   static const int maxFolders = 4000;
 
+  /// 缓存超过这个时长视为过期: 进入板块时后台静默重扫一次,
+  /// 新拷入的文件不必记得手动点刷新才会出现(边扫边出, 旧列表不闪断)
+  static const Duration staleAfter = Duration(minutes: 30);
+
   /// 进度刷新节流。
   ///
   /// 全盘递归扫描动辄上万个文件, 每发现一个文件就把 `scannedFiles`/`folders`
@@ -94,6 +98,12 @@ class LocalMediaLibrary {
   bool _abort = false;
 
   bool get hasCache => folders.isNotEmpty || lastScanAt != null;
+
+  /// 扫描缓存是否过期(或从未扫过)
+  bool get isStale {
+    final at = lastScanAt;
+    return at == null || DateTime.now().difference(at) > staleAfter;
+  }
 
   /// 读取上次扫描的缓存
   void loadCache() {

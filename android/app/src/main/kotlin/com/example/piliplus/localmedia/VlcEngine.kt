@@ -68,6 +68,14 @@ object VlcEngine {
                 override fun onDisplay(dialog: Dialog.ProgressDialog) {
                     main.post { handleDialog(dialog) }
                 }
+
+                override fun onCanceled(dialog: Dialog) {
+                    // nothing to relay
+                }
+
+                override fun onProgressUpdate(dialog: Dialog.ProgressDialog) {
+                    // progress ticks are not relayed (would spam the UI)
+                }
             })
             libVlc = instance
             LogCollector.i(TAG, "libvlc initialized: ${runCatching { LibVLC.version() }.getOrDefault("?")}, vrVersion=${vrVersion()}")

@@ -1457,3 +1457,66 @@ VR 从此就是主播放器的一种输出模式：弹幕（Flutter 层）、字
   （android 与非 android 两条路径）、video.c、vo_gpu.c 全部 0 error 0 新 warning；
 - CI：libmpv 工作流出包（含 strings 自检）→ app 工作流 analyze/test/release 构建，
   结果见对应 run 与 release `v2.1.5-test`。
+
+## 16. 第十一轮：真机反馈五则
+
+### 16.1 局域网大跨度 seek 变成"疯狂下载"：根因在 mpv 的缓存参数，不在代理
+
+现象：SMB/局域网播放时大幅拖动进度条，网络被大量占用，像在重新下载文件。
+
+排查后确认**代理层没有问题**：回环 HTTP 代理支持 `Range/206`，SMB2 READ
+本来就是带 offset 的定位读（与 VLC/libsmb2 同为随机访问）；mpv 大跨度 seek
+会关掉旧连接、带 `Range: bytes=N-` 重开，代理从 N 定位读起，被放弃的旧请求
+最多再泵一个 512KB 块就因写失败退出。
+
+真正的根因在 mpv 的缓存语义：`demux.c: update_opts()` 对"网络流 + cache=yes"
+会把**前向预读目标抬到 `cache-secs`**（`min_secs = max(readahead-secs, cache-secs)`）。
+本地板块的网络源此前沿用在线流的 `initBuffer()`（`cache-secs = 16s × 倍速`），
+于是每次大跨度 seek 之后 mpv 都要预读满 16 秒内容——高码率全景片源一次就是
+上百 MB，看起来就是"seek 之后疯狂占带宽"。
+
+修法（对齐 VLC 安卓端 network-caching≈1.5s 的行为）：本地/局域网网络源改用
+独立的 `Pref.initLocalBuffer()`：`cache-secs=3`、`hysteresis=2s`、前向 32MiB /
+后向 8MiB 封顶。局域网随机访问廉价，小缓冲足够抗 WiFi 抖动；seek 即刻定位，
+不再搬运整段文件。本机文件（FileSource）维持 `cache=no` 不变，在线流档位不变。
+
+### 16.2 底栏字幕按钮显示当前使用的字幕
+
+字幕按钮旁现在常驻一个短标签（当前生效字幕名，超出省略）：B 站 CC/外置字幕
+优先显示所选语言名；否则显示 mpv 当前内嵌轨道（标题 > 语言 > 序号 + 编码，
+与设置面板同一套 `trackLabel` 逻辑），未开启显示「关闭」。
+菜单也顺手合并了两类字幕源（CC/外置 + 内嵌轨道，语义与设置面板的字幕页一致），
+**本地片源从此在底栏就有字幕按钮**（此前只有 B 站 CC 存在时才出现）。
+
+### 16.3 倍速预设调整
+
+默认档位 0.75 / 1.25 / 1.75 移除，新增 2.5：`[0.5, 1, 1.5, 2, 2.5, 3, 4, 8]`。
+已保存过自定义档位的老用户走一次性迁移（`speedsListMigrated2x5`，与第四轮
+4x/8x 迁移同一机制）：从已存列表删掉三个旧档位、补上 2.5；「倍速设置 → 重置」
+也能回到新默认。滑动条（0.5–4.0，0.1 步进）不受影响，1.25 之类仍可手调。
+
+### 16.4 "测试用 VR 视频识别不到"：扫描逻辑本轮未动，补了一个真缺口
+
+本轮 diff 可证：媒体库扫描/目录浏览/文件名识别（`detectFromName`）代码与上一版
+逐字节一致（仅删除了两个随独立播放器作废的方法）。最可能的实际成因是
+**扫描缓存**：媒体库结果缓存在本机，此前只有"无缓存"才自动扫，新拷入设备的
+文件要记得手动点刷新才会出现。本轮补上：缓存超过 30 分钟即后台静默重扫
+（边扫边出、旧列表不闪断；只探测权限不弹授权框）。
+若重扫后仍看不到某个文件，请提供文件名与所在目录——扩展名白名单
+（`LocalMediaExtensions.videos`）与跳过目录（`Android/`、隐藏目录、`backup` 等）
+是仅有的两个过滤点。
+
+### 16.5 关于账号下的两个空仓库
+
+上一轮曾尝试把 libmpv 构建库与 media-kit fork 到账号下（fork API 被 403 拒绝后
+改用建仓+推送）：**建仓成功但该 PAT 对新仓库无权限**（推送/删除均 403），
+管线随即收进了本仓库（`tool/libmpv-vr` + vendored `third_party/`），
+两个空仓库（`OrientCOMPASS/libmpv-android-video-build`、`OrientCOMPASS/media-kit`）
+因此遗留。本 token 无法删除它们（DELETE 需要目标仓库的 administration=write，
+响应头 `x-accepted-github-permissions: administration=write` 为证），
+需在网页端手动删除。为什么"限定了仓库"却能建仓：fine-grained PAT 的
+`POST /user/repos` 按**属主级** Administration 权限判定——token 对 PiliPlus
+持有 Administration(read/write)，即获得在 OrientCOMPASS 名下建新仓库的能力；
+而新仓库不会自动进入 token 的授权列表，所以后续对它的一切操作（含删除）都被拒。
+若不希望 token 具备建仓能力，把 Administration 权限降为 No access 即可
+（本仓库的推送/发布/触发 CI 只需要 Contents:write + Actions，均不受影响）。

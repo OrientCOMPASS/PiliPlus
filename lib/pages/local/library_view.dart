@@ -98,7 +98,6 @@ class _LocalLibraryViewState extends State<LocalLibraryView>
   }
 
   void _openVideo(List<LocalVideo> playlist, int index) {
-    final v = playlist[index];
     final controller = LocalPlayerController(
       uris: playlist.map((e) => e.uri).toList(),
       titles: playlist.map((e) => e.name).toList(),

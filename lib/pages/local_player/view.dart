@@ -1,14 +1,12 @@
 import 'dart:async';
 
 import 'package:PiliPlus/pages/local_player/controller.dart';
-import 'package:PiliPlus/services/local_media/local_library_service.dart';
 import 'package:PiliPlus/services/local_media/models.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
-import 'package:flutter_volume_controller/flutter_volume_controller.dart';
 import 'package:get/get.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -89,7 +87,7 @@ class _LocalPlayerPageState extends State<LocalPlayerPage> {
   void _flashSeekIcon(int seconds) {
     SmartDialog.showToast(
       seconds > 0 ? '快进 $seconds 秒' : '快退 ${-seconds} 秒',
-      displayDuration: const Duration(milliseconds: 600),
+      duration: const Duration(milliseconds: 600),
     );
   }
 
@@ -223,7 +221,7 @@ class _LocalPlayerPageState extends State<LocalPlayerPage> {
           _c.setRate(Pref.longPressSpeedDefault);
           SmartDialog.showToast(
             '${Pref.longPressSpeedDefault}x 中…',
-            displayDuration: const Duration(milliseconds: 600),
+            duration: const Duration(milliseconds: 600),
           );
         }
       },
@@ -315,14 +313,14 @@ class _LocalPlayerPageState extends State<LocalPlayerPage> {
           return const Center(child: CircularProgressIndicator(color: Colors.white));
         }),
         // VR HUD：偏航/俯仰/视场读数
-        Obx(() {
-          if (!_c.vrActive.value || !_c.showControls.value) {
-            return const SizedBox.shrink();
-          }
-          return Positioned(
-            top: 64,
-            right: 12,
-            child: Container(
+        Positioned(
+          top: 64,
+          right: 12,
+          child: Obx(() {
+            if (!_c.vrActive.value || !_c.showControls.value) {
+              return const SizedBox.shrink();
+            }
+            return Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
                 color: Colors.black45,
@@ -345,9 +343,9 @@ class _LocalPlayerPageState extends State<LocalPlayerPage> {
                   ),
                 ],
               ),
-            ),
-          );
-        }),
+            );
+          }),
+        ),
       ],
     );
   }
@@ -566,7 +564,7 @@ class _LocalPlayerPageState extends State<LocalPlayerPage> {
                       onPressed: () {
                         _c.cycleAspect();
                         SmartDialog.showToast('画面比例：${_c.aspectLabel}',
-                            displayDuration: const Duration(milliseconds: 700));
+                            duration: const Duration(milliseconds: 700));
                         _bumpControls();
                       },
                     ),
@@ -906,11 +904,11 @@ class _LocalPlayerPageState extends State<LocalPlayerPage> {
                       title: const Text('加载外挂字幕…'),
                       onTap: () async {
                         Navigator.pop(context);
-                        final result = await FilePicker.platform.pickFiles(
-                          type: FileType.custom,
-                          allowedExtensions: ['srt', 'ass', 'ssa', 'sub', 'idx', 'vtt'],
+                        final result = await FilePicker.pickFile(
+                          type: .custom,
+                          allowedExtensions: const ['srt', 'ass', 'ssa', 'sub', 'idx', 'vtt'],
                         );
-                        final p = result?.files.single.path;
+                        final p = result?.xFile.path;
                         if (p != null) {
                           await _c.addSubtitleFile(p);
                           SmartDialog.showToast('已尝试加载外挂字幕');

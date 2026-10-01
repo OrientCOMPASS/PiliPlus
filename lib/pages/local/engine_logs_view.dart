@@ -7,7 +7,6 @@ import 'package:PiliPlus/services/logger.dart';
 import 'package:PiliPlus/utils/date_utils.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
-import 'package:get/get.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -113,11 +112,12 @@ class _EngineLogsPageState extends State<EngineLogsPage> {
       buffer.writeln(_nativeLines.isEmpty ? '(空)' : _nativeLines.join('\n'));
 
       final dir = await getTemporaryDirectory();
+      final hash = BuildConfig.commitHash;
+      final shortHash = hash.length > 9 ? hash.substring(0, 9) : hash;
       final file = File(
         p.join(
           dir.path,
-          'PiliPlus_diag_${BuildConfig.commitHash == 'N/A' ? 'dev' : BuildConfig.commitHash.substring(0, (BuildConfig.commitHash.length).clamp(0, 9))}_'
-              '${DateTime.now().millisecondsSinceEpoch}.txt',
+          'PiliPlus_diag_${shortHash}_${DateTime.now().millisecondsSinceEpoch}.txt',
         ),
       );
       await file.writeAsString(buffer.toString());

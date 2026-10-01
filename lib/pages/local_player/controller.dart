@@ -94,7 +94,6 @@ class LocalPlayerController extends GetxController {
   bool _attached = false;
   bool _subtitleAutoDetectDone = false;
   bool _useGlVout = false;
-  int _viewId = -1;
 
   String get currentUri => uris[index.value];
   String get currentTitle =>
@@ -146,7 +145,6 @@ class LocalPlayerController extends GetxController {
 
   /// Called by the view when the platform view is created.
   Future<void> attachView(int viewId) async {
-    _viewId = viewId;
     if (_attached) return;
     try {
       await _ch.playerAttach(viewId);
@@ -441,7 +439,7 @@ class LocalPlayerController extends GetxController {
     if (filePath == null || !filePath.contains('.')) return;
     Future(() {
       const exts = ['.srt', '.ass', '.ssa', '.vtt', '.sub', '.idx'];
-      final base = filePath!.substring(0, filePath!.lastIndexOf('.'));
+      final base = filePath.substring(0, filePath.lastIndexOf('.'));
       for (final ext in exts) {
         try {
           final f = File('$base$ext');

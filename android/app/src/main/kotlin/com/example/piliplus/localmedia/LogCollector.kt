@@ -29,8 +29,8 @@ object LogCollector {
     private var thread: Thread? = null
 
     fun add(level: String, tag: String, msg: String) {
-        val line = "${timeFmt.format(Date())} $level/$tag: $msg"
         synchronized(lock) {
+            val line = "${timeFmt.format(Date())} $level/$tag: $msg"
             buffer.addLast(line)
             while (buffer.size > MAX_LINES) buffer.removeFirst()
         }

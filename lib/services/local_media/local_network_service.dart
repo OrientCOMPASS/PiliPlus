@@ -180,6 +180,8 @@ class LocalNetworkService extends GetxService {
 
   void showLoginDialog(Map event) {
     if (_loginDialogOpen) return;
+    final context = Get.context;
+    if (context == null) return;
     _loginDialogOpen = true;
     final id = (event['id'] as num?)?.toInt() ?? -1;
     final title = event['title'] as String? ?? '需要登录';
@@ -188,8 +190,10 @@ class LocalNetworkService extends GetxService {
     final userController = TextEditingController(text: username);
     final passController = TextEditingController();
 
-    Get.dialog(
-      AlertDialog(
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
         title: Text(title),
         content: Column(
           mainAxisSize: MainAxisSize.min,
@@ -218,7 +222,7 @@ class LocalNetworkService extends GetxService {
           TextButton(
             onPressed: () {
               _ch.dialogDismiss(id);
-              Get.back();
+              Navigator.pop(dialogContext);
               _loginDialogOpen = false;
             },
             child: const Text('取消'),
@@ -230,14 +234,13 @@ class LocalNetworkService extends GetxService {
                 username: userController.text,
                 password: passController.text,
               );
-              Get.back();
+              Navigator.pop(dialogContext);
               _loginDialogOpen = false;
             },
             child: const Text('登录'),
           ),
         ],
       ),
-      barrierDismissible: false,
     );
   }
 

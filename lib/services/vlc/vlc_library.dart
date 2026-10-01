@@ -1,4 +1,5 @@
 import 'package:PiliPlus/models/local_media/vlc_media.dart';
+import 'package:PiliPlus/services/log_collector.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 
@@ -54,15 +55,18 @@ class VlcLibrary extends GetxController {
     try {
       busy.value = true;
       final res = await _ch.invokeMethod<Map<dynamic, dynamic>>('init');
-      _initStarted = true;
       if (res?.containsKey('error') == true) {
+        // native 侧已把根因写进 LogCollector; 这里再补一条 Dart 视角的记录
         lastError.value = 'VLC 媒体库初始化失败: ${res?['error']}';
+        NativeLogCollector.push('VlcLibrary', lastError.value!);
         busy.value = false;
         return false;
       }
+      _initStarted = true;
       return true;
     } catch (e) {
       lastError.value = 'VLC 媒体库初始化失败: $e';
+      NativeLogCollector.push('VlcLibrary', lastError.value!);
       busy.value = false;
       return false;
     }
@@ -79,6 +83,7 @@ class VlcLibrary extends GetxController {
       ];
     } catch (e) {
       lastError.value = '读取媒体库失败: $e';
+      NativeLogCollector.push('VlcLibrary', lastError.value!);
       return const [];
     }
   }
@@ -129,6 +134,7 @@ class VlcLibrary extends GetxController {
       await _ch.invokeMethod<void>('rescan', {'full': full});
     } catch (e) {
       lastError.value = '重扫失败: $e';
+      NativeLogCollector.push('VlcLibrary', lastError.value!);
       busy.value = false;
     }
   }

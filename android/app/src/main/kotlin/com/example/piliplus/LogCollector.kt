@@ -128,13 +128,14 @@ object LogCollector {
     private fun startCapture() {
         if (started) return
         started = true
-        val t = Thread {
+        val th = Thread {
             // 注意: 文件头 import 了 android.os.Process, 这里必须写全限定名
             var proc: java.lang.Process? = null
             try {
-                proc = Runtime.getRuntime().exec(arrayOf("logcat", "-v", "threadtime"))
+                val p = Runtime.getRuntime().exec(arrayOf("logcat", "-v", "threadtime"))
+                proc = p
                 val myPid = Process.myPid().toString()
-                BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
+                BufferedReader(InputStreamReader(p.inputStream)).use { reader ->
                     var line = reader.readLine()
                     while (line != null && started) {
                         if (interesting(line, myPid)) {
@@ -143,16 +144,16 @@ object LogCollector {
                         line = reader.readLine()
                     }
                 }
-            } catch (t: Throwable) {
+            } catch (e: Throwable) {
                 // 部分定制 ROM 禁了 logcat exec; 收集器退化为"只有显式记录"
-                Log.w(TAG, "logcat capture unavailable: ${t.message}")
+                Log.w(TAG, "logcat capture unavailable: ${e.message}")
             } finally {
                 proc?.destroy()
             }
         }
-        t.isDaemon = true
-        t.name = "pili-logcat"
-        t.start()
+        th.isDaemon = true
+        th.name = "pili-logcat"
+        th.start()
     }
 
     private fun interesting(line: String, myPid: String): Boolean {

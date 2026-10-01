@@ -107,7 +107,16 @@ class _LogsPageState extends State<LogsPage> {
       ..writeln('导出时间: $now')
       ..writeln('版本: ${pkg.version}+${pkg.buildNumber} (${pkg.packageName})')
       ..writeln('Commit: ${BuildConfig.commitHash}')
-      ..writeln('构建时间戳: ${BuildConfig.buildTime}')
+      ..writeln('构建时间戳: ${BuildConfig.buildTime}');
+    if (_deviceInfo case final d?) {
+      buf
+        ..writeln()
+        ..writeln('===== 设备/应用参数 =====')
+        ..writeln('deviceParameters: ${d.$1}')
+        ..writeln('applicationParameters: ${d.$2}')
+        ..writeln('customParameters: ${d.$3}');
+    }
+    buf
       ..writeln()
       ..writeln('===== Dart 错误报告 (catcher, ${logsContent.length} 条) =====');
     for (final item in logsContent) {

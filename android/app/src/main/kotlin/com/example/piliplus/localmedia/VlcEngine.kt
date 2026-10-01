@@ -53,7 +53,19 @@ object VlcEngine {
             options.add("--network-caching=2000")
             val instance = LibVLC(context.applicationContext, options)
             Dialog.setCallbacks(instance, object : Dialog.Callbacks {
-                override fun onDisplay(dialog: Dialog) {
+                override fun onDisplay(dialog: Dialog.ErrorMessage) {
+                    main.post { handleDialog(dialog) }
+                }
+
+                override fun onDisplay(dialog: Dialog.LoginDialog) {
+                    main.post { handleDialog(dialog) }
+                }
+
+                override fun onDisplay(dialog: Dialog.QuestionDialog) {
+                    main.post { handleDialog(dialog) }
+                }
+
+                override fun onDisplay(dialog: Dialog.ProgressDialog) {
                     main.post { handleDialog(dialog) }
                 }
             })

@@ -12,8 +12,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
+import org.videolan.libvlc.interfaces.IMedia
 import org.videolan.libvlc.util.VLCVideoLayout
 
 /**
@@ -114,14 +114,14 @@ class PlayerBridge(private val context: Context) {
             MediaPlayer.Event.Buffering ->
                 emit(playerEvent("buffering", event.buffering.toDouble()))
             MediaPlayer.Event.LengthChanged -> {
-                lengthMs = event.mediaPlayer.length
+                lengthMs = event.lengthChanged
                 emit(mapOf("type" to "time", "ms" to time(), "lengthMs" to lengthMs))
             }
             MediaPlayer.Event.TimeChanged ->
-                emit(mapOf("type" to "time", "ms" to event.mediaPlayer.time, "lengthMs" to lengthMs))
+                emit(mapOf("type" to "time", "ms" to event.timeChanged, "lengthMs" to lengthMs))
             MediaPlayer.Event.Vout -> emit(playerEvent("vout", event.voutCount.toDouble()))
             MediaPlayer.Event.ESAdded, MediaPlayer.Event.ESDeleted -> publishTracks()
-            MediaPlayer.Event.Seekable, MediaPlayer.Event.Pausable -> Unit
+            MediaPlayer.Event.SeekableChanged, MediaPlayer.Event.PausableChanged -> Unit
             else -> Unit
         }
     }
@@ -273,7 +273,7 @@ class PlayerBridge(private val context: Context) {
     fun addSubtitle(uri: String): Boolean {
         val p = player ?: return false
         return try {
-            p.addSlave(Media.Slave.Type.Subtitle, Uri.parse(uri), true)
+            p.addSlave(IMedia.Slave.Type.Subtitle, Uri.parse(uri), true)
         } catch (t: Throwable) {
             LogCollector.e(TAG, "addSlave subtitle failed: $uri", t)
             false

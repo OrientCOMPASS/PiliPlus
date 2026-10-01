@@ -55,7 +55,7 @@ object LogCollector {
         if (capturing) return
         capturing = true
         thread = Thread({
-            var proc: Process? = null
+            var proc: java.lang.Process? = null
             try {
                 // Flush stale logs, then follow.
                 Runtime.getRuntime().exec(arrayOf("logcat", "-c")).waitFor()

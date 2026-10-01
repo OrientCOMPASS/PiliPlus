@@ -1625,3 +1625,164 @@ Dart 侧：`lib/services/vlc/`（三个门面）+ `lib/models/local_media/vlc_me
   （lib/services/vlc、lib/pages/video/vlc、lib/pages/local_media、
   lib/models/local_media、test/models/vlc_media_test.dart）；
 - 发布流程不变：删旧 `v2.1.5-test` release+tag → 重打 tag → CI 出 arm64 包。
+
+## 18. 第十三轮：媒体库初始化修复、错误日志导出、libvlc VR 补丁管线
+
+第十二轮的包真机反馈两件事：**VLC 媒体库初始化失败**、**设置里没有错误日志
+导出**（失败了也看不到根因）。本轮修复这两个问题，并按需求给 libvlc 补上
+**多种 VR 格式**（上下/左右 × 180/360），为此建立了 libvlc 补丁构建管线。
+
+### 18.1 媒体库初始化失败：跳过了 `construct()`
+
+反编译 `medialibrary-all:0.13.21` 的 `MedialibraryImpl` 后实锤：
+
+```java
+public int init(Context context) {
+    ...
+    if (MLContextTools.getInstance().getContext() == null)
+        throw new IllegalStateException("Medialibrary construct has to be called before init");
+    ...
+}
+```
+
+`init()` 之前必须调 `construct(context)` —— 它才是加载 native 库
+（`LibVLC.loadLibraries()` + `c++_shared` + `mla`）、注册 JNI
+（`nativeConstruct(db路径, 缩略图路径)`）、登记 `MLContextTools` 的入口。
+旧桥直接 `MedialibraryImpl()` → `init()`，**任何设备上都必然抛
+IllegalStateException**。CI 编译期发现不了（两个方法都是 public），这就是
+"编译全绿、真机必挂"的原因。
+
+修复后的序列严格对齐 vlc-android 自家 `MediaParsingService`：
+
+| 步骤 | 作用 | 旧桥 |
+| --- | --- | --- |
+| `Medialibrary.getInstance()` | 单例（`MLServiceLocator` 默认模式给真实现） | ❌ 自己 new |
+| `construct(context)` | 加载 native 库 + JNI 注册 + db/缩略图路径 | ❌ **漏了（根因）** |
+| `addDevice(uuid, path, removable)` × 每个存储卷 | init 前登记设备（主存储 uuid=`main-storage`） | ❌ 漏了 |
+| `init(context)` | 开库/建库；状态码 0/1/3/4 可用，2/5 失败 | ⚠️ 有但必炸；状态码未区分 |
+| `setLibVLCInstance(VlcCore.get().instance)` | libml 解析元数据/缩略图需要 libvlc 指针 | ❌ 漏了 |
+| `start()` + `banFolder(Android/)` + `discover(卷)` | 起后台任务并开始扫描 | ⚠️ 顺序对但到不了这里 |
+
+另修一个重试语义 bug：Dart 侧 `VlcLibrary.init()` 原来无论成败都置
+`_initStarted=true`，失败后再进板块不会重试；现在只有成功才置位，
+Kotlin 桥的 `constructed`/`isInitiated`/`isStarted` 三段守卫保证重入安全
+（`construct()` 每进程只许成功执行一次，重复 `nativeConstruct` 会重复注册 JNI）。
+
+### 18.2 错误日志记录与导出（设置 → 关于 → 日志）
+
+以前引擎错误只进 logcat，没 adb 就看不到。新增：
+
+- **Kotlin `LogCollector`**（`com.example.piliplus.LogCollector`）：
+  - 环形缓冲 4000 行；后台守护线程 `logcat -v threadtime` 抓**本进程**的行，
+    只保留 W/E/F 级别 + VLC 引擎相关 tag（libvlc/VLC/*/medialibrary/mla），
+    所以 `MedialibraryImpl` 的 JNI 报错、libvlc 内部错误都会进缓冲；
+  - 显式 `e/w/i(tag,msg,throwable)`（带堆栈）会同时镜像到 logcat 方便 adb，
+    抓取线程按自有 tag 去重，不会双份；
+  - MethodChannel `piliplus/log_collector`：`dump(limit)` / `clear` / `push`；
+  - 三个 VLC 桥与 `VlcCore` 的所有 catch 全部改道 LogCollector。
+- **Dart 门面** `lib/services/log_collector.dart`；VLC 播放/媒体库的失败路径
+  也会 `push` 进同一缓冲（Dart 视角 + native 视角合成一份）。
+- **日志页**（既有 `/logs`）新增：
+  - 「导出日志(含引擎日志)」：应用/构建信息（版本、commit、构建时间）+
+    catcher 错误报告 + 引擎日志缓冲 → txt → 系统分享面板；
+  - 「引擎日志(native)」：等宽字体查看/刷新/复制/清空；
+  - 「清空日志」同时清 native 缓冲。
+
+### 18.3 libvlc VR 改造：补丁而非应用侧重投影
+
+需求：支持**上下/左右（TB/SBS）× 180/360** 的 VR 片源。官方 libvlc 3.x 的
+球面渲染只认元数据、只取左眼、没有 180°。两条路线：
+
+| 路线 | 结论 |
+| --- | --- |
+| A. 应用侧重投影（VLC 平面输出 → 自己的 GL 球面 → Flutter 纹理） | ❌ 对**已有元数据**的 360 片源，libvlc 会自动进球面渲染且无法按 media 关闭，拿不到平面 equirect 输出；且等于把第十~十四轮已退役的第二渲染栈请回来 |
+| B. 给 libvlc 打补丁（改 `vout_display_opengl`） | ✅ 采用：复用 VLC 自己的 360 管线，`updateViewpoint`/头追/字幕全部天然可用，无额外 GL pass |
+
+补丁内容（`tool/libvlc-vr/patches/vlc/0001-*.patch`，基于 vlc 3.0.x
+`66455a98`，即 libvlc-all 3.7.6 的锁定源码）：
+
+| 文件 | 改动 |
+| --- | --- |
+| `modules/video_output/opengl/display.c` | 新选项 `vr-projection`(0 元数据/1 强制等距柱状/2 强制平面)、`vr-layout`(0 元数据/1 单目/2 SBS/3 TB)、`vr-coverage`(360/180)、`vr-eye`(左/右)；`Open()` 在 `vout_display_opengl_New()` **之前**改写 `vd->fmt` 的 projection/multiview（于是纹理程序、视点初始化、网格选择全部一致），之后 `SetVrParams(coverage, eye)` |
+| `vout_helper.c/h` | `BuildSphere()` 覆盖角参数化：经度窗口 `[π-cov/2, π+cov/2]`，以 phi=π 为中心（u=0.5 恰在初始视角正前方，cov=2π 时与上游几何逐点一致）；**顺手修上游 bug**——球面纹理坐标没加 `left/top` 窗口偏移，右眼裁剪实际采样的是左眼像素（`BuildRectangle/BuildCube` 一直是加偏移的）；`TextureCropForStereo()` 眼位按 `vr-eye` 选择（原写死左眼） |
+| `lib/core.c` | `libvlc_get_changeset()` 返回 `piliplus-vr1`：app 运行时特性探测标记（真实 revision 仍由启动日志输出） |
+
+**选项下发机制**（已在源码核实，非猜测）：`Media.addOption(":vr-layout=2")`
+→ `input_item_AddOption(TRUSTED)` → 输入线程对象上 `var_OptionParse` 建变量 →
+vout display 模块 `var_InheritInteger` 沿 display→vout→input 父链取到
+（`src/misc/variables.c: var_Inherit` 含 config 回退与 STRING→INTEGER 转换）。
+**不需要改 libvlcjni JNI 层**，也不影响其它模块。
+
+局限（与 mpv 补丁时代一致）：180° 陀螺仪环视不夹偏航（转出覆盖范围见黑），
+手动拖拽按 `±(coverage-fov)/2` 收敛（在 Kotlin 桥做）；立体**分屏输出**
+（Cardboard 双眼）仍没有——需求是"多种 VR 格式播放"，单眼输出与 VLC 安卓版
+行为一致。
+
+### 18.4 构建管线：补丁入库 + CI 按需拉源码（回答"是否把 libvlc 源码拉进仓库"）
+
+**不 vendored vlc 源码**（数百 MB，污染仓库），采用 libmpv-vr 同款
+"补丁入库、源码按需拉"模式；但 **libvlcjni（1.2MB）vendored 进
+`tool/libvlc-vr/libvlcjni/`**——这是被现实逼的：code.videolan.org 部署了
+Anubis 反爬，git clone 对数据中心 IP 直接拒绝（沙盒与 GitHub runner 同样被挡，
+沙盒已实测），而 libvlcjni 只在那里托管。vlc core 从 GitHub 官方镜像
+`videolan/vlc` 按需克隆到锁定 commit（镜像上该 commit 已验证存在）。
+
+`.github/workflows/libvlc_vr.yml`（push 触及 `tool/libvlc-vr/**` 或手动触发）：
+
+1. 容器 = VideoLAN 官方 CI 构建 arm64 libvlc 的同一镜像
+   `registry.videolan.org/vlc-debian-android:20260610055743`（公开可拉，
+   内含 NDK r27-29 与全部构建依赖，免去自装工具链的兼容性赌博）；
+2. 克隆 vlc → `git am --message-id` 先重放 libvlcjni 官方 20 补丁，再叠 VR 补丁
+   （20 个官方补丁均不触及 `video_output/opengl` 与 `lib/core.c`，无冲突）；
+3. contribs 用 VideoLAN 预编译包：sha `4d08fe2a…`（= 锁定 vlc commit 的
+   contrib 状态，按其 `extras/ci/get-contrib-sha.sh` 规则算出），
+   `artifacts.videolan.org/vlc-3.0/android-arm64/….tar.zst`（126MB，已验证存在；
+   contrib 的 `prebuilt` 目标原生支持 zst）。**注意**：vlc-android 自己的
+   compile.sh 写死 `.tar.bz2` URL，现已 404，会静默退化成 1~2 小时的 contribs
+   源码编译——所以我们绕过 compile.sh，直接调 libvlcjni 的
+   `compile-libvlc.sh -a arm64-v8a --release --with-prebuilt-contribs`
+   并显式传 zst URL；
+4. **AAR 换心**：官方 `libvlc-all-3.7.6.aar`（sha256 校验
+   `6b438ab7…`）只替换 `jni/arm64-v8a/{libvlc,libvlcjni,libc++_shared}.so`，
+   classes/assets/res/其余 ABI 逐字节保留——**不跑 gradle**（避开 AGP 9 /
+   Gradle 9.3.1 / JDK 组合风险），Kotlin API 本来就零改动；
+5. 自检：`strings libvlc.so` 必须含 `vr-projection/vr-layout/vr-coverage/
+   vr-eye/piliplus-vr1`，缺一即失败（防止补丁没打上就出包）；
+6. 发布到滚动 release **`libvlc-vr`**，资产名固定
+   `libvlc-all-3.7.6-pvr1-arm64-v8a.aar`（补丁迭代升 pvr2…，同名资产内容
+   不再变更），附 `.sha256` 边车。
+
+app 侧 `android/app/build.gradle.kts`：`downloadLibVlcVr` 任务（ant.get，
+重试 3 次）下载 AAR + 边车校验 sha256，通过才**原子落盘**（`.part` → rename，
+中断残留自动重下）；`implementation(files(downloadLibVlcVr))` 自动挂任务依赖。
+`medialibrary-all:0.13.21` 无需补丁，仍走 Maven Central。
+
+### 18.5 应用侧 VR 接入
+
+- `lib/models/local_media/vr_format.dart`：`VrFormat` 枚举
+  `auto/off/e360/sbs360/tb360/e180/sbs180/tb180`，`bridgeMode`(0..7) 与
+  Kotlin 桥的 vrMode 约定一致（单测锁定映射）；`detectFromName` 移植自 mpv
+  时代验证过的启发式（词边界匹配，`360p/1080p` 不误判；识别不到返回 null → auto）。
+- `VlcPlayerBridge`：`open(vrMode, vrEye)` → media 选项；`is360` =
+  强制沉浸(2..7) 或 auto+元数据；`engineInfo` 返回 version/changeset；
+  180° 手动偏航收敛；`:vr-eye` 全模式下发（auto 下元数据 SBS/TB 源也能切眼位）。
+- 播放页：菜单「VR/全景…」——格式单选（含 auto 与强制平面）、眼位开关、
+  「按文件名识别」开关（`Pref.vrAutoDetect`，默认开）、引擎版本行；
+  非补丁引擎时明确提示强制格式不生效。切换格式/眼位 = **原位重开**
+  （media 选项只在装载时生效，重开自动带上当前进度）。
+  HUD 显示格式/覆盖角/眼位读数。
+
+### 18.6 本轮验证与已知边界
+
+- Dart：新增 `test/models/vr_format_test.dart`（识别/映射回归，用例移植自
+  mpv 时代）；沙盒以 Dart SDK 3.13.5 `dart format` 做全量语法解析校验，
+  analyze/test 以 CI 为准；STRICT_PATHS 增补 `lib/services/log_collector.dart`
+  与 vr_format 测试。
+- Kotlin/补丁：沙盒无 Android SDK 与交叉工具链，Kotlin 靠 CI gradle 编译、
+  C 补丁靠 libvlc_vr 工作流编译验证（strings 自检防"没打上补丁就出包"）；
+  **渲染几何未经真机验证**——180° 网格中心对齐 phi=π、右眼 UV 偏移、
+  `--vr-*` 继承链三处是纯源码推导（与 §15 mpv 补丁同一套约定），
+  真机若有上下颠倒/镜像优先查 `BuildSphere` 的 phi0/u 偏移符号。
+- 已知边界：VR 仅本地/局域网播放页（在线 B 站仍走 media_kit/mpv，无 VR，
+  与第十三轮前一致）；引擎日志缓冲在进程内，进程被杀即失（导出请及时）；
+  非 arm64 ABI 拿到的仍是官方 libvlc（强制格式静默无效，auto 行为不变）。

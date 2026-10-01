@@ -15,7 +15,6 @@ import android.os.Looper
 import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
 import org.videolan.libvlc.util.VLCVideoLayout
-import kotlin.math.abs
 
 /**
  * Wraps one libvlc MediaPlayer for local / LAN playback.
@@ -156,7 +155,7 @@ class PlayerBridge(private val context: Context) {
 
     fun detach() {
         val p = player ?: return
-        val v = attachedView ?: return
+        if (attachedView == null) return
         runCatching { p.detachViews() }
         attachedView = null
     }
@@ -296,8 +295,8 @@ class PlayerBridge(private val context: Context) {
     // ---- VR -----------------------------------------------------------------
 
     fun vrVersion(): Int {
-        val p = player ?: run { ensurePlayer() }
-        return VlcCompat.getVrVersion(player!!)
+        val p = ensurePlayer()
+        return VlcCompat.getVrVersion(p)
     }
 
     fun setVrMode(projection: Int, stereo: Int, eye: Int): Boolean {
@@ -334,7 +333,7 @@ class PlayerBridge(private val context: Context) {
         } else {
             updateViewpoint(0f, 0f, vpFov, true)
         }
-        emitHud(force = true)
+        emitHud()
     }
 
     fun setFov(fov: Float) {
@@ -378,7 +377,7 @@ class PlayerBridge(private val context: Context) {
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
 
-    private fun emitHud(force: Boolean = false) {
+    private fun emitHud() {
         emit(
             mapOf(
                 "type" to "vrHud",

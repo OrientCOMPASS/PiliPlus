@@ -142,9 +142,8 @@ object LocalMediaPlugin : MethodChannel.MethodCallHandler {
 
                 // ---------- player ----------
                 "playerCreate" -> {
-                    val p = player ?: PlayerBridge(appContext).also {
-                        player = it
-                        it.eventSink = ::emit
+                    if (player == null) {
+                        player = PlayerBridge(appContext).also { it.eventSink = ::emit }
                     }
                     result.success(true)
                 }
@@ -156,10 +155,7 @@ object LocalMediaPlugin : MethodChannel.MethodCallHandler {
                         result.error("NO_VIEW", "video view $viewId not found", null)
                         return
                     }
-                    val p = player ?: PlayerBridge(appContext).also {
-                        player = it
-                        it.eventSink = ::emit
-                    }
+                    val p = requirePlayer(result) ?: return
                     p.attach(layout)
                     result.success(true)
                 }
@@ -443,7 +439,7 @@ object LocalMediaPlugin : MethodChannel.MethodCallHandler {
         val pkg = appContext.packageName
         val versionInfo = runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                pm.getPackageInfo(pkg, android.content.pm.PackageManager.PackageInfoFlags.of(0))
+                pm.getPackageInfo(pkg, android.content.pm.PackageManager.PackageInfoFlags.of(0L))
             } else {
                 @Suppress("DEPRECATION")
                 pm.getPackageInfo(pkg, 0)

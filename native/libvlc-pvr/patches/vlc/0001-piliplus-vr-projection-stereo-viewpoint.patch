@@ -1,0 +1,873 @@
+diff --git a/include/vlc/libvlc_media_player.h b/include/vlc/libvlc_media_player.h
+index f8e78f4..d052133 100644
+--- a/include/vlc/libvlc_media_player.h
++++ b/include/vlc/libvlc_media_player.h
+@@ -1214,6 +1214,38 @@ LIBVLC_API int libvlc_video_update_viewpoint( libvlc_media_player_t *p_mi,
+                                               const libvlc_video_viewpoint_t *p_viewpoint,
+                                               bool b_absolute);
+ 
++/**
++ * PiliPlus VR extension: capability ABI version.
++ *
++ * \return 1 for builds with the PiliPlus VR extension. This symbol does not
++ * exist at all in stock libvlc builds.
++ */
++LIBVLC_API int libvlc_pili_vr_version(void);
++
++/**
++ * PiliPlus VR extension: set the VR rendering mode.
++ *
++ * Can be called before playback starts (the mode is applied when the video
++ * output is created) or during playback (takes effect in place, without
++ * restarting playback).
++ *
++ * \param p_mi the media player
++ * \param i_projection 0: auto (source metadata), 1: flat (2D),
++ *                     2: equirectangular 360 degrees,
++ *                     3: equirectangular 180 degrees
++ * \param i_stereo 0: auto (source metadata), 1: mono,
++ *                 2: side-by-side, 3: top-bottom
++ * \param i_eye which eye to render for stereo sources: 0: left, 1: right
++ * \return 0 on success, -1 on error
++ *
++ * \note the values are set asynchronously, they will be used by the next
++ * frame displayed.
++ */
++LIBVLC_API int libvlc_media_player_set_vr_mode( libvlc_media_player_t *p_mi,
++                                                int i_projection,
++                                                int i_stereo,
++                                                int i_eye );
++
+ /**
+  * Get current video subtitle.
+  *
+diff --git a/include/vlc_input.h b/include/vlc_input.h
+index 5f143d7..0cdbce9 100644
+--- a/include/vlc_input.h
++++ b/include/vlc_input.h
+@@ -440,6 +440,9 @@ enum input_query_e
+     INPUT_UPDATE_VIEWPOINT, /* arg1=(const vlc_viewpoint_t*), arg2=bool b_absolute */
+     INPUT_SET_INITIAL_VIEWPOINT, /* arg1=(const vlc_viewpoint_t*) */
+ 
++    /* PiliPlus VR extension */
++    INPUT_SET_VR_MODE,      /* arg1=int projection, arg2=int stereo, arg3=int eye */
++
+     /* Input ressources
+      * XXX You must call vlc_object_release as soon as possible */
+     INPUT_GET_AOUT,         /* arg1=audio_output_t **              res=can fail */
+@@ -567,6 +570,23 @@ static inline int input_UpdateViewpoint( input_thread_t *p_input,
+                           b_absolute );
+ }
+ 
++/**
++ * Set the VR rendering mode (PiliPlus VR extension).
++ *
++ * \param p_input the input thread
++ * \param i_projection 0: auto (metadata), 1: flat (2D),
++ *                     2: equirectangular 360, 3: equirectangular 180
++ * \param i_stereo 0: auto (metadata), 1: mono,
++ *                 2: side-by-side, 3: top-bottom
++ * \param i_eye 0: left eye, 1: right eye
++ */
++static inline int input_SetVrMode( input_thread_t *p_input, int i_projection,
++                                   int i_stereo, int i_eye )
++{
++    return input_Control( p_input, INPUT_SET_VR_MODE, i_projection, i_stereo,
++                          i_eye );
++}
++
+ /**
+  * Return the audio output (if any) associated with an input.
+  * @param p_input an input thread
+diff --git a/include/vlc_vout_display.h b/include/vlc_vout_display.h
+index 80761c8..e6ee675 100644
+--- a/include/vlc_vout_display.h
++++ b/include/vlc_vout_display.h
+@@ -181,6 +181,10 @@ enum {
+     /* Ask the module to acknowledge/refuse VR/360° viewing direction after
+      * being requested externally */
+     VOUT_DISPLAY_CHANGE_VIEWPOINT,   /* const vout_display_cfg_t *p_cfg */
++
++    /* PiliPlus VR extension: ask the module to acknowledge/refuse a VR
++     * rendering mode change: int projection, int stereo, int eye */
++    VOUT_DISPLAY_CHANGE_VR_MODE,
+ };
+ 
+ /**
+diff --git a/include/vlc_vout_wrapper.h b/include/vlc_vout_wrapper.h
+index 96b954a..c54e876 100644
+--- a/include/vlc_vout_wrapper.h
++++ b/include/vlc_vout_wrapper.h
+@@ -91,6 +91,7 @@ void vout_SetDisplayAspect(vout_display_t *, unsigned num, unsigned den);
+ void vout_SetDisplayCrop(vout_display_t *, unsigned num, unsigned den,
+                          unsigned left, unsigned top, int right, int bottom);
+ void vout_SetDisplayViewpoint(vout_display_t *, const vlc_viewpoint_t *);
++void vout_SetDisplayVrMode(vout_display_t *, int projection, int stereo, int eye);
+ 
+ #endif /* VLC_VOUT_WRAPPER_H */
+ 
+diff --git a/lib/libvlc.sym b/lib/libvlc.sym
+index 02276b6..b9f913a 100644
+--- a/lib/libvlc.sym
++++ b/lib/libvlc.sym
+@@ -288,6 +288,8 @@ libvlc_video_set_track
+ libvlc_video_take_snapshot
+ libvlc_video_new_viewpoint
+ libvlc_video_update_viewpoint
++libvlc_pili_vr_version
++libvlc_media_player_set_vr_mode
+ libvlc_vlm_add_broadcast
+ libvlc_vlm_add_vod
+ libvlc_vlm_add_input
+diff --git a/lib/media_player.c b/lib/media_player.c
+index 0fd04c5..3e26707 100644
+--- a/lib/media_player.c
++++ b/lib/media_player.c
+@@ -754,6 +754,13 @@ libvlc_media_player_new( libvlc_instance_t *instance )
+ 
+     mp->p_md = NULL;
+     mp->state = libvlc_NothingSpecial;
++
++    /* PiliPlus VR extension: VR mode variables, inherited by the input
++     * thread when playback starts. */
++    var_Create(mp, "vr-projection", VLC_VAR_INTEGER);
++    var_Create(mp, "vr-stereo", VLC_VAR_INTEGER);
++    var_Create(mp, "vr-eye", VLC_VAR_INTEGER);
++
+     mp->p_libvlc_instance = instance;
+     mp->input.p_thread = NULL;
+     mp->input.p_renderer = NULL;
+diff --git a/lib/video.c b/lib/video.c
+index 46c67d8..8ebf3e7 100644
+--- a/lib/video.c
++++ b/lib/video.c
+@@ -334,6 +334,34 @@ int libvlc_video_update_viewpoint( libvlc_media_player_t *p_mi,
+     return 0;
+ }
+ 
++int libvlc_pili_vr_version(void)
++{
++    return 1;
++}
++
++int libvlc_media_player_set_vr_mode( libvlc_media_player_t *p_mi,
++                                     int i_projection, int i_stereo,
++                                     int i_eye )
++{
++    input_thread_t *p_input_thread = libvlc_get_input_thread( p_mi );
++    if( p_input_thread != NULL )
++    {
++        int i_ret = input_SetVrMode( p_input_thread, i_projection, i_stereo,
++                                     i_eye );
++        vlc_object_release( p_input_thread );
++        if( i_ret != VLC_SUCCESS )
++            return -1;
++    }
++
++    /* Always store the mode on the media player variables so that an input
++     * thread created later inherits it (same mechanism as the viewpoint). */
++    var_SetInteger( p_mi, "vr-projection", i_projection );
++    var_SetInteger( p_mi, "vr-stereo", i_stereo );
++    var_SetInteger( p_mi, "vr-eye", i_eye );
++
++    return 0;
++}
++
+ int libvlc_video_get_spu( libvlc_media_player_t *p_mi )
+ {
+     input_thread_t *p_input_thread = libvlc_get_input_thread( p_mi );
+diff --git a/modules/video_output/android/display.c b/modules/video_output/android/display.c
+index 25cef43..c4f290d 100644
+--- a/modules/video_output/android/display.c
++++ b/modules/video_output/android/display.c
+@@ -614,6 +614,14 @@ static int OpenCommon(vout_display_t *vd)
+     vout_display_sys_t *sys;
+     video_format_t sub_fmt;
+ 
++    /* PiliPlus VR extension: a forced spherical projection must be handled
++     * by the OpenGL vout, even when the source has no projection metadata. */
++    {
++        const int vr_projection = var_InheritInteger(vd, "vr-projection");
++        if (vr_projection == 2 /* 360 */ || vr_projection == 3 /* 180 */)
++            return VLC_EGENERIC;
++    }
++
+     /* Fallback to normal projection in case of soft decoding/display (the
+      * openGL vout, with a higher priority, should be used when the projection
+      * need to be handled). */
+diff --git a/modules/video_output/opengl/display.c b/modules/video_output/opengl/display.c
+index ec67110..b329438 100644
+--- a/modules/video_output/opengl/display.c
++++ b/modules/video_output/opengl/display.c
+@@ -142,8 +142,14 @@ static int Open (vlc_object_t *obj)
+     if (vlc_gl_MakeCurrent (sys->gl))
+         goto error;
+ 
++    /* PiliPlus VR extension: initial VR mode inherited from the vout */
++    const int vr_projection = var_InheritInteger (vd, "vr-projection");
++    const int vr_stereo = var_InheritInteger (vd, "vr-stereo");
++    const int vr_eye = var_InheritInteger (vd, "vr-eye");
++
+     sys->vgl = vout_display_opengl_New (&vd->fmt, &spu_chromas, sys->gl,
+-                                        &vd->cfg->viewpoint);
++                                        &vd->cfg->viewpoint,
++                                        vr_projection, vr_stereo, vr_eye);
+     vlc_gl_ReleaseCurrent (sys->gl);
+ 
+     if (sys->vgl == NULL)
+@@ -279,6 +285,14 @@ static int Control (vout_display_t *vd, int query, va_list ap)
+       case VOUT_DISPLAY_CHANGE_VIEWPOINT:
+         return vout_display_opengl_SetViewpoint (sys->vgl,
+             &va_arg (ap, const vout_display_cfg_t* )->viewpoint);
++      case VOUT_DISPLAY_CHANGE_VR_MODE:
++      {
++        const int projection = va_arg (ap, int);
++        const int stereo = va_arg (ap, int);
++        const int eye = va_arg (ap, int);
++        return vout_display_opengl_SetVrMode (sys->vgl, projection, stereo,
++                                              eye);
++      }
+       default:
+         msg_Err (vd, "Unknown request %d", query);
+     }
+diff --git a/modules/video_output/opengl/vout_helper.c b/modules/video_output/opengl/vout_helper.c
+index 13d65e0..6f6092e 100644
+--- a/modules/video_output/opengl/vout_helper.c
++++ b/modules/video_output/opengl/vout_helper.c
+@@ -171,8 +171,61 @@ struct vout_display_opengl_t {
+     float f_z;    /* Position of the camera on the shpere radius vector */
+     float f_z_min;
+     float f_sar;
++
++    /* PiliPlus VR extension */
++    int  vr_projection; /* 0 auto, 1 flat, 2 equirect 360, 3 equirect 180 */
++    int  vr_stereo;     /* 0 auto, 1 mono, 2 side-by-side, 3 top-bottom */
++    int  vr_eye;        /* 0 left, 1 right */
++    bool vr_vp_init;    /* viewpoint initialized for a spherical mode */
++    vlc_viewpoint_t cur_vp; /* last requested viewpoint (unclamped) */
+ };
+ 
++/* PiliPlus VR extension: internal projection value for 180° equirectangular
++ * sources (not exposed through the public video_projection_mode_t enum). */
++#define PROJECTION_MODE_PILI_EQUIRECT_180 (PROJECTION_MODE_CUBEMAP_LAYOUT_STANDARD + 1)
++
++#define PILI_VR_PROJ_AUTO  0
++#define PILI_VR_PROJ_FLAT  1
++#define PILI_VR_PROJ_360   2
++#define PILI_VR_PROJ_180   3
++
++#define PILI_VR_STEREO_AUTO 0
++#define PILI_VR_STEREO_MONO 1
++#define PILI_VR_STEREO_SBS  2
++#define PILI_VR_STEREO_TB   3
++
++/* Effective projection mode after applying the VR override */
++static inline video_projection_mode_t
++EffectiveProjection(const vout_display_opengl_t *vgl)
++{
++    switch (vgl->vr_projection) {
++    case PILI_VR_PROJ_FLAT:
++        return PROJECTION_MODE_RECTANGULAR;
++    case PILI_VR_PROJ_360:
++        return PROJECTION_MODE_EQUIRECTANGULAR;
++    case PILI_VR_PROJ_180:
++        return PROJECTION_MODE_PILI_EQUIRECT_180;
++    default:
++        return vgl->fmt.projection_mode;
++    }
++}
++
++/* Effective multiview mode after applying the VR override */
++static inline video_multiview_mode_t
++EffectiveMultiview(const vout_display_opengl_t *vgl)
++{
++    switch (vgl->vr_stereo) {
++    case PILI_VR_STEREO_MONO:
++        return MULTIVIEW_2D;
++    case PILI_VR_STEREO_SBS:
++        return MULTIVIEW_STEREO_SBS;
++    case PILI_VR_STEREO_TB:
++        return MULTIVIEW_STEREO_TB;
++    default:
++        return vgl->fmt.multiview_mode;
++    }
++}
++
+ static const GLfloat identity[] = {
+     1.0f, 0.0f, 0.0f, 0.0f,
+     0.0f, 1.0f, 0.0f, 0.0f,
+@@ -269,7 +322,8 @@ static void getViewpointMatrixes(vout_display_opengl_t *vgl,
+                                  struct prgm *prgm)
+ {
+     if (projection_mode == PROJECTION_MODE_EQUIRECTANGULAR
+-        || projection_mode == PROJECTION_MODE_CUBEMAP_LAYOUT_STANDARD)
++        || projection_mode == PROJECTION_MODE_CUBEMAP_LAYOUT_STANDARD
++        || projection_mode == PROJECTION_MODE_PILI_EQUIRECT_180)
+     {
+         float sar = (float) vgl->f_sar;
+         getProjectionMatrix(sar, vgl->f_fovy, prgm->var.ProjectionMatrix);
+@@ -739,7 +793,10 @@ ResizeFormatToGLMaxTexSize(video_format_t *fmt, unsigned int max_tex_size)
+ vout_display_opengl_t *vout_display_opengl_New(video_format_t *fmt,
+                                                const vlc_fourcc_t **subpicture_chromas,
+                                                vlc_gl_t *gl,
+-                                               const vlc_viewpoint_t *viewpoint)
++                                               const vlc_viewpoint_t *viewpoint,
++                                               int vr_projection,
++                                               int vr_stereo,
++                                               int vr_eye)
+ {
+     if (gl->getProcAddress == NULL) {
+         msg_Err(gl, "getProcAddress not implemented, bailing out\n");
+@@ -752,6 +809,12 @@ vout_display_opengl_t *vout_display_opengl_New(video_format_t *fmt,
+ 
+     vgl->gl = gl;
+ 
++    /* PiliPlus VR extension */
++    vgl->vr_projection = vr_projection;
++    vgl->vr_stereo = vr_stereo;
++    vgl->vr_eye = vr_eye;
++    vlc_viewpoint_init(&vgl->cur_vp);
++
+ #if defined(USE_OPENGL_ES2) || defined(HAVE_GL_CORE_SYMBOLS)
+ #define GET_PROC_ADDR_CORE(name) vgl->vt.name = gl##name
+ #else
+@@ -983,11 +1046,20 @@ vout_display_opengl_t *vout_display_opengl_New(video_format_t *fmt,
+     vgl->region = NULL;
+     vgl->pool = NULL;
+ 
+-    if (vgl->fmt.projection_mode != PROJECTION_MODE_RECTANGULAR
+-     && vout_display_opengl_SetViewpoint(vgl, viewpoint) != VLC_SUCCESS)
++    /* PiliPlus VR extension: the effective projection may differ from the
++     * source one when a VR mode is forced. */
++    if (EffectiveProjection(vgl) != PROJECTION_MODE_RECTANGULAR)
+     {
+-        vout_display_opengl_Delete(vgl);
+-        return NULL;
++        vgl->vr_vp_init = true;
++        if (vout_display_opengl_SetViewpoint(vgl, viewpoint) != VLC_SUCCESS)
++        {
++            vout_display_opengl_Delete(vgl);
++            return NULL;
++        }
++    }
++    else
++    {
++        getViewpointMatrixes(vgl, PROJECTION_MODE_RECTANGULAR, vgl->prgm);
+     }
+ 
+     *fmt = vgl->fmt;
+@@ -1076,8 +1148,39 @@ int vout_display_opengl_SetViewpoint(vout_display_opengl_t *vgl,
+         || f_fovx < -0.001f)
+         return VLC_EBADVAR;
+ 
+-    vgl->f_teta = RAD(p_vp->yaw) - (float) M_PI_2;
+-    vgl->f_phi  = RAD(p_vp->pitch);
++    vgl->cur_vp = *p_vp;
++
++    const video_projection_mode_t eff_proj = EffectiveProjection(vgl);
++
++    float yaw = p_vp->yaw;
++    float pitch = p_vp->pitch;
++
++    /* PiliPlus VR extension: keep the camera inside the covered area */
++    if (eff_proj == PROJECTION_MODE_PILI_EQUIRECT_180)
++    {
++        /* Clamp the yaw so that the (horizontal) field of view never exceeds
++         * the 180° horizontal coverage of the source. */
++        float lim_yaw = 90.f - p_vp->fov / 2.f;
++        if (lim_yaw < 0.f)
++            lim_yaw = 0.f;
++        yaw = VLC_CLIP(yaw, -lim_yaw, lim_yaw);
++
++        /* Same for the pitch, using the derived vertical field of view */
++        float sar = vgl->f_sar > 0.f ? vgl->f_sar : 1.f;
++        float fovy = 2.f * atanf(tanf(f_fovx / 2.f) / sar) * 180.f / (float) M_PI;
++        float lim_pitch = 90.f - fovy / 2.f;
++        if (lim_pitch < 0.f)
++            lim_pitch = 0.f;
++        pitch = VLC_CLIP(pitch, -lim_pitch, lim_pitch);
++    }
++    else if (eff_proj == PROJECTION_MODE_EQUIRECTANGULAR
++          || eff_proj == PROJECTION_MODE_CUBEMAP_LAYOUT_STANDARD)
++    {
++        pitch = VLC_CLIP(pitch, -90.f, 90.f);
++    }
++
++    vgl->f_teta = RAD(yaw) - (float) M_PI_2;
++    vgl->f_phi  = RAD(pitch);
+     vgl->f_roll = RAD(p_vp->roll);
+ 
+ 
+@@ -1088,12 +1191,45 @@ int vout_display_opengl_SetViewpoint(vout_display_opengl_t *vgl,
+         UpdateFOVy(vgl);
+         UpdateZ(vgl);
+     }
+-    getViewpointMatrixes(vgl, vgl->fmt.projection_mode, vgl->prgm);
++    getViewpointMatrixes(vgl, eff_proj, vgl->prgm);
+ 
+     return VLC_SUCCESS;
+ #undef RAD
+ }
+ 
++int vout_display_opengl_SetVrMode(vout_display_opengl_t *vgl, int projection,
++                                  int stereo, int eye)
++{
++    if (vgl->vr_projection == projection
++     && vgl->vr_stereo == stereo
++     && vgl->vr_eye == eye)
++        return VLC_SUCCESS;
++
++    vgl->vr_projection = projection;
++    vgl->vr_stereo = stereo;
++    vgl->vr_eye = eye;
++
++    /* Force a geometry rebuild on the next displayed picture */
++    vgl->last_source.i_x_offset = (unsigned) -1;
++
++    const video_projection_mode_t eff_proj = EffectiveProjection(vgl);
++    if (eff_proj != PROJECTION_MODE_RECTANGULAR)
++    {
++        if (!vgl->vr_vp_init)
++        {
++            vlc_viewpoint_init(&vgl->cur_vp);
++            vgl->vr_vp_init = true;
++        }
++        /* Re-apply the current viewpoint so that clamping/matrixes match the
++         * new projection mode. */
++        return vout_display_opengl_SetViewpoint(vgl, &vgl->cur_vp);
++    }
++
++    vgl->vr_vp_init = false;
++    getViewpointMatrixes(vgl, eff_proj, vgl->prgm);
++    return VLC_SUCCESS;
++}
++
+ 
+ void vout_display_opengl_SetWindowAspectRatio(vout_display_opengl_t *vgl,
+                                               float f_sar)
+@@ -1104,7 +1240,7 @@ void vout_display_opengl_SetWindowAspectRatio(vout_display_opengl_t *vgl,
+     vgl->f_sar = f_sar;
+     UpdateFOVy(vgl);
+     UpdateZ(vgl);
+-    getViewpointMatrixes(vgl, vgl->fmt.projection_mode, vgl->prgm);
++    getViewpointMatrixes(vgl, EffectiveProjection(vgl), vgl->prgm);
+ }
+ 
+ void vout_display_opengl_Viewport(vout_display_opengl_t *vgl, int x, int y,
+@@ -1257,7 +1393,8 @@ static int BuildSphere(unsigned nbPlanes,
+                         GLfloat **vertexCoord, GLfloat **textureCoord, unsigned *nbVertices,
+                         GLushort **indices, unsigned *nbIndices,
+                         const float *left, const float *top,
+-                        const float *right, const float *bottom)
++                        const float *right, const float *bottom,
++                        float phi_start, float phi_range)
+ {
+     unsigned nbLatBands = 128;
+     unsigned nbLonBands = 128;
+@@ -1289,7 +1426,11 @@ static int BuildSphere(unsigned nbPlanes,
+         sincosf(theta, &sinTheta, &cosTheta);
+ 
+         for (unsigned lon = 0; lon <= nbLonBands; lon++) {
+-            float phi = lon * 2 * (float) M_PI / nbLonBands;
++            /* PiliPlus VR extension: phi covers [phi_start, phi_start+range].
++             * A full sphere uses [0, 2*pi]; a 180° hemisphere uses
++             * [pi/2, 3*pi/2] so that the texture center (u=0.5) stays on the
++             * front meridian (phi=pi), like the full sphere mapping. */
++            float phi = phi_start + lon * phi_range / nbLonBands;
+             float sinPhi, cosPhi;
+ 
+             sincosf(phi, &sinPhi, &cosPhi);
+@@ -1530,7 +1671,7 @@ static int SetupCoords(vout_display_opengl_t *vgl,
+     unsigned nbVertices, nbIndices;
+ 
+     int i_ret;
+-    switch (vgl->fmt.projection_mode)
++    switch (EffectiveProjection(vgl))
+     {
+     case PROJECTION_MODE_RECTANGULAR:
+         i_ret = BuildRectangle(vgl->prgm->tc->tex_count,
+@@ -1542,7 +1683,17 @@ static int SetupCoords(vout_display_opengl_t *vgl,
+         i_ret = BuildSphere(vgl->prgm->tc->tex_count,
+                             &vertexCoord, &textureCoord, &nbVertices,
+                             &indices, &nbIndices,
+-                            left, top, right, bottom);
++                            left, top, right, bottom,
++                            0.f, 2.f * (float) M_PI);
++        break;
++    case PROJECTION_MODE_PILI_EQUIRECT_180:
++        /* PiliPlus VR extension: front hemisphere for 180° equirectangular
++         * sources. */
++        i_ret = BuildSphere(vgl->prgm->tc->tex_count,
++                            &vertexCoord, &textureCoord, &nbVertices,
++                            &indices, &nbIndices,
++                            left, top, right, bottom,
++                            (float) M_PI_2, (float) M_PI);
+         break;
+     case PROJECTION_MODE_CUBEMAP_LAYOUT_STANDARD:
+         i_ret = BuildCube(vgl->prgm->tc->tex_count,
+@@ -1649,20 +1800,24 @@ static void TextureCropForStereo(vout_display_opengl_t *vgl,
+     float stereoCoefs[2];
+     float stereoOffsets[2];
+ 
+-    switch (vgl->fmt.multiview_mode)
++    /* PiliPlus VR extension: honor the forced stereo layout and the
++     * selected eye (0: left/first eye, 1: right/second eye). */
++    const float eyeOffset = (vgl->vr_eye == 1) ? 0.5f : 0.f;
++
++    switch (EffectiveMultiview(vgl))
+     {
+     case MULTIVIEW_STEREO_TB:
+-        // Display only the left eye.
++        // Display only the selected eye (left eye by default).
+         stereoCoefs[0] = 1; stereoCoefs[1] = 0.5;
+-        stereoOffsets[0] = 0; stereoOffsets[1] = 0;
++        stereoOffsets[0] = 0; stereoOffsets[1] = eyeOffset;
+         GetTextureCropParamsForStereo(vgl->prgm->tc->tex_count,
+                                       stereoCoefs, stereoOffsets,
+                                       left, top, right, bottom);
+         break;
+     case MULTIVIEW_STEREO_SBS:
+-        // Display only the left eye.
++        // Display only the selected eye (left eye by default).
+         stereoCoefs[0] = 0.5; stereoCoefs[1] = 1;
+-        stereoOffsets[0] = 0; stereoOffsets[1] = 0;
++        stereoOffsets[0] = eyeOffset; stereoOffsets[1] = 0;
+         GetTextureCropParamsForStereo(vgl->prgm->tc->tex_count,
+                                       stereoCoefs, stereoOffsets,
+                                       left, top, right, bottom);
+diff --git a/modules/video_output/opengl/vout_helper.h b/modules/video_output/opengl/vout_helper.h
+index 48014b4..7449200 100644
+--- a/modules/video_output/opengl/vout_helper.h
++++ b/modules/video_output/opengl/vout_helper.h
+@@ -247,13 +247,23 @@ typedef struct vout_display_opengl_t vout_display_opengl_t;
+ vout_display_opengl_t *vout_display_opengl_New(video_format_t *fmt,
+                                                const vlc_fourcc_t **subpicture_chromas,
+                                                vlc_gl_t *gl,
+-                                               const vlc_viewpoint_t *viewpoint);
++                                               const vlc_viewpoint_t *viewpoint,
++                                               int vr_projection,
++                                               int vr_stereo,
++                                               int vr_eye);
+ void vout_display_opengl_Delete(vout_display_opengl_t *vgl);
+ 
+ picture_pool_t *vout_display_opengl_GetPool(vout_display_opengl_t *vgl, unsigned);
+ 
+ int vout_display_opengl_SetViewpoint(vout_display_opengl_t *vgl, const vlc_viewpoint_t*);
+ 
++/* PiliPlus VR extension: update the VR rendering mode.
++ * projection: 0 auto, 1 flat, 2 equirectangular 360, 3 equirectangular 180
++ * stereo: 0 auto, 1 mono, 2 side-by-side, 3 top-bottom
++ * eye: 0 left, 1 right */
++int vout_display_opengl_SetVrMode(vout_display_opengl_t *vgl, int projection,
++                                  int stereo, int eye);
++
+ void vout_display_opengl_SetWindowAspectRatio(vout_display_opengl_t *vgl,
+                                               float f_sar);
+ 
+diff --git a/modules/video_output/win32/glwin32.c b/modules/video_output/win32/glwin32.c
+index 45dd588..17cb45d 100644
+--- a/modules/video_output/win32/glwin32.c
++++ b/modules/video_output/win32/glwin32.c
+@@ -148,7 +148,7 @@ static int Open(vlc_object_t *object)
+     if (vlc_gl_MakeCurrent (sys->gl))
+         goto error;
+     sys->vgl = vout_display_opengl_New(&fmt, &subpicture_chromas, sys->gl,
+-                                       &vd->cfg->viewpoint);
++                                       &vd->cfg->viewpoint, 0, 0, 0);
+     vlc_gl_ReleaseCurrent (sys->gl);
+     if (!sys->vgl)
+         goto error;
+diff --git a/src/input/control.c b/src/input/control.c
+index 37e5155..f17c6ba 100644
+--- a/src/input/control.c
++++ b/src/input/control.c
+@@ -526,6 +526,19 @@ int input_vaControl( input_thread_t *p_input, int i_query, va_list args )
+             return VLC_SUCCESS;
+         }
+ 
++        case INPUT_SET_VR_MODE:
++        {
++            /* PiliPlus VR extension: pack projection/stereo/eye into i_int */
++            int i_projection = va_arg( args, int );
++            int i_stereo = va_arg( args, int );
++            int i_eye = va_arg( args, int );
++            val.i_int = ((int64_t)(uint16_t)i_projection << 32)
++                      | ((int64_t)(uint16_t)i_stereo << 16)
++                      | ((int64_t)(uint16_t)i_eye);
++            input_ControlPush( p_input, INPUT_CONTROL_SET_VR_MODE, &val );
++            return VLC_SUCCESS;
++        }
++
+         case INPUT_GET_AOUT:
+         {
+             audio_output_t *p_aout = input_resource_HoldAout( priv->p_resource );
+diff --git a/src/input/input.c b/src/input/input.c
+index 1de75e8..2c04d61 100644
+--- a/src/input/input.c
++++ b/src/input/input.c
+@@ -336,6 +336,12 @@ static input_thread_t *Create( vlc_object_t *p_parent, input_item_t *p_item,
+     else
+         vlc_viewpoint_init( &priv->viewpoint );
+ 
++    /* PiliPlus VR extension: fetch the VR mode from the mediaplayer if any.
++     * The variables are inherited by the vout objects created later. */
++    var_Create( p_input, "vr-projection", VLC_VAR_INTEGER | VLC_VAR_DOINHERIT );
++    var_Create( p_input, "vr-stereo", VLC_VAR_INTEGER | VLC_VAR_DOINHERIT );
++    var_Create( p_input, "vr-eye", VLC_VAR_INTEGER | VLC_VAR_DOINHERIT );
++
+     input_item_Hold( p_item ); /* Released in Destructor() */
+     priv->p_item = p_item;
+ 
+@@ -1844,6 +1850,29 @@ static void ViewpointApply( input_thread_t *p_input )
+     }
+ }
+ 
++/* PiliPlus VR extension: forward the current VR mode to every vout */
++static void VrModeApply( input_thread_t *p_input )
++{
++    input_thread_private_t *priv = input_priv(p_input);
++
++    const int i_projection = var_GetInteger( p_input, "vr-projection" );
++    const int i_stereo = var_GetInteger( p_input, "vr-stereo" );
++    const int i_eye = var_GetInteger( p_input, "vr-eye" );
++
++    vout_thread_t **pp_vout;
++    size_t i_vout;
++    input_resource_HoldVouts( priv->p_resource, &pp_vout, &i_vout );
++
++    for( size_t i = 0; i < i_vout; ++i )
++    {
++        var_SetInteger( pp_vout[i], "vr-projection", i_projection );
++        var_SetInteger( pp_vout[i], "vr-stereo", i_stereo );
++        var_SetInteger( pp_vout[i], "vr-eye", i_eye );
++        vlc_object_release( pp_vout[i] );
++    }
++    free( pp_vout );
++}
++
+ /* XXX: The two following functions are copied from the hotkeys module. The OSD
+  * handling need to be handled by the core, in the future input manager for
+  * example. */
+@@ -2243,6 +2272,16 @@ static bool Control( input_thread_t *p_input,
+             break;
+         }
+ 
++        case INPUT_CONTROL_SET_VR_MODE:
++        {
++            /* PiliPlus VR extension */
++            var_SetInteger( p_input, "vr-projection", (int)(uint16_t)(val.i_int >> 32) );
++            var_SetInteger( p_input, "vr-stereo", (int)(uint16_t)(val.i_int >> 16) );
++            var_SetInteger( p_input, "vr-eye", (int)(uint16_t)(val.i_int) );
++            VrModeApply( p_input );
++            break;
++        }
++
+         case INPUT_CONTROL_SET_AUDIO_DELAY:
+             input_SendEventAudioDelay( p_input, val.i_int );
+             UpdatePtsDelay( p_input );
+diff --git a/src/input/input_internal.h b/src/input/input_internal.h
+index 818ee7e..2bc1eb4 100644
+--- a/src/input/input_internal.h
++++ b/src/input/input_internal.h
+@@ -221,6 +221,7 @@ enum input_control_e
+     INPUT_CONTROL_SET_VIEWPOINT,    // new absolute viewpoint
+     INPUT_CONTROL_SET_INITIAL_VIEWPOINT, // set initial viewpoint (generally from video)
+     INPUT_CONTROL_UPDATE_VIEWPOINT, // update viewpoint relative to current
++    INPUT_CONTROL_SET_VR_MODE,      // set VR rendering mode (PiliPlus VR extension)
+ 
+     INPUT_CONTROL_SET_AUDIO_DELAY,
+     INPUT_CONTROL_SET_SPU_DELAY,
+diff --git a/src/video_output/control.h b/src/video_output/control.h
+index dbe7793..736d224 100644
+--- a/src/video_output/control.h
++++ b/src/video_output/control.h
+@@ -63,6 +63,7 @@ enum {
+     VOUT_CONTROL_CROP_RATIO,            /* pair */
+     VOUT_CONTROL_CROP_WINDOW,           /* window */
+     VOUT_CONTROL_VIEWPOINT,             /* viewpoint */
++    VOUT_CONTROL_VR_MODE,               /* vr_mode (PiliPlus VR extension) */
+ };
+ 
+ typedef struct {
+@@ -102,6 +103,11 @@ typedef struct {
+         const vout_configuration_t *cfg;
+         subpicture_t *subpicture;
+         vlc_viewpoint_t viewpoint;
++        struct {
++            int projection;
++            int stereo;
++            int eye;
++        } vr_mode;
+     } u;
+ } vout_control_cmd_t;
+ 
+diff --git a/src/video_output/display.c b/src/video_output/display.c
+index 869c575..da2bd96 100644
+--- a/src/video_output/display.c
++++ b/src/video_output/display.c
+@@ -368,6 +368,12 @@ typedef struct {
+     vlc_viewpoint_t viewpoint;
+     vlc_viewpoint_t display_viewpoint;
+ 
++    /* PiliPlus VR extension */
++    bool ch_vr_mode;
++    int vr_projection;
++    int vr_stereo;
++    int vr_eye;
++
+     /* */
+     video_format_t source;
+     filter_chain_t *filters;
+@@ -795,7 +801,8 @@ bool vout_ManageDisplay(vout_display_t *vd, bool allow_reset_pictures)
+ #endif
+             !osys->ch_sar &&
+             !osys->ch_crop &&
+-            !osys->ch_viewpoint) {
++            !osys->ch_viewpoint &&
++            !osys->ch_vr_mode) {
+ 
+             if (osys->fit_window != 0) {
+                 VoutDisplayFitWindow(vd, osys->fit_window == -1);
+@@ -946,6 +953,14 @@ bool vout_ManageDisplay(vout_display_t *vd, bool allow_reset_pictures)
+             osys->cfg.viewpoint = osys->viewpoint;
+             osys->ch_viewpoint  = false;
+         }
++        if (osys->ch_vr_mode) {
++            if (vout_display_Control(vd, VOUT_DISPLAY_CHANGE_VR_MODE,
++                                     osys->vr_projection, osys->vr_stereo,
++                                     osys->vr_eye)) {
++                msg_Dbg(vd, "display module does not support VR mode changes");
++            }
++            osys->ch_vr_mode = false;
++        }
+ 
+         /* */
+         if (reset_pictures) {
+@@ -1121,6 +1136,22 @@ void vout_SetDisplayViewpoint(vout_display_t *vd,
+     }
+ }
+ 
++void vout_SetDisplayVrMode(vout_display_t *vd, int projection, int stereo,
++                           int eye)
++{
++    vout_display_owner_sys_t *osys = vd->owner.sys;
++
++    if (osys->vr_projection != projection ||
++        osys->vr_stereo != stereo ||
++        osys->vr_eye != eye) {
++        osys->vr_projection = projection;
++        osys->vr_stereo     = stereo;
++        osys->vr_eye        = eye;
++
++        osys->ch_vr_mode = true;
++    }
++}
++
+ static vout_display_t *DisplayNew(vout_thread_t *vout,
+                                   const video_format_t *source,
+                                   const vout_display_state_t *state,
+diff --git a/src/video_output/video_output.c b/src/video_output/video_output.c
+index cd06e80..f3d85d4 100644
+--- a/src/video_output/video_output.c
++++ b/src/video_output/video_output.c
+@@ -566,6 +566,17 @@ void vout_ControlChangeViewpoint(vout_thread_t *vout,
+     vout_control_Push(&vout->p->control, &cmd);
+ }
+ 
++void vout_ControlChangeVrMode(vout_thread_t *vout, int projection, int stereo,
++                              int eye)
++{
++    vout_control_cmd_t cmd;
++    vout_control_cmd_Init(&cmd, VOUT_CONTROL_VR_MODE);
++    cmd.u.vr_mode.projection = projection;
++    cmd.u.vr_mode.stereo = stereo;
++    cmd.u.vr_mode.eye = eye;
++    vout_control_Push(&vout->p->control, &cmd);
++}
++
+ /* */
+ static void VoutGetDisplayCfg(vout_thread_t *vout, vout_display_cfg_t *cfg, const char *title)
+ {
+@@ -1488,6 +1499,14 @@ static void ThreadExecuteViewpoint(vout_thread_t *vout,
+     vout_SetDisplayViewpoint(vout->p->display.vd, p_viewpoint);
+ }
+ 
++static void ThreadExecuteVrMode(vout_thread_t *vout, int projection,
++                                int stereo, int eye)
++{
++    if (vout->p->display.vd == NULL)
++        return;
++    vout_SetDisplayVrMode(vout->p->display.vd, projection, stereo, eye);
++}
++
+ static int ThreadStart(vout_thread_t *vout, vout_display_state_t *state)
+ {
+     vlc_mouse_Init(&vout->p->mouse);
+@@ -1774,6 +1793,10 @@ static int ThreadControl(vout_thread_t *vout, vout_control_cmd_t cmd)
+     case VOUT_CONTROL_VIEWPOINT:
+         ThreadExecuteViewpoint(vout, &cmd.u.viewpoint);
+         break;
++    case VOUT_CONTROL_VR_MODE:
++        ThreadExecuteVrMode(vout, cmd.u.vr_mode.projection,
++                            cmd.u.vr_mode.stereo, cmd.u.vr_mode.eye);
++        break;
+     default:
+         break;
+     }
+diff --git a/src/video_output/vout_internal.h b/src/video_output/vout_internal.h
+index 6232df1..858cbeb 100644
+--- a/src/video_output/vout_internal.h
++++ b/src/video_output/vout_internal.h
+@@ -152,6 +152,7 @@ void vout_ControlChangeSubSources(vout_thread_t *, const char *);
+ void vout_ControlChangeSubFilters(vout_thread_t *, const char *);
+ void vout_ControlChangeSubMargin(vout_thread_t *, int);
+ void vout_ControlChangeViewpoint( vout_thread_t *, const vlc_viewpoint_t *);
++void vout_ControlChangeVrMode( vout_thread_t *, int projection, int stereo, int eye );
+ 
+ /* */
+ void vout_IntfInit( vout_thread_t * );
+diff --git a/src/video_output/vout_intf.c b/src/video_output/vout_intf.c
+index 14d0c03..e6a560c 100644
+--- a/src/video_output/vout_intf.c
++++ b/src/video_output/vout_intf.c
+@@ -75,6 +75,8 @@ static int SubMarginCallback( vlc_object_t *, char const *,
+                               vlc_value_t, vlc_value_t, void * );
+ static int ViewpointCallback( vlc_object_t *, char const *,
+                               vlc_value_t, vlc_value_t, void * );
++static int VrModeCallback( vlc_object_t *, char const *,
++                           vlc_value_t, vlc_value_t, void * );
+ 
+ /*****************************************************************************
+  * vout_IntfInit: called during the vout creation to initialise misc things.
+@@ -308,6 +310,14 @@ void vout_IntfInit( vout_thread_t *p_vout )
+     var_AddCallback( p_vout, "viewpoint", ViewpointCallback, NULL );
+     var_Create( p_vout, "viewpoint-changeable", VLC_VAR_BOOL );
+ 
++    /* VR rendering mode (PiliPlus VR extension), inherited from the input */
++    var_Create( p_vout, "vr-projection", VLC_VAR_INTEGER | VLC_VAR_DOINHERIT );
++    var_Create( p_vout, "vr-stereo", VLC_VAR_INTEGER | VLC_VAR_DOINHERIT );
++    var_Create( p_vout, "vr-eye", VLC_VAR_INTEGER | VLC_VAR_DOINHERIT );
++    var_AddCallback( p_vout, "vr-projection", VrModeCallback, NULL );
++    var_AddCallback( p_vout, "vr-stereo", VrModeCallback, NULL );
++    var_AddCallback( p_vout, "vr-eye", VrModeCallback, NULL );
++
+     vout_IntfReinit( p_vout );
+ }
+ 
+@@ -616,3 +626,16 @@ static int ViewpointCallback( vlc_object_t *p_this, char const *psz_cmd,
+         vout_ControlChangeViewpoint( p_vout, newval.p_address );
+     return VLC_SUCCESS;
+ }
++
++static int VrModeCallback( vlc_object_t *p_this, char const *psz_cmd,
++                           vlc_value_t oldval, vlc_value_t newval, void *p_data)
++{
++    vout_thread_t *p_vout = (vout_thread_t *)p_this;
++    VLC_UNUSED(psz_cmd); VLC_UNUSED(oldval); VLC_UNUSED(newval); VLC_UNUSED(p_data);
++
++    vout_ControlChangeVrMode( p_vout,
++                              var_GetInteger( p_vout, "vr-projection" ),
++                              var_GetInteger( p_vout, "vr-stereo" ),
++                              var_GetInteger( p_vout, "vr-eye" ) );
++    return VLC_SUCCESS;
++}

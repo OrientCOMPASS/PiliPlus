@@ -1,0 +1,137 @@
+name: PiliPlayer libvlc-pvr AAR
+
+# Builds the PiliPlus-patched libvlc AAR (VR projection extensions) for
+# arm64-v8a and publishes it to the rolling `libvlc-pvr` release. The app
+# CI downloads the AAR from that release; the binary is never committed to
+# the repository.
+
+on:
+    workflow_dispatch:
+    push:
+        branches:
+            - piliplayer
+        paths:
+            - "native/libvlc-pvr/**"
+            - ".github/workflows/piliplayer_libvlc.yml"
+
+concurrency:
+    group: libvlc-pvr-build
+    cancel-in-progress: false
+
+permissions: write-all
+
+env:
+    AAR_NAME: libvlc-pvr-arm64-v8a.aar
+    RELEASE_TAG: libvlc-pvr
+
+jobs:
+    build-arm64:
+        name: Build patched libvlc (arm64-v8a)
+        runs-on: ubuntu-24.04
+        timeout-minutes: 330
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+
+            - name: Install host tools
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y --no-install-recommends \
+                    autoconf automake libtool libtool-bin pkg-config \
+                    gettext m4 bison flex patch zstd unzip curl ca-certificates \
+                    python3 python3-setuptools
+
+            - name: Set up JDK
+              uses: actions/setup-java@v5
+              with:
+                  distribution: temurin
+                  java-version: "21"
+
+            - name: Select NDK (r27-r29)
+              run: |
+                  set -x
+                  SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+                  NDK_DIR=""
+                  for d in "$SDK"/ndk/29.* "$SDK"/ndk/28.* "$SDK"/ndk/27.*; do
+                    if [ -d "$d" ]; then NDK_DIR="$d"; break; fi
+                  done
+                  if [ -z "$NDK_DIR" ]; then
+                    SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+                    VER=$("$SDKMANAGER" --list 2>/dev/null | grep -oE 'ndk;2[789]\.[0-9][0-9.]*' | sort -uV | tail -1 || true)
+                    if [ -z "$VER" ]; then VER="ndk;28.0.14206865"; fi
+                    yes | "$SDKMANAGER" --install "$VER" >/dev/null
+                    NDK_DIR="$SDK/${VER//;//}"
+                  fi
+                  echo "ANDROID_NDK=$NDK_DIR" >> "$GITHUB_ENV"
+                  grep Pkg.Revision "$NDK_DIR/source.properties"
+
+            - name: Install Gradle 9.x
+              run: |
+                  GV=$(curl -fsSL https://services.gradle.org/versions/current | jq -r .version)
+                  echo "Gradle version: $GV"
+                  curl -fsSL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-${GV}-bin.zip"
+                  sudo unzip -q /tmp/gradle.zip -d /opt
+                  echo "/opt/gradle-${GV}/bin" >> "$GITHUB_PATH"
+
+            - name: Ensure Android SDK packages
+              run: |
+                  SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+                  SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+                  yes | "$SDKMANAGER" --install "platforms;android-36" "build-tools;36.0.0" >/dev/null || true
+
+            - name: Build patched libvlc AAR
+              run: |
+                  chmod +x native/libvlc-pvr/build-aar.sh
+                  native/libvlc-pvr/build-aar.sh arm64
+
+            - name: Collect artifacts
+              run: |
+                  set -e
+                  AAR=$(ls build-libvlc/libvlcjni/libvlc/build/outputs/aar/libvlc-arm64-v8a-*.aar | head -1)
+                  cp "$AAR" "$AAR_NAME"
+                  sha256sum "$AAR_NAME" > "$AAR_NAME.sha256"
+                  {
+                    echo "artifact=$AAR_NAME"
+                    echo "base_aar=$(basename "$AAR")"
+                    echo "vlc_hash=84177b2273abc5c4300234e6e18b55a4d2dd5a03"
+                    echo "libvlcjni_sha=0b8dc65efb203c86a0476bc337ddd99ecf1c0ef6"
+                    echo "contrib_sha=58f19304cbc30a42bc0a954b10d122a0155c1f2d"
+                    echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    echo "commit=${GITHUB_SHA}"
+                    echo "run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+                    ls native/libvlc-pvr/patches/vlc native/libvlc-pvr/patches/libvlcjni | sed 's/^/patch=/'
+                  } > BUILD-INFO.txt
+                  cat BUILD-INFO.txt
+
+            - name: Upload workflow artifact
+              uses: actions/upload-artifact@v7
+              with:
+                  name: libvlc-pvr-aar
+                  path: |
+                      ${{ env.AAR_NAME }}
+                      ${{ env.AAR_NAME }}.sha256
+                      BUILD-INFO.txt
+
+            - name: Publish rolling release
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  set -e
+                  API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+                  AUTH="Authorization: Bearer ${GH_TOKEN}"
+                  # delete previous release + tag with the same name
+                  OLD_ID=$(curl -sf -H "$AUTH" "$API/releases/tags/$RELEASE_TAG" | jq -r .id || echo "")
+                  if [ -n "$OLD_ID" ] && [ "$OLD_ID" != "null" ]; then
+                    curl -sf -X DELETE -H "$AUTH" "$API/releases/$OLD_ID" || true
+                  fi
+                  curl -sf -X DELETE -H "$AUTH" "$API/git/refs/tags/$RELEASE_TAG" || true
+                  sleep 3
+                  curl -sf -X POST -H "$AUTH" -H "Accept: application/vnd.github+json" \
+                    "$API/releases" \
+                    -d "{\"tag_name\":\"$RELEASE_TAG\",\"name\":\"libvlc-pvr (patched libvlc AAR, rolling)\",\"body\":\"Rolling build of the PiliPlus-patched libvlc AAR (VR projection extensions). See BUILD-INFO.txt asset for provenance. Consumed automatically by the app CI.\",\"target_commitish\":\"${GITHUB_SHA}\"}" > /tmp/rel.json
+                  UPLOAD_URL=$(jq -r .upload_url /tmp/rel.json | sed 's/{?name,label}//')
+                  for f in "$AAR_NAME" "$AAR_NAME.sha256" BUILD-INFO.txt; do
+                    curl -sf -X POST -H "$AUTH" -H "Content-Type: application/octet-stream" \
+                      "$UPLOAD_URL?name=$f" --data-binary "@$f" > /dev/null
+                  done
+                  echo "Published $RELEASE_TAG release."

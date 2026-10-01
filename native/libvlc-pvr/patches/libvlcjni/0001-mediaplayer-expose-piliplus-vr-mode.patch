@@ -1,0 +1,86 @@
+diff --git a/libvlc/jni/libvlcjni-mediaplayer.c b/libvlc/jni/libvlcjni-mediaplayer.c
+index 382efb3..70b1cf0 100644
+--- a/libvlc/jni/libvlcjni-mediaplayer.c
++++ b/libvlc/jni/libvlcjni-mediaplayer.c
+@@ -1097,6 +1097,30 @@ Java_org_videolan_libvlc_MediaPlayer_nativeUpdateViewpoint(JNIEnv *env,
+                                          absolute) == 0 ? true : false;
+ }
+ 
++/* PiliPlus VR extension */
++jboolean
++Java_org_videolan_libvlc_MediaPlayer_nativeSetVrMode(JNIEnv *env,
++                                                     jobject thiz,
++                                                     jint projection,
++                                                     jint stereo,
++                                                     jint eye)
++{
++    vlcjni_object *p_obj = VLCJniObject_getInstance(env, thiz);
++    if (!p_obj)
++        return false;
++
++    return libvlc_media_player_set_vr_mode(p_obj->u.p_mp, projection, stereo,
++                                           eye) == 0 ? true : false;
++}
++
++jint
++Java_org_videolan_libvlc_MediaPlayer_nativeGetVrVersion(JNIEnv *env,
++                                                        jobject thiz)
++{
++    (void) env; (void) thiz;
++    return libvlc_pili_vr_version();
++}
++
+ jboolean
+ Java_org_videolan_libvlc_MediaPlayer_nativeAddSlave(JNIEnv *env,
+                                                     jobject thiz, jint type,
+diff --git a/libvlc/src/org/videolan/libvlc/MediaPlayer.java b/libvlc/src/org/videolan/libvlc/MediaPlayer.java
+index aa1519a..93065b8 100644
+--- a/libvlc/src/org/videolan/libvlc/MediaPlayer.java
++++ b/libvlc/src/org/videolan/libvlc/MediaPlayer.java
+@@ -908,6 +908,37 @@ public class MediaPlayer extends VLCObject<MediaPlayer.Event> {
+         return nativeUpdateViewpoint(yaw, pitch, roll, fov, absolute);
+     }
+ 
++    /**
++     * PiliPlus VR extension: set the VR rendering mode.
++     *
++     * Can be called before playback starts or during playback (takes effect
++     * in place, without restarting playback).
++     *
++     * @param projection 0: auto (source metadata), 1: flat (2D),
++     *                   2: equirectangular 360°, 3: equirectangular 180°
++     * @param stereo     0: auto (source metadata), 1: mono,
++     *                   2: side-by-side, 3: top-bottom
++     * @param eye        0: left eye, 1: right eye
++     * @return true on success.
++     */
++    public boolean setVrMode(int projection, int stereo, int eye) {
++        return nativeSetVrMode(projection, stereo, eye);
++    }
++
++    /**
++     * PiliPlus VR extension: engine VR capability ABI version.
++     *
++     * @return a strictly positive version if the underlying engine carries
++     *         the PiliPlus VR extension, 0 otherwise (e.g. stock libvlc).
++     */
++    public int getVrVersion() {
++        try {
++            return nativeGetVrVersion();
++        } catch (UnsatisfiedLinkError e) {
++            return 0;
++        }
++    }
++
+     /**
+      * Selects an audio output module.
+      * Any change will take effect only after playback is stopped and
+@@ -1485,6 +1516,8 @@ public class MediaPlayer extends VLCObject<MediaPlayer.Event> {
+     private native String nativeGetAspectRatio();
+     private native void nativeSetAspectRatio(String aspect);
+     private native boolean nativeUpdateViewpoint(float yaw, float pitch, float roll, float fov, boolean absolute);
++    private native boolean nativeSetVrMode(int projection, int stereo, int eye);
++    private native int nativeGetVrVersion();
+     private native boolean nativeSetAudioOutput(String aout);
+     private native boolean nativeSetAudioOutputDevice(String id);
+     private native Title[] nativeGetTitles();

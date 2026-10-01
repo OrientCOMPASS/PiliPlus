@@ -109,6 +109,9 @@ class LocalPlayerController extends GetxController {
   @override
   void onInit() {
     super.onInit();
+    if (!Get.isRegistered<LocalLibraryService>()) {
+      Get.put(LocalLibraryService());
+    }
     index.value = initialIndex;
     _sub = _ch.events.listen(_onEvent);
     _initEngine();
@@ -481,15 +484,21 @@ class LocalPlayerController extends GetxController {
   Future<void> setVrProjection(VrProjection p) async {
     final prev = vrProjection.value;
     vrProjection.value = p;
+    // 先把新模式写入引擎（media player 变量），再视需要切换 vout，
+    // 保证重开时首帧即为新投影（原位续进度）。
+    final ok = await _applyVrModeSafe();
+    if (!ok && vrEngineVersion.value == 0) {
+      vrProjection.value = prev;
+      return;
+    }
     final needGl = p == VrProjection.e360 || p == VrProjection.e180;
     if (needGl && !_useGlVout) {
       // flat source rendered through android_display: switch vout in place
       // (reopen keeps position).
       _useGlVout = true;
       await _ch.playerReopen(glVout: true);
+      await _applyVrModeSafe();
     }
-    final ok = await _applyVrModeSafe();
-    if (!ok) vrProjection.value = prev;
     LocalLibraryService.to.saveVrOverride(
       currentUri,
       vrProjection.value.value,

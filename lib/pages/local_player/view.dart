@@ -566,6 +566,25 @@ class _LocalPlayerPageState extends State<LocalPlayerPage> {
                       },
                     ),
                   ),
+                  // 横竖屏切换
+                  IconButton(
+                    icon: const Icon(Icons.screen_rotation_alt, color: Colors.white),
+                    tooltip: '横竖屏切换',
+                    onPressed: () {
+                      final size = MediaQuery.sizeOf(context);
+                      final landscape = size.width > size.height;
+                      SystemChrome.setPreferredOrientations(
+                        landscape
+                            ? [DeviceOrientation.portraitUp]
+                            : [
+                                DeviceOrientation.landscapeLeft,
+                                DeviceOrientation.landscapeRight,
+                              ],
+                      );
+                      _c.rotationLocked.value = true;
+                      _bumpControls();
+                    },
+                  ),
                   // 旋转锁定
                   Obx(
                     () => IconButton(

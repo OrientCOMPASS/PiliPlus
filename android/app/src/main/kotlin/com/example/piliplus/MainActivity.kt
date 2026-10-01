@@ -6,25 +6,9 @@ import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.WindowManager.LayoutParams
-import com.example.piliplus.vr.VrPlayerBridge
 import com.ryanheise.audioservice.AudioServiceActivity
-import io.flutter.embedding.engine.FlutterEngine
 
 class MainActivity : AudioServiceActivity() {
-
-    /// 自研 VR 播放器（MediaCodec + GLES 球面重投影）的 Flutter 桥。
-    /// 见 `vr/VrPlayerBridge.kt`：VR 模式不再走 mpv 的用户着色器，
-    /// 因为 `vo=gpu` 的着色器参数只能烘焙进源码，做不到逐帧头追。
-    private var vrBridge: VrPlayerBridge? = null
-
-    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
-        super.configureFlutterEngine(flutterEngine)
-        vrBridge = VrPlayerBridge(
-            this,
-            flutterEngine.renderer,
-            flutterEngine.dartExecutor.binaryMessenger,
-        )
-    }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
@@ -42,8 +26,6 @@ class MainActivity : AudioServiceActivity() {
     }
 
     override fun onDestroy() {
-        vrBridge?.dispose()
-        vrBridge = null
         stopService(Intent(this, com.ryanheise.audioservice.AudioService::class.java))
         super.onDestroy()
     }

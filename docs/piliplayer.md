@@ -1298,3 +1298,158 @@ FFmpeg 帧队列 / 时钟 / `xl_mediacodec` / `send_message`。保留 MediaCodec
   SBS/TB 是靠 14.3 的网格参数化补的，不是上游原生能力。
 - 移植后**尚未经真机验证**。CI 只能证明它编得过。画面方向、投影正确性、性能
   都要靠真机 + 诊断面板确认。
+
+## 15. 第十轮：移除独立 VR 播放器，VR 重投影移入定制 libmpv
+
+### 15.1 需求与决策
+
+需求方明确要求：**移除独立 VR 播放器**，参考 xl_player "在硬解之后加入后续处理"，
+并且"应该需要改造使用的 mpv"。第 14 轮的移植已经把 xl_player 的渲染层
+（球面网格 / Cardboard 畸变网格 / OrientationEKF 头追）搬进了 app 自带的
+`libxl_vr.so`，但解码与播放控制仍是第二套栈（MediaCodec + 独立播放页），
+弹幕/字幕/手势/倍速/进度全都缺失。本轮把渲染层再往前推一步——**推进 mpv 内部**：
+
+```
+改造前(第 14 轮):  MediaExtractor → MediaCodec → OES 纹理 → libxl_vr 球面渲染 → 独立播放页
+改造后(本轮):      mpv 硬解(mediacodec/auto) → vo=gpu 常规渲染链(平面画面)
+                     → [新增] 球面重投影 / Cardboard 分屏 → 原播放器画面
+```
+
+VR 从此就是主播放器的一种输出模式：弹幕（Flutter 层）、字幕、手势、倍速、
+截图、画中画、续播、SMB/WebDAV/FTP 源……全部天然可用，也不再有
+"FTP 不能进 VR""没有弹幕"这类第二栈边界。
+
+### 15.2 mpv 补丁（tool/libmpv-vr/buildscripts/patches/mpv/vr_vo_gpu.patch）
+
+打在 mpv v0.41.0（与上游 libmpv 构建同版本）上，只动 `vo=gpu`
+（安卓端 media_kit 固定用它），不触碰 `gpu-next`：
+
+| 文件 | 内容 |
+| --- | --- |
+| `video/out/gpu/vr.c/h`（新增） | VR 渲染器：球面网格生成、CPU 端 MVP 变换、单眼/Cardboard 双眼渲染、镜头畸变 pass |
+| `video/out/gpu/vr_tracker.c/h`（新增） | 头追：Cardboard OrientationEKF **转写为纯 C**（Vector3d/Matrix3x3d/SO3Util/OrientationEKF 逐行对照移植）+ NDK 传感器线程（xl_tracker.c 移植，含 ALooper_pollOnce 迁移与 (-y,x,z) 轴交换、33ms 前视补偿、横屏校正矩阵） |
+| `video/out/gpu/video.h` | `gl_video_opts` 追加 vr 字段 + `VR_LAYOUT_*`/`VR_PROJ_*` 枚举 |
+| `video/out/gpu/video.c` | 新选项注册、渲染链末端 VR 分支、**热参数免重建**、插帧/帧缓存/OSD 门控 |
+| `video/out/vo_gpu.c` | 头追开启时持续请求重绘（暂停中也能转头看） |
+| `meson.build` | 新增两个源文件 |
+
+**新 mpv 选项（即运行时属性）**：
+
+| 属性 | 取值 | 说明 |
+| --- | --- | --- |
+| `vr` | yes/no | 总开关 |
+| `vr-layout` | mono/sbs/tb | 片源立体布局（决定采样的 uv 区域，与 Dart 侧 `VrProjection` 一一映射） |
+| `vr-projection` | 360/180 | 水平覆盖角（决定网格经度范围，切换时重建网格） |
+| `vr-eye` | left/right | 单屏输出时取哪只眼 |
+| `vr-stereo-output` | yes/no | Cardboard 左右分屏 + 镜头畸变输出 |
+| `vr-fov` | 10~150 | **水平**视场角（度），native 内按目标宽高比换算垂直 fov（与第 11~13 轮真机验证过的 `apply_fov` 完全一致） |
+| `vr-yaw` / `vr-pitch` | 度 | 手动视角偏移 |
+| `vr-head-tracking` | yes/no | 启停 native 头追线程 |
+| `vr-reset-view` | 递增计数 | 以当前头姿为新参考朝向（"视角摆正"） |
+
+**关键设计点：**
+
+1. **挂接位置**：`pass_draw_to_screen` 末端。常规渲染链（含硬解纹理采样、
+   色彩转换、缩放、用户着色器、dither）先把"平面画面"完整渲染到中间纹理，
+   VR 再把它投到球面输出。因此：
+   - "硬解之后的后续处理"对 hwdec 完全无感——mediacodec（AImageReader→EGLImage）、
+     mediacodec-copy、软解统统适用（安卓端唯一的 overlay 直通路径属于 DRM prime，不会走到）；
+   - Anime4K 超分辨率与 VR **不再互斥**（用户着色器作用在平面阶段，先超分后投影）；
+   - 单眼模式下 mpv 自己的 OSD/字幕仍以平面方式叠在投影画面之上（可读）；
+     分屏模式跳过 OSD（横跨两只眼没法看）。
+2. **热参数免重建**：`vo=gpu` 的任何选项变更默认走 `reinit_from_options()`
+   → 拆掉整条渲染链重建——这正是旧用户着色器方案"改一次视角卡一下"的根源（§9.1）。
+   补丁在 `gl_video_update_options()` 里做结构体级 diff：**只有 vr 字段变化时**
+   直接热更新 `p->opts`，不重建任何东西；网格重建/头追启停由 `vr_sync_opts()`
+   自己按需做（切 360/180 才重建网格，改 yaw/pitch/fov 只改下一帧的顶点数据）。
+3. **CPU 顶点变换 + w<=0 剔除**：shader cache 的顶点级是固定的
+   `gl_Position = vec4(vertex_position,1,1)` 直通（与 OSD 同一套 dispatch 机制），
+   没有自定义 vertex shader 可用，所以 MVP 在 CPU 上做（5° 网格 ≈ 1.5 万顶点，
+   每帧 <1ms），顶点按 mpv 的"像素坐标 + `gl_transform_ortho_fbo`"约定提交，
+   flip 语义自动正确。背面/侧面三角形若有任何顶点在相机平面之后（w<=0）整体丢弃：
+   在 fov<=150°（UI 上限 120°）下这类三角形与可见视锥无交集，无需真正的近平面裁剪。
+4. **数学逐行对照移植**：`perspective/lookAt/rotateX/rotateY/multiply`（xl_mat4）、
+   球面网格（get_ball_mesh + 第 14 轮的 coverage/uv 参数化，v 轴按 mpv 纹理
+   "行 0 = 画面顶部"约定翻转）、Cardboard 畸变网格（get_distortion_mesh 原样，
+   含色散 r/g/b 三套 uv 与 vignette；v 同样翻转）、模型矩阵组装顺序
+   （头追开：`head × ref⁻¹ × rotY(yaw) × rotX(pitch)`；关：`rotX(pitch) × rotY(yaw)`）
+   ——与第 11~13 轮真机验证过的 native 播放器一致，手感不变。
+   分屏的双眼内参沿用上游：fovy=60°、眼距 ±0.012、近平面 0.01/远平面 100。
+5. **头追线程**只在 Android 编入实现（`libandroid` 在 mpv 安卓构建里本来就链接），
+   其它平台 `vr_tracker_create()` 返回 NULL、选项静默降级为手动环视；
+   EKF 与传感器循环都有互斥保护，`gl_video_uninit` 时 join 线程，无泄漏。
+6. 头追开启时 `vo_gpu.draw_frame` 置 `want_redraw`，暂停中转动设备画面也跟随；
+   同时 VR 模式禁用"静止帧缓存 blit"与插帧（缓存会把视角冻在上一帧）。
+
+### 15.3 构建管线（tool/libmpv-vr + .github/workflows/libmpv_vr.yml）
+
+沙盒（2 vCPU）不可能交叉编译 ffmpeg+mpv，全部交给本仓库 CI：
+
+- `tool/libmpv-vr/buildscripts/` 逐字取自
+  My-Responsitories/libmpv-android-video-build **`8e50ecc`**——即 app 当前锁定的
+  `20260906` jar 的构建状态（mpv 0.41.0 / ffmpeg n9.0.1 / NDK r29 / default flavor），
+  只裁掉与产物无关的克隆（libvpx、x264、fftools_ffi、media_kit、android-helper）
+  和另外两个 flavor。**不用上游 9 月 30 日之后的状态**：那之后上游删了
+  h263/mpeg2/wmv/alac 等解码器并去掉了 helper .so，与本 app 的既有能力不匹配。
+- `patches/mpv/`：上游原有的 `mpv_lavc_set_java_vm.patch` + 本次的
+  `vr_vo_gpu.patch`（按字母序应用，互不重叠）。
+- **jar 组装走"换心"而不是全量重建**：下载上游 `20260906` 的
+  `default-arm64-v8a.jar`（校验 sha256），仅替换 `lib/arm64-v8a/libmpv.so`，
+  `libmedia_kit_native_event_loop.so` / `libmediakitandroidhelper.so` 逐字节保留
+  ——app 运行时唯一的变量就是 mpv 本体。构建脚本还会 `strings` 验证
+  `vr-head-tracking` 已编进 .so，防止补丁没打上就出包。
+- 产物发布到**本仓库**滚动 release `libmpv-vr`（PAT 只能操作本仓库，
+  建外部仓库会被 403 拒绝——见 15.4）。deps/prefix 有 actions/cache：
+  只改补丁时约 5~8 分钟出包，全量约 25~35 分钟。
+
+### 15.4 应用侧接入
+
+- **vendored `third_party/media_kit_libs_android_video/`**：从 media-kit fork
+  （ref native @ 73771ec）原样复制，唯一改动是 `android/build.gradle`：
+  arm64-v8a jar 改从本仓库 `libmpv-vr` release 下载（滚动资产无法钉 sha256，
+  构建日志会打印实际校验和，且其上游底包在构建时已验 sha）；
+  armeabi-v7a / x86_64 仍用上游 20260906 + sha256 钉死。
+  `pubspec.yaml` 的 override 相应改为 path 依赖（lock 已同步）。
+  曾经尝试把两个构建仓库 fork 到账号下再推送，但**当前 PAT 只授权了
+  PiliPlus 一个仓库**：建仓成功、推送/删仓 403，所以管线全部收进本仓库
+  （账号下遗留了两个空仓库 `libmpv-android-video-build`、`media-kit`，
+  本 token 无权删除，需要手动清理）。
+- **运行时探测**：播放器创建后读一次 `vr` 属性（补丁版返回 yes/no，
+  未打补丁返回空串）→ `vrMpvSupported`。不支持时 VR 入口明确提示，
+  不会静默失效；`setProperty` 对未知属性静默忽略，误发也无害。
+- **Dart 侧协议**：`PlPlayerController` 的视角/布局状态（`vrView`、
+  `vrProjection`、`vrEye`、`vrStereoOutput`、`vrGyroEnabled`）原样保留，
+  `_applyVrProperties()` 把它们翻译成上表的属性直写 mpv（同步 FFI，
+  一轮十来个调用，30ms 节流 + 手势结束尾随下发）。**没有量化、没有变体预算、
+  没有着色器文件**——第三、四轮的那套妥协（§9.1）整体删除。
+  拖拽/缩放/方向键/摆正/眼位/分屏的手势与 UI（`VrControlLayer`）不变，
+  新增"立体分屏输出"按钮与设置项。
+- **删除**：`VrEngine.kt`/`VrGlPipeline.kt`/`VrPlayerBridge.kt`/`VrSurfaceBridge.kt`、
+  `android/app/src/main/cpp/**`（libxl_vr 及其 CMake）、`vr_player_page.dart`、
+  `vr_native_player.dart`、`vr_shader.dart`、`vr_gyro*.dart`、sensors_plus 依赖、
+  `LocalMediaService.nativeHeaders/nativePlayerCanPlay`（MediaExtractor 专用，已无调用方）、
+  设置项「VR 使用独立播放器」（换成「VR 立体分屏输出」）。
+  xl_player 的移植成果没有浪费——它们以 C 转写的形式活在 mpv 补丁里。
+
+### 15.5 已知边界
+
+- 桌面端（Windows/Linux/macOS）的 libmpv 来自 pub.dev 的 media_kit_libs_*，
+  未打补丁 → VR 明确提示不可用（VR 本来就是安卓 scope）。
+- 分屏（Cardboard）模式无 mpv OSD/字幕；单眼模式字幕保持平面叠加。
+- 畸变网格用的是上游写死的 Cardboard 2015 参数（与 xl_player 相同），
+  不同头显的光学参数不完全匹配，但可用。
+- 头追仍是"陀螺仪+加速度计"的 OrientationEKF（无磁力计），长时间有慢漂，
+  「视角摆正」复位——与第 14 轮移植一致。
+- **未经真机验证**：沙盒只能做 CI 编译验证 + 数学/约定逐行对照。
+  几何约定（v 翻转、flip、w 剔除、fov 换算）全部推导自 mpv v0.41.0 源码与
+  前几轮真机结论，若真机出现上下颠倒/镜像，优先怀疑 §15.2 第 3 点的
+  flip 约定，vr.c 内已集中注释。
+
+### 15.6 本轮验证
+
+- 补丁在 pristine mpv v0.41.0 上 `git apply --check` 通过（与 java-vm 补丁叠加次序一致）；
+- 新增/改动文件在沙盒内以真实头文件树（ffmpeg n7.1 头 + libplacebo v7.360.1 头
+  + 手写 config.h/NDK sensor 桩）做 `gcc -fsyntax-only -Wall`：vr.c、vr_tracker.c
+  （android 与非 android 两条路径）、video.c、vo_gpu.c 全部 0 error 0 新 warning；
+- CI：libmpv 工作流出包（含 strings 自检）→ app 工作流 analyze/test/release 构建，
+  结果见对应 run 与 release `v2.1.5-test`。

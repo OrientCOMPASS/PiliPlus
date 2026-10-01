@@ -2,8 +2,10 @@ import 'package:PiliPlus/models/common/enum_with_label.dart';
 
 /// VR / 全景视频的片源布局。
 ///
-/// 全景片源以等距柱状投影(equirectangular)存储, 播放时由 GPU 着色器把片源
-/// 重投影为普通视角(rectilinear), 见 `lib/plugin/pl_player/utils/vr_shader.dart`。
+/// 全景片源以等距柱状投影(equirectangular)存储, 播放时由本分支定制的
+/// libmpv 在渲染链末端把平面画面重投影到球面(见 tool/libmpv-vr 与
+/// docs/piliplayer.md §15)。本模型同时定义了 Dart 侧枚举到 mpv
+/// `vr-layout` / `vr-projection` 属性值的映射。
 enum VrProjection with EnumWithLabel {
   off('关闭'),
   equirect360('等距柱状 360°'),
@@ -30,6 +32,20 @@ enum VrProjection with EnumWithLabel {
   /// 左右格式(side by side): 两只眼睛的画面左右排列
   bool get isSideBySide =>
       this == VrProjection.sbs360 || this == VrProjection.sbs180;
+
+  /// mpv `vr-layout` 属性值(片源立体布局)
+  String get mpvLayout {
+    if (isSideBySide) {
+      return 'sbs';
+    }
+    if (this == VrProjection.tb360 || this == VrProjection.tb180) {
+      return 'tb';
+    }
+    return 'mono';
+  }
+
+  /// mpv `vr-projection` 属性值(水平覆盖角)
+  String get mpvCoverage => coverageH >= 360.0 ? '360' : '180';
 
   /// 水平覆盖角度, 360° 片源可以无限水平旋转, 180° 片源需要在边界处收敛
   double get coverageH =>
@@ -131,11 +147,6 @@ class VrViewState {
   final double pitch;
   final double fov;
 
-  /// 量化: 步长由 [VrQuantizer](utils/vr_shader.dart) 按变体用量自适应给出,
-  /// 数值量化后没变化就不必重新下发着色器。
-  static double quantize(double value, double step) =>
-      (value / step).roundToDouble() * step;
-
   VrViewState clamped(VrProjection projection) {
     final fov = this.fov.clamp(minFov, maxFov);
     final range = projection.yawRange(fov);
@@ -155,16 +166,6 @@ class VrViewState {
     if (v < -180.0) v += 360.0;
     return v;
   }
-
-  /// 与另一个状态在量化后是否等价(等价则无需重载着色器)
-  bool sameRenderState(
-    VrViewState other, {
-    required double angleStep,
-    required double fovStep,
-  }) =>
-      quantize(yaw, angleStep) == quantize(other.yaw, angleStep) &&
-      quantize(pitch, angleStep) == quantize(other.pitch, angleStep) &&
-      quantize(fov, fovStep) == quantize(other.fov, fovStep);
 
   VrViewState copyWith({double? yaw, double? pitch, double? fov}) => VrViewState(
     yaw: yaw ?? this.yaw,

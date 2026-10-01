@@ -1095,13 +1095,11 @@ abstract final class Pref {
   static bool get vrGyro =>
       _setting.get(SettingBoxKey.vrGyro, defaultValue: true);
 
-  /// VR 是否用**自研 native 播放器**(MediaCodec + GLES 球面重投影)。
+  /// VR 立体分屏输出(Cardboard 头显模式): 左右眼各渲染一次并做镜头畸变。
   ///
-  /// 默认开。关掉则退回 mpv 用户着色器方案: 参数只能烘焙进着色器源码,
-  /// 改一次视角就要重建整条渲染管线, 做不到逐帧头追(见 docs/piliplayer.md 9.1)。
-  /// 保留这个开关是为了万一新渲染器在某些机型上有问题, 用户能立刻退回旧路径。
-  static bool get vrNativeRenderer =>
-      _setting.get(SettingBoxKey.vrNativeRenderer, defaultValue: true);
+  /// 默认关(手机裸屏用单眼画面即可), 播放中可在 VR 控制面板随时切换。
+  static bool get vrStereoOutput =>
+      _setting.get(SettingBoxKey.vrStereoOutput, defaultValue: false);
 
   // 本地板块
 

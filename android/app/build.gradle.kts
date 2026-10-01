@@ -37,16 +37,6 @@ android {
 
     packagingOptions.jniLibs.useLegacyPackaging = true
 
-    // VR 播放器移植自 xl_player 的渲染层（C/C++），见 src/main/cpp/CMakeLists.txt。
-    // 不设 abiFilters：Flutter --split-per-abi 会出多个 ABI 的包，全都带上这个 .so，
-    // 免得某个 ABI 的包装上后 System.loadLibrary 失败（Kotlin 侧也做了兜底）。
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
-    }
-
     val keyProperties = Properties().also {
         val properties = rootProject.file("key.properties")
         if (properties.exists())

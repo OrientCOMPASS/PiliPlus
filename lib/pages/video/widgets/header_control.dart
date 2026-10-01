@@ -512,38 +512,15 @@ class HeaderControlState extends State<HeaderControl>
                   },
                   itemBuilder: (_) => enumItemBuilder(VrProjection.values),
                   onSelected: (value, setState) {
-                    // 选了具体布局就等于"我要看全景": 走自研 VR 播放器时
-                    // 直接切到独立播放页, 而不是在 mpv 上下发着色器
-                    if (value.enabled && plPlayerController.vrNativeAvailable) {
-                      Get.back();
-                      videoDetailCtr.openVrPlayer(value);
-                    } else {
-                      plPlayerController.setVrProjection(value);
-                    }
+                    // VR 重投影在定制 libmpv 内完成, 选布局即生效,
+                    // 弹幕/字幕/手势等播放器能力全部保留
+                    plPlayerController.setVrProjection(value);
                     setState();
                   },
                   descPosType: .subtitle,
                   descStyle: subTitleStyle,
                 ),
-                if (plPlayerController.vrEnabled &&
-                    plPlayerController.vrNativeAvailable)
-                  ListTile(
-                    dense: true,
-                    onTap: () {
-                      Get.back();
-                      videoDetailCtr.openVrPlayer();
-                    },
-                    leading: const Icon(Icons.view_in_ar_outlined, size: 20),
-                    title: const Text('进入 VR 播放器', style: titleStyle),
-                    subtitle: Text(
-                      '独立渲染管线（MediaCodec + OpenGL ES 球面重投影），'
-                      '视角逐帧更新；此模式下没有弹幕',
-                      style: subTitleStyle,
-                    ),
-                  ),
-                // 下面是 mpv 用户着色器路径(设置里关掉「VR 使用独立播放器」时才走)
-                if (plPlayerController.vrEnabled &&
-                    !plPlayerController.vrNativeAvailable) ...[
+                if (plPlayerController.vrEnabled) ...[
                   ListTile(
                     dense: true,
                     onTap: () {
@@ -574,7 +551,7 @@ class HeaderControlState extends State<HeaderControl>
                       title: const Text('陀螺仪视角', style: titleStyle),
                       subtitle: Text(
                         plPlayerController.vrGyroEnabled.value
-                            ? '已开启：转动设备环视(随 VR 操作模式自动启停)'
+                            ? '已开启：转动设备环视(头追在 mpv 内逐帧运行)'
                             : '未开启：开启后转动设备即可环视',
                         style: subTitleStyle,
                       ),
@@ -589,7 +566,33 @@ class HeaderControlState extends State<HeaderControl>
                       ),
                     ),
                   ),
-                  if (plPlayerController.vrProjection.value.isStereo)
+                  Obx(
+                    () => ListTile(
+                      dense: true,
+                      onTap: () => plPlayerController.setVrStereoOutput(
+                        !plPlayerController.vrStereoOutput.value,
+                      ),
+                      leading: const Icon(Icons.view_in_ar_outlined, size: 20),
+                      title: const Text('立体分屏输出', style: titleStyle),
+                      subtitle: Text(
+                        plPlayerController.vrStereoOutput.value
+                            ? '已开启：左右眼分屏 + 镜头畸变(Cardboard 头显)'
+                            : '未开启：单眼画面, 适合手机/平板裸屏观看',
+                        style: subTitleStyle,
+                      ),
+                      trailing: Icon(
+                        plPlayerController.vrStereoOutput.value
+                            ? Icons.toggle_on
+                            : Icons.toggle_off,
+                        size: 32,
+                        color: plPlayerController.vrStereoOutput.value
+                            ? theme.colorScheme.primary
+                            : null,
+                      ),
+                    ),
+                  ),
+                  if (plPlayerController.vrProjection.value.isStereo &&
+                      !plPlayerController.vrStereoOutput.value)
                     PopupListTile<VrEye>(
                       dense: true,
                       leading: const Icon(Icons.visibility_outlined, size: 20),

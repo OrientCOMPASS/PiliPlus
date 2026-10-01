@@ -56,7 +56,6 @@ env:
         lib/services/smb
         lib/models/local_media
         lib/plugin/pl_player/models/vr_projection.dart
-        lib/plugin/pl_player/utils/vr_shader.dart
         lib/utils/local_media_progress.dart
         test/plugin/vr_test.dart
         test/services/local_media_service_test.dart
@@ -68,11 +67,7 @@ env:
         test/services/smb/smb_session_pool_test.dart
         lib/services/smb/smb_session_pool.dart
         lib/plugin/pl_player/widgets/vr_control_layer.dart
-        lib/plugin/pl_player/utils/vr_gyro.dart
-        lib/plugin/pl_player/utils/vr_gyro_math.dart
         test/services/local_media_source_test.dart
-        lib/services/vr
-        lib/pages/video/vr
 
 jobs:
     check:

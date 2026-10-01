@@ -313,14 +313,13 @@ List<SettingsModel> get playSettings => [
     onTap: _showVrFovDialog,
   ),
   const SwitchModel(
-    title: 'VR 使用独立播放器',
+    title: 'VR 立体分屏输出',
     subtitle:
-        '自研 MediaCodec + OpenGL ES 球面重投影，视角是逐帧 uniform，'
-        '头追跟手；关掉则退回 mpv 着色器方案(改视角要重建渲染管线，'
-        '只能量化跟手，但保留弹幕/字幕等 mpv 能力)',
+        '左右眼分屏 + 镜头畸变，供 Cardboard 类头显使用；'
+        '手机/平板裸屏观看请保持关闭(单眼画面)',
     leading: Icon(Icons.view_in_ar_outlined),
-    setKey: SettingBoxKey.vrNativeRenderer,
-    defaultVal: true,
+    setKey: SettingBoxKey.vrStereoOutput,
+    defaultVal: false,
   ),
   const SwitchModel(
     title: 'VR 陀螺仪视角',

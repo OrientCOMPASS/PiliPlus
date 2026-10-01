@@ -245,7 +245,7 @@ abstract final class SettingBoxKey {
       vrDefaultFov = 'vrDefaultFov',
       vrEye = 'vrEye',
       vrGyro = 'vrGyro',
-      vrNativeRenderer = 'vrNativeRenderer',
+      vrStereoOutput = 'vrStereoOutput',
       // 本地板块
       localMediaSources = 'localMediaSources',
       localMediaSort = 'localMediaSort',

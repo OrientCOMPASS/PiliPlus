@@ -1807,16 +1807,11 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                           ),
                         ),
                       ),
-                      // 自研 VR 播放器: 整页切过去(native 渲染, 视角是 uniform)
-                      // mpv 着色器路径: 只是接管手势, 仍在本页操作
-                      onPressed: () => plPlayerController.vrNativeAvailable
-                          ? videoDetailController.openVrPlayer()
-                          : plPlayerController.setVrControlMode(true),
-                      child: Text(
-                        plPlayerController.vrNativeAvailable
-                            ? 'VR 播放器'
-                            : 'VR 操作',
-                      ),
+                      // VR 在 mpv 内重投影(定制 libmpv), 按钮只是接管手势,
+                      // 全程留在本页: 弹幕/字幕/常规控件都还在
+                      onPressed: () =>
+                          plPlayerController.setVrControlMode(true),
+                      child: const Text('VR 操作'),
                     ),
                   ),
                 )

@@ -13,7 +13,8 @@ import 'package:material_ui/material_ui.dart';
 /// 路过它, 只是它的识别器不进竞技场), 因此手势由本层独占:
 ///   * 单指拖拽 = 环视(偏航/俯仰)
 ///   * 双指缩放 = 视场角
-///   * 陀螺仪转动设备环视(见右侧按钮, 参考 xl_player 头追)
+///   * 陀螺仪转动设备环视(见右侧按钮; 头追由定制 libmpv 在 native 侧
+///     逐帧运行, Cardboard OrientationEKF, 参考 xl_player)
 ///   * 常规手势(左右进退、上下亮度/音量、上下滑全屏、双指缩放画面)全部让位
 /// 同时提供屏幕按钮兜底(长按可连续转动), 以及实时视角读数,
 /// 方便确认操作是否生效。方案参考 PiliPlus#364「切换操作模式」。
@@ -98,7 +99,7 @@ class _VrControlLayerState extends State<VrControlLayer> {
                         '俯仰 ${view.pitch.toStringAsFixed(1)}°  '
                         '视场 ${view.fov.toStringAsFixed(0)}°  ·  点按退出VR操作',
                   ),
-                  // 着色器没生效时把原因摊开, 不要让用户面对"操作没反应"
+                  // VR 没生效时把原因摊开, 不要让用户面对"操作没反应"
                   if (error != null)
                     _Chip(
                       icon: Icons.error_outline,
@@ -184,7 +185,20 @@ class _VrControlLayerState extends State<VrControlLayer> {
                   ),
                 ),
                 Obx(
-                  () => _c.vrProjection.value.isStereo
+                  () => _VrStepButton(
+                    icon: Icons.view_in_ar_outlined,
+                    tooltip: _c.vrStereoOutput.value
+                        ? '立体分屏: 开(Cardboard 头显, 点按关闭)'
+                        : '立体分屏: 关(点按开启头显模式)',
+                    repeat: false,
+                    active: _c.vrStereoOutput.value,
+                    onStep: () =>
+                        _c.setVrStereoOutput(!_c.vrStereoOutput.value),
+                  ),
+                ),
+                Obx(
+                  () => _c.vrProjection.value.isStereo &&
+                          !_c.vrStereoOutput.value
                       ? _VrStepButton(
                           icon: Icons.visibility_outlined,
                           tooltip: '切换眼位',

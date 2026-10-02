@@ -76,6 +76,15 @@ android {
             signingConfig = config ?: signingConfigs["debug"]
         }
         release {
+            // R8/minification must stay OFF for release builds:
+            //  - libvlcjni resolves its Java classes by ORIGINAL names via JNI
+            //    FindClass at JNI_OnLoad; renaming them makes libvlc fail to
+            //    load (observed on device: FindClass(IMedia$Track) failed ->
+            //    JNI_ERR -> historically even System.exit(1) inside LibVLC).
+            //  - upstream ships releases unminified (proguard config is
+            //    commented out below); keeping parity avoids regressions.
+            isMinifyEnabled = false
+            isShrinkResources = false
             if (project.hasProperty("dev")) {
                 applicationIdSuffix = ".dev"
                 resValue(

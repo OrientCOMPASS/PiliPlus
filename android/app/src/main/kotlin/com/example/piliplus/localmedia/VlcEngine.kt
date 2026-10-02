@@ -102,24 +102,34 @@ object VlcEngine {
     }
 
     /**
-     * Loads c++_shared/vlc/vlcjni with per-library error capture.
-     * Returns null on success, or a diagnostic string on failure.
+     * Loads vlc/vlcjni (and optionally c++_shared) with per-library error
+     * capture. Returns null on success, or a diagnostic string on failure.
      * Once loaded here, LibVLC.loadLibraries() becomes a silent no-op
-     * (System.loadLibrary of an already-loaded library returns quietly).
+     * (System.loadLibrary of an already-loaded library returns quietly) —
+     * crucially, its System.exit(1) failure path is never reached.
+     *
+     * Note: c++_shared is OPTIONAL — the libvlc-pvr AAR statically links
+     * libc++ (no libc++_shared.so shipped); the stock Maven AAR does ship it.
      */
     private fun preloadNativeLibs(): String? {
         val results = ArrayList<String>()
-        for (name in listOf("c++_shared", "vlc", "vlcjni")) {
+        // optional: absence is normal for the static-cpp build
+        try {
+            System.loadLibrary("c++_shared")
+            results.add("c++_shared=ok")
+        } catch (t: Throwable) {
+            results.add("c++_shared=absent(static-cpp build, OK)")
+            LogCollector.i(TAG, "libc++_shared not present (static-cpp libvlc): ${t.message}")
+        }
+        for (name in listOf("vlc", "vlcjni")) {
             try {
                 System.loadLibrary(name)
                 results.add("$name=ok")
             } catch (t: Throwable) {
                 results.add("$name=FAIL(${t.javaClass.simpleName}: ${t.message})")
                 LogCollector.e(TAG, "System.loadLibrary($name) failed", t)
-                if (name != "c++_shared") {
-                    // Fatal for engine use; do NOT touch LibVLC (System.exit).
-                    return results.joinToString("; ")
-                }
+                // Fatal for engine use; do NOT touch LibVLC (System.exit).
+                return results.joinToString("; ")
             }
         }
         LogCollector.i(TAG, "native preload: ${results.joinToString("; ")}")

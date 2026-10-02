@@ -19,6 +19,14 @@
   3. **消除环境风险**：libvlc-pvr AAR 改用 **静态 C++ 运行时**（--static-cpp，
      libvlc.so 不再依赖 libc++_shared.so，与进程内 mpv 零 C++ 运行时耦合）并固定
      **NDK r27 LTS**（贴近 VideoLAN 3.0 发布工具链）。
+- **【崩溃修复·根因】release 构建被 R8 混淆导致 libvlc JNI 初始化失败**：
+  真机日志证实（新诊断体系第一轮即抓到实锤）：AGP 9 默认对 release 启用 R8，
+  `org.videolan.libvlc.*` Java 类被改名/裁剪，libvlcjni 在 `JNI_OnLoad` 中按原名
+  `FindClass(org/videolan/libvlc/interfaces/IMedia$Track)` 失败 → 返回 JNI_ERR →
+  旧版直接 `System.exit(1)` 闪退。修复：release 显式 **关闭 minify/shrink**
+  （与上游「proguard 注释停用」的意图一致，同时消除 R8 波及其它反射/JNI 组件的
+  隐患），并在 proguard-rules.pro 预置 org.videolan 全量 keep 规则防御未来重启混淆；
+  预加载逻辑将 c++_shared 缺失降级为正常信息（静态 C++ 构建本就不含它）。
 - **新增「本地」板块**（底部导航，与 首页/动态/我的 并列；老用户配置自动在末尾
   追加一次，可在「设置 → Navbar编辑」调整）：
   - **媒体库**：MediaStore 全量+增量索引（进度可见、边扫边出）、文件夹归组、

@@ -1520,3 +1520,119 @@ VR 从此就是主播放器的一种输出模式：弹幕（Flutter 层）、字
 而新仓库不会自动进入 token 的授权列表，所以后续对它的一切操作（含删除）都被拒。
 若不希望 token 具备建仓能力，把 Administration 权限降为 No access 即可
 （本仓库的推送/发布/触发 CI 只需要 Contents:write + Actions，均不受影响）。
+
+## 17. 第十二轮：mpv 多格式 VR（自动元数据识别 + 视角收敛）
+
+> **分支说明**：第十一轮之后本仓库曾整体改投 VLC 路线（退役 mpv VR，
+> 见 backup/piliplayer-pre-reset 分支上的 revert 提交与后续 libvlc-vr/pvr
+> 若干轮）。按需求方决定（"为此改造 mpv"），`piliplayer` 分支已**重置回
+> mpv VR 节点**（`404891c2c`，即第十一轮文档提交、revert 之前的最后状态）
+> 并在此基础上继续；VLC 路线的全部历史保存在
+> `backup/piliplayer-libvlc-pvr`（重置前的分支尖端）与
+> `backup/piliplayer-pre-reset` 两个分支上，本轮编号从 mpv 路线的
+> "第十二轮"续起（与 VLC 路线的第十二/十三轮无关）。
+
+### 17.1 需求与决策
+
+需求方给出 `REQUIREMENTS.md`（见仓库根目录）：在第十轮"VR 重投影移入定制
+libmpv"（§15）的基础上，把片源格式支持做全并补齐若干交互细节。核心九条：
+
+1. **格式矩阵**：水平覆盖 360°/180° × 立体布局 单目/左右(SBS)/上下(TB)，
+   另加「自动（按片源元数据）」与「强制平面（普通 2D）」。
+2. **视角操作**：单指拖拽环视、双指缩放视场角、陀螺仪环视、「视角摆正」；
+   180° 片源手动偏航要在覆盖边界收敛（转出画面见黑不可接受），陀螺仪模式放宽。
+3. **双目只取一只眼**渲染，眼位（左/右）可切换。
+4. **文件名自动识别**（默认开、可关），且必须防误判（`360p`/`1080p` 不算全景、
+   只有 `3d` 不猜布局、宽高比不作判据），识别不到时回退「自动（元数据）」。
+5. 播放中切换格式/眼位**保留进度原位生效**。
+6. 环视时 HUD 显示偏航/俯仰/视场读数。
+7. 引擎不具备 VR 能力时**明确提示**，不得静默失效。
+8. 范围外：Cardboard 双眼分屏输出、cubemap 片源。
+
+其中格式矩阵（第 1 条的 360/180 × 单目/SBS/TB）、眼位切换、拖拽/缩放/陀螺仪/
+摆正、HUD 读数、引擎探测提示，第十轮（§15）已经落地并在 v2.1.5-test 出过包。
+**本轮新增的是「自动（按片源元数据）」这条路径，以及把手动视角收敛做扎实**。
+
+### 17.2 mpv 侧改动（tool/libmpv-vr/buildscripts/patches/mpv/）
+
+维持第十轮的判断：**mpv 源码不进仓库**，只保留 patch，`download-deps.sh` 在
+CI 里 `git clone --depth 1 --branch v0.41.0` 拉取后由 `patch.sh` 打补丁。
+patch 按字母序应用，互不重叠，历史干净、可持续维护（升级 mpv 版本时只需
+重放 patch）。本轮涉及两个 patch 文件：
+
+- **`vr_metadata.patch`（本轮新增）**：让 libmpv 把"片源自己声明的全景/立体
+  元数据"暴露成只读属性，供应用侧「自动」模式读取。
+  - `demux/stheader.h`：`mp_codec_params` 加 `vr_projection`(MP_VR_PROJ_*) 与
+    `vr_layout`(MP_VR_LAYOUT_*) 两个字段 + 两组枚举。刻意**不复用**已有的
+    `stereo_mode`（那个喂给 mpv 自己的 3D OSD 机制，语义/取值都不同）。
+  - `demux/demux_lavf.c`：解析 lavf 的 `AV_PKT_DATA_SPHERICAL`（mov `sv3d`/
+    `prji`）与 `AV_PKT_DATA_STEREO3D`（mov `st3d`）side data。spherical 的
+    equirect-tile 用 `bound_left/right`（0.32 定点，相对完整图）算水平覆盖角，
+    量化到 360/180（≥300 记 360、≥150 记 180，其余记 other）；cubemap/鱼眼/
+    矩形分别记 cubemap/other/none。覆盖 mp4/mov。
+  - `demux/demux_mkv.c`：mkv/webm 走 mpv 自己的 matroska demuxer，不经过 lavf，
+    所以另接一路——读 `Projection`(ProjectionType: 0 矩形/1 equirect/2 cubemap/
+    3 mesh) 与 `StereoMode`，映射到同一组枚举。
+  - `player/command.c`：新增两个只读属性 `vr-metadata-projection`
+    (none/360/180/cubemap/other) 与 `vr-metadata-layout`(none/mono/sbs/tb/other)，
+    文件加载、视频轨就绪后可读，播放中不变。
+  - `bundle_vr_arm64.sh`：strings 自检增加 `vr-metadata-projection`，
+    patch 应用自检增加 `mp_vr_projection_from_spherical`，防止补丁没打上就出包。
+
+- **`vr_vo_gpu.patch`（本轮修改）**：新增 `vr_manual_angles()`，在**手动环视
+  （头追关闭）**时于 native 侧兜底夹取视角，与 Dart 侧 `VrViewState.clamped`
+  同一套公式：180° 片源偏航夹到 ±(180−fov)/2、俯仰夹到 ±(90−垂直fov/2)
+  （垂直 fov 由 `vr_fovy_from_hfov` 按实际渲染宽高比换算，保证视口不越过
+  等距柱状图边界/极点——转出画面见黑不可接受）；360° 偏航回绕、俯仰同样在
+  极点收敛。头追开启时不夹取（需求允许陀螺仪模式放宽），与 §15.2 的模型矩阵
+  组装完全兼容。`vr_compute_model()` 改为接收已夹取的 yaw/pitch 度数。
+
+两个 patch + 上游 `mpv_lavc_set_java_vm.patch` 在 pristine v0.41.0 上
+`git apply --check` 全部通过；改动的 .c 在沙盒内以真实头文件树
+（ffmpeg n9.0.1 + libplacebo v7.360.1 + 生成的 ebml_types.h + 手写
+config.h/avconfig.h/NDK sensor 桩）做 `gcc -fsyntax-only` 全绿。
+
+### 17.3 应用侧改动（lib/）
+
+- `models/vr_projection.dart`：`VrProjection` 枚举加 `auto`（自动·元数据），
+  `off` 标签改「强制平面（2D）」对齐需求措辞；`detectFromName` 识别不到时
+  **返回 `auto` 而非 `off`**（第 4 条回退）；新增纯函数
+  `resolveMetadata(projection, layout)` 把 mpv 的 `vr-metadata-*` 映射成具体
+  格式，cubemap/鱼眼/棋盘格等范围外格式返回带**明确文案**的
+  `VrAutoResolution.unsupported`（第 8 条）；`VrViewState` 加 `verticalFov`/
+  `pitchLimit` 与 `clamped(projection, {aspect, gyro})`——手动按极点/边界收敛，
+  陀螺仪放宽（第 2 条）。
+- `controller.dart`：区分**请求布局** `vrRequested`（可为 auto，设置菜单绑定它）
+  与**生效布局** `vrProjection`（永远是具体值，环视夹取/属性下发以它为准）；
+  `_maybeResolveVrAuto()` 在文件加载（`stream.tracks` 首次带视频轨）或用户手动
+  选「自动」时读取 `vr-metadata-*` 并解析，命中全景则**原位**切 VR（不重载、
+  不丢进度，第 5 条），范围外格式明确 toast；引擎不支持时统一走
+  `_vrEngineUnsupportedMessage`（第 8 条）；`_vrAspect` 由 `VrControlLayer`
+  上报用于俯仰收敛；`clamped` 调用点全部带上 aspect/gyro。
+- `widgets/vr_control_layer.dart`：`build` 里 `setVrViewport(w,h)` 上报宽高比；
+  HUD 读数条前置当前片源格式标签（第 6 条读数已有，格式标签是增强）。
+- `pages/video/widgets/header_control.dart`：VR/全景菜单绑定 `vrRequested`
+  （可显示/选择「自动」）。
+- `pages/setting/models/play_settings.dart`：「VR/全景自动识别」开关副标题
+  补充"识别不到时按片源元数据判断"。
+- `test/plugin/vr_test.dart`：补 `resolveMetadata` 全矩阵、防误判回退 auto、
+  俯仰极点收敛、陀螺仪放宽、fov 变化后偏航上限随收敛等用例；在沙盒内用
+  独立 Dart SDK（3.13.3，与 Flutter 3.47.4 匹配）+ `package:test` 跑通全绿。
+
+### 17.4 范围与取舍
+
+- **Cardboard 双眼分屏**（需求第 8 条列为范围外）：第十轮已实现并在 UI 暴露，
+  本轮**保留不动**（删除属额外风险且非必要）；新增的 native 视角收敛对分屏
+  路径也一并生效（按每只眼的宽高比），行为与单眼一致。
+- **cubemap 片源**（范围外）：不渲染，自动模式识别到时明确提示"不支持"。
+- 自动识别默认只对**本地/局域网**源生效（在线地址常带 360/1080p 清晰度字样，
+  误判会把正常视频弄花）；在线内容需要 VR 时在播放页菜单手动选（含「自动」）。
+
+### 17.5 本轮验证
+
+- patch：pristine v0.41.0 上三补丁叠加 `git apply --check` 通过；
+- C 侧：改动文件 `gcc -fsyntax-only` 全绿（含 demux_mkv 的 ebml_types.h 生成头）；
+- Dart 侧：`dart test` 全绿、`dart analyze --fatal-infos`（flutter_lints 6）
+  对 strict 路径无 issue、`dart format` 解析通过；
+- CI：libmpv 工作流出包（含 strings 自检）→ app 工作流 analyze/test/release，
+  结果见对应 run 与 release `v2.1.5-test`（沿用固定测试 tag，未 bump 版本）。

@@ -272,6 +272,8 @@ abstract final class LocalBoxKey {
 abstract final class LocalSettingKey {
   static const String vrAutoDetect = 'localVrAutoDetect',
       navBarLocalMigrated = 'navBarLocalMigrated',
+      navBarLocalOrderV2 = 'navBarLocalOrderV2',
       netBookmarks = 'localNetBookmarks',
+      netCredentials = 'localNetCredentials',
       localGyroDefault = 'localGyroDefault';
 }

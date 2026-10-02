@@ -17,7 +17,16 @@ abstract final class LocalMigrations {
   static Future<void> run() async {
     _migrateSpeedList();
     _migrateNavBar();
+    _migrateNavBarLocalOrderV2();
   }
+
+  /// 默认导航栏顺序（新用户 / 未保存过配置时）：本地在「我的」之前。
+  static const List<NavigationBarType> defaultNavBarOrder = [
+    NavigationBarType.home,
+    NavigationBarType.dynamics,
+    NavigationBarType.local,
+    NavigationBarType.mine,
+  ];
 
   /// 倍速预设一次性迁移（不覆盖用户自定义档位）：
   /// 移除历史上去掉的 0.75/1.25/1.75，补齐 2.5/4/8，用户额外添加的保留。
@@ -54,6 +63,25 @@ abstract final class LocalMigrations {
       }
     }
     GStorage.setting.put(LocalSettingKey.navBarLocalMigrated, true);
+  }
+
+  /// 一次性把已保存配置中的「本地」移动到「我的」之前（第二轮真机反馈）。
+  static void _migrateNavBarLocalOrderV2() {
+    if (GStorage.setting.get(LocalSettingKey.navBarLocalOrderV2, defaultValue: false) == true) {
+      return;
+    }
+    final raw = GStorage.setting.get(SettingBoxKey.navBarSort);
+    if (raw is List && raw.isNotEmpty) {
+      final list = raw.whereType<num>().map((e) => e.toInt()).toList();
+      final localOrdinal = NavigationBarType.local.index;
+      final mineOrdinal = NavigationBarType.mine.index;
+      if (list.contains(localOrdinal) && list.contains(mineOrdinal)) {
+        list.remove(localOrdinal);
+        list.insert(list.indexOf(mineOrdinal), localOrdinal);
+        GStorage.setting.put(SettingBoxKey.navBarSort, list);
+      }
+    }
+    GStorage.setting.put(LocalSettingKey.navBarLocalOrderV2, true);
   }
 
   /// 默认倍速档位（未自定义时）。

@@ -38,6 +38,16 @@ class PlayerBridge(private val context: Context) {
     private var player: MediaPlayer? = null
     private var attachedView: VLCVideoLayout? = null
 
+    // ---- video surface readiness (SurfaceView is created asynchronously
+    //      after the platform view enters the hierarchy; libvlc's vout does
+    //      NOT wait for it, so we do) ----
+    private val surfaceLock = Object()
+
+    @Volatile
+    private var surfaceReady = false
+    private var holderCallback: android.view.SurfaceHolder.Callback? = null
+    private var observedHolder: android.view.SurfaceHolder? = null
+
     private var uris: List<String> = emptyList()
     private var index: Int = 0
     private var pendingStartMs: Long = 0
@@ -151,12 +161,71 @@ class PlayerBridge(private val context: Context) {
             // subtitles=true: libvlc renders embedded/external SPU itself.
             p.attachViews(layout, null, true, false)
         }.onFailure { LogCollector.e(TAG, "attachViews failed", it) }
+        observeSurface(layout)
+    }
+
+    /** Watch the (lazily inflated) video SurfaceView for surface readiness. */
+    private fun observeSurface(layout: VLCVideoLayout) {
+        try {
+            val id = layout.resources.getIdentifier("surface_video", "id", "org.videolan")
+            var sv: android.view.SurfaceView? = if (id != 0) layout.findViewById(id) else null
+            if (sv == null) {
+                for (i in 0 until layout.childCount) {
+                    val child = layout.getChildAt(i) as? android.view.SurfaceView
+                    if (child != null) { sv = child; break }
+                }
+            }
+            if (sv == null) {
+                LogCollector.w(TAG, "video SurfaceView not found in layout; not waiting for surface")
+                return
+            }
+            val cb = object : android.view.SurfaceHolder.Callback {
+                override fun surfaceCreated(holder: android.view.SurfaceHolder) {
+                    LogCollector.i(TAG, "video surface created")
+                    synchronized(surfaceLock) { surfaceReady = true; surfaceLock.notifyAll() }
+                }
+                override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, w: Int, h: Int) {}
+                override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
+                    LogCollector.i(TAG, "video surface destroyed")
+                    synchronized(surfaceLock) { surfaceReady = false }
+                }
+            }
+            sv.holder.addCallback(cb)
+            if (sv.holder.surface?.isValid == true) {
+                synchronized(surfaceLock) { surfaceReady = true }
+            }
+            holderCallback = cb
+            observedHolder = sv.holder
+        } catch (t: Throwable) {
+            LogCollector.e(TAG, "observeSurface failed", t)
+        }
+    }
+
+    /** Blocks (off-main-thread) until the video surface exists, with timeout. */
+    private fun awaitSurface(timeoutMs: Long = 6000): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        synchronized(surfaceLock) {
+            while (!surfaceReady) {
+                val remaining = deadline - System.currentTimeMillis()
+                if (remaining <= 0) break
+                try {
+                    surfaceLock.wait(remaining)
+                } catch (e: InterruptedException) {
+                    break
+                }
+            }
+            return surfaceReady
+        }
     }
 
     fun detach() {
         val p = player ?: return
         if (attachedView == null) return
         runCatching { p.detachViews() }
+        runCatching { holderCallback?.let { observedHolder?.removeCallback(it) } }
+        holderCallback = null
+        observedHolder = null
+        synchronized(surfaceLock) { surfaceReady = false }
         attachedView = null
     }
 
@@ -209,6 +278,11 @@ class PlayerBridge(private val context: Context) {
             val media = VlcEngine.buildMedia(context, uri, options)
             p.media = media
             media.release()
+            // libvlc's android window bridge returns NULL when the SurfaceView
+            // is not ready yet (no native retry) -> vout creation would fail.
+            if (!awaitSurface()) {
+                LogCollector.w(TAG, "video surface not ready after wait; starting anyway")
+            }
             p.play()
         } catch (t: Throwable) {
             LogCollector.e(TAG, "open failed: $uri", t)

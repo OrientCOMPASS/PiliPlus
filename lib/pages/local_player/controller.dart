@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:PiliPlus/services/local_media/local_library_service.dart';
 import 'package:PiliPlus/services/local_media/local_media_channel.dart';
+import 'package:PiliPlus/services/local_media/local_network_service.dart';
 import 'package:PiliPlus/services/local_media/log_ring.dart';
 import 'package:PiliPlus/services/local_media/models.dart';
 import 'package:PiliPlus/utils/image_utils.dart';
@@ -207,6 +208,10 @@ class LocalPlayerController extends GetxController {
         startMs = record.positionMs;
       }
       LocalLibraryService.to.countPlay(uri);
+    }
+    if (isNetwork && Get.isRegistered<LocalNetworkService>()) {
+      // 播放中若服务端要求认证，凭据归属到正确主机
+      LocalNetworkService.to.noteAuthContext(uri);
     }
     _subtitleAutoDetectDone = false;
 

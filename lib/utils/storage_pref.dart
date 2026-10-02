@@ -1077,6 +1077,21 @@ abstract final class Pref {
         LocalSettingKey.netBookmarks,
         value.map((e) => e.toMap()).toList(),
       );
+
+  /// 局域网来源凭据（host → user/pass）。仅保存在本机，界面展示与
+  /// 复制到剪贴板的地址一律脱敏，绝不写入日志。
+  static List<Map<String, String>> get localNetCredentials {
+    final raw = _setting.get(LocalSettingKey.netCredentials);
+    if (raw is! List) return [];
+    return raw.whereType<Map>().map((e) {
+      final m = <String, String>{};
+      e.forEach((k, v) => m[k.toString()] = v?.toString() ?? '');
+      return m;
+    }).toList();
+  }
+
+  static set localNetCredentials(List<Map<String, String>> value) =>
+      _setting.put(LocalSettingKey.netCredentials, value);
 }
 
 class NetBookmarkData {

@@ -35,10 +35,75 @@ class LocalNetworkService extends GetxService {
   StreamSubscription<Map>? _sub;
   bool _loginDialogOpen = false;
 
+  /// host(lowercase) -> (user, pass)；仅存本机（setting box）。
+  final Map<String, (String, String)> _creds = {};
+
+  /// 最近一次浏览/播放的网络 URL（登录框弹出时用于确定凭据归属主机）。
+  String _authContextUrl = '';
+
   @override
   void onInit() {
     super.onInit();
+    for (final e in Pref.localNetCredentials) {
+      final host = (e['host'] ?? '').toLowerCase();
+      if (host.isNotEmpty) {
+        _creds[host] = (e['user'] ?? '', e['pass'] ?? '');
+      }
+    }
     _sub = _ch.events.listen(_onEvent);
+  }
+
+  void _persistCreds() {
+    Pref.localNetCredentials = _creds.entries
+        .map((e) => {'host': e.key, 'user': e.value.$1, 'pass': e.value.$2})
+        .toList();
+  }
+
+  /// 为无凭据的 URL 注入已保存的凭据（同主机）。日志中一律使用脱敏形式。
+  String withCredentials(String url) {
+    try {
+      final uri = Uri.parse(url);
+      if (uri.userInfo.isNotEmpty) return url;
+      final cred = _creds[uri.host.toLowerCase()];
+      if (cred == null) return url;
+      final auth = '${Uri.encodeComponent(cred.$1)}'
+          '${cred.$2.isEmpty ? '' : ':${Uri.encodeComponent(cred.$2)}'}';
+      return url.replaceFirst('://${uri.host}', '://$auth@${uri.host}');
+    } catch (_) {
+      return url;
+    }
+  }
+
+  /// 播放网络源前登记上下文（登录框弹出时凭据写到正确主机）。
+  void noteAuthContext(String url) {
+    _authContextUrl = url;
+  }
+
+  void saveCredentialsFor(String url, String user, String pass) {
+    try {
+      final host = Uri.parse(url).host.toLowerCase();
+      if (host.isEmpty) return;
+      _creds[host] = (user, pass);
+      _persistCreds();
+      // 同步更新匹配主机的书签 URL（凭据写回来源）
+      for (var i = 0; i < bookmarks.length; i++) {
+        final b = bookmarks[i];
+        final bHost = Uri.tryParse(b.url)?.host.toLowerCase() ?? '';
+        if (bHost == host) {
+          final auth = '${Uri.encodeComponent(user)}'
+              '${pass.isEmpty ? '' : ':${Uri.encodeComponent(pass)}'}';
+          final newUrl = b.url.replaceFirst(
+            RegExp(r'://([^@/]*@)?'),
+            '://$auth@',
+          );
+          bookmarks[i] = NetBookmark(name: b.name, url: newUrl);
+        }
+      }
+      _persistBookmarks();
+      LocalLogRing.instance.i('LocalNetwork', 'credentials stored for host $host');
+    } catch (e) {
+      LocalLogRing.instance.e('LocalNetwork', 'saveCredentials failed: $e');
+    }
   }
 
   @override
@@ -133,10 +198,11 @@ class LocalNetworkService extends GetxService {
   Future<void> browse(String url) async {
     browsing.value = true;
     browseUrl.value = url;
+    _authContextUrl = url;
     browseItems.clear();
     try {
       await _ch.engineInit();
-      await _ch.netBrowse(url);
+      await _ch.netBrowse(withCredentials(url));
     } catch (e) {
       browsing.value = false;
       LocalLogRing.instance.e('LocalNetwork', 'browse failed: $e');
@@ -144,7 +210,9 @@ class LocalNetworkService extends GetxService {
   }
 
   Future<int> download(String url, String destDir, String fileName) async {
-    final id = await _ch.netDownload(url: url, destDir: destDir, fileName: fileName);
+    final full = withCredentials(url);
+    _authContextUrl = url;
+    final id = await _ch.netDownload(url: full, destDir: destDir, fileName: fileName);
     if (id > 0) _pendingDownloads[id] = fileName;
     return id;
   }
@@ -232,11 +300,18 @@ class LocalNetworkService extends GetxService {
           ),
           FilledButton(
             onPressed: () {
+              final user = userController.text;
+              final pass = passController.text;
               _ch.dialogPostLogin(
                 id: id,
-                username: userController.text,
-                password: passController.text,
+                username: user,
+                password: pass,
               );
+              // 凭据写回来源并持久化（仅本机）：同一主机后续浏览/播放
+              // 自动注入，不再重复询问。
+              if (user.isNotEmpty) {
+                saveCredentialsFor(_authContextUrl, user, pass);
+              }
               Navigator.pop(dialogContext);
               _loginDialogOpen = false;
             },

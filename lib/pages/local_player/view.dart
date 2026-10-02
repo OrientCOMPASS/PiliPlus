@@ -5,6 +5,8 @@ import 'package:PiliPlus/services/local_media/models.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
@@ -185,13 +187,32 @@ class _LocalPlayerPageState extends State<LocalPlayerPage> {
           return Stack(
             fit: StackFit.expand,
             children: [
-              // 画面（PlatformView，控件叠在其上）
-              AndroidView(
+              // 画面（PlatformView，控件叠在其上）。
+              // SurfaceView 必须走完整 Hybrid Composition
+              // （initExpensiveAndroidView）：TLHC 模式下 SurfaceView 的
+              // surface 不会正常创建，libvlc 拿不到窗口 → vout 创建失败。
+              PlatformViewLink(
                 viewType: 'piliplus/vlc_video',
-                onPlatformViewCreated: _c.attachView,
-                creationParams: const <String, dynamic>{},
-                creationParamsCodec: const StandardMessageCodec(),
-                layoutDirection: TextDirection.ltr,
+                surfaceFactory: (context, controller) => AndroidViewSurface(
+                  controller: controller as AndroidViewController,
+                  gestureRecognizers: const <Factory<OneSequenceGestureRecognizer>>{},
+                  hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+                ),
+                onCreatePlatformView: (params) {
+                  final controller = PlatformViewsService.initExpensiveAndroidView(
+                    id: params.id,
+                    viewType: 'piliplus/vlc_video',
+                    layoutDirection: TextDirection.ltr,
+                    creationParams: const <String, dynamic>{},
+                    creationParamsCodec: const StandardMessageCodec(),
+                    onFocus: () => params.onFocusChanged(true),
+                  );
+                  controller.addOnPlatformViewCreatedListener(
+                    params.onPlatformViewCreated,
+                  );
+                  controller.addOnPlatformViewCreatedListener(_c.attachView);
+                  return controller;
+                },
               ),
               // 手势层
               _buildGestureLayer(box),

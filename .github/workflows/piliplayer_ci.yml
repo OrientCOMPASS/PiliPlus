@@ -144,7 +144,9 @@ jobs:
                       SHA256SUMS.txt
 
             - name: Publish release (rolling tag)
-              if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+              # 直接在 push 构建成功后发布（不再单独跑一轮相同构建）；
+              # workflow_dispatch + publish=true 可手动重发当前 HEAD。
+              if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: |

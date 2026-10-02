@@ -346,7 +346,7 @@ class _NetBrowsePageState extends State<NetBrowsePage> {
 
   void _play(List<NetItem> files, int index) {
     final controller = LocalPlayerController(
-      uris: files.map((e) => e.uri).toList(),
+      uris: files.map((e) => _service.withCredentials(e.uri)).toList(),
       titles: files.map((e) => e.name).toList(),
       initialIndex: index,
       isNetwork: true,

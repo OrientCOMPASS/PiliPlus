@@ -7,18 +7,23 @@
 
 ## 本轮变更
 
-- **【崩溃修复】局域网页/本地播放启动即闪退且无日志**：根因是 libvlc Java 层在
-  native 库加载失败时直接 `System.exit(1)`（静默进程死亡，任何日志都来不及写）。
-  本轮三层修复：
-  1. **不死**：引擎初始化前先由桥接层逐个 `System.loadLibrary`（c++_shared/vlc/
-     vlcjni）并捕获真实 linker 错误——失败会变成带完整原因的错误提示（网络页横幅
-     /播放页错误卡片，均可就地查看引擎日志），不再闪退；
-  2. **有日志**：诊断日志改为**落盘持久化**（`filesDir/pili_engine.log`，768KB
-     轮转），logcat 采集在桥接层挂载时即启动（早于引擎），并注册 Java 未捕获异常
-     处理器——**即使进程仍意外死亡，重启后「引擎日志」页也能看到死前记录**；
-  3. **消除环境风险**：libvlc-pvr AAR 改用 **静态 C++ 运行时**（--static-cpp，
-     libvlc.so 不再依赖 libc++_shared.so，与进程内 mpv 零 C++ 运行时耦合）并固定
-     **NDK r27 LTS**（贴近 VideoLAN 3.0 发布工具链）。
+- **【播放修复】本机/局域网视频黑屏无法播放**：真机日志定位两处叠加原因——
+  ① Flutter 默认 TLHC 模式下 SurfaceView 不会正常创建 surface，libvlc 拿不到窗口；
+  ② libvlc 的 android window 桥接**不等待** surface（surface 未就绪时 vout 创建
+  直接失败且不重试）。修复：播放页改用**完整 Hybrid Composition**
+  （PlatformViewLink + initExpensiveAndroidView，SurfaceView 标准做法）；
+  原生层监听 SurfaceHolder 回调，**play() 前等待 surface 就绪**（最长 6s，
+  带日志），彻底消除时序竞态。
+- **【认证持久化】局域网凭据跨启动保存**：登录框确认后凭据按主机写入本机存储
+  （仅本机、界面/复制/日志一律脱敏），之后同主机的浏览/播放/下载自动注入凭据，
+  不再每次启动重输；书签 URL 同步写回凭据。
+- **【导航栏】默认顺序改为 首页/动态/本地/我的**（本地移到「我的」之前）；
+  已有配置一次性迁移（本地插到我的之前）；「默认启动页」设置本就支持选择
+  任意导航栏项（含本地）。
+- **【日志噪音】** `option vr-projection does not exist` 报错消除：VR 变量在
+  gl vout 模块声明为配置项（顺带支持 `:vr-projection=` 媒体选项），AAR 已重建。
+- **【发布流程】** push 构建成功后**直接发布** v2.1.5-test（删旧建新），不再
+  单独跑一轮相同构建的 dispatch。
 - **【崩溃修复·根因】release 构建被 R8 混淆导致 libvlc JNI 初始化失败**：
   真机日志证实（新诊断体系第一轮即抓到实锤）：AGP 9 默认对 release 启用 R8，
   `org.videolan.libvlc.*` Java 类被改名/裁剪，libvlcjni 在 `JNI_OnLoad` 中按原名

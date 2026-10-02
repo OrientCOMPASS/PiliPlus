@@ -196,10 +196,38 @@ index 25cef43..c4f290d 100644
       * openGL vout, with a higher priority, should be used when the projection
       * need to be handled). */
 diff --git a/modules/video_output/opengl/display.c b/modules/video_output/opengl/display.c
-index ec67110..b329438 100644
+index ec67110..755d21e 100644
 --- a/modules/video_output/opengl/display.c
 +++ b/modules/video_output/opengl/display.c
-@@ -142,8 +142,14 @@ static int Open (vlc_object_t *obj)
+@@ -42,6 +42,17 @@ static void Close (vlc_object_t *);
+ #define PROVIDER_LONGTEXT N_( \
+     "Extension through which to use the Open Graphics Library (OpenGL).")
+ 
++/* PiliPlus VR extension: declaring these as config options avoids
++ * "option does not exist" errors from var inheritance fallback (they are
++ * plain object variables inherited mp -> input -> vout -> display) and also
++ * allows per-media ":vr-projection=..." style options. */
++#define VR_PROJ_TEXT N_("VR projection override (PiliPlus)")
++#define VR_PROJ_LONGTEXT N_("0: auto (metadata), 1: flat, 2: equirectangular 360, 3: equirectangular 180")
++#define VR_STEREO_TEXT N_("VR stereo layout override (PiliPlus)")
++#define VR_STEREO_LONGTEXT N_("0: auto (metadata), 1: mono, 2: side-by-side, 3: top-bottom")
++#define VR_EYE_TEXT N_("VR eye selection (PiliPlus)")
++#define VR_EYE_LONGTEXT N_("0: left eye, 1: right eye")
++
+ vlc_module_begin ()
+ #if defined (USE_OPENGL_ES2)
+ # define API VLC_OPENGL_ES2
+@@ -69,6 +80,9 @@ vlc_module_begin ()
+                 GL_TEXT, PROVIDER_LONGTEXT, true)
+ #endif
+     add_glopts ()
++    add_integer ("vr-projection", 0, VR_PROJ_TEXT, VR_PROJ_LONGTEXT, true)
++    add_integer ("vr-stereo", 0, VR_STEREO_TEXT, VR_STEREO_LONGTEXT, true)
++    add_integer ("vr-eye", 0, VR_EYE_TEXT, VR_EYE_LONGTEXT, true)
+ vlc_module_end ()
+ 
+ struct vout_display_sys_t
+@@ -142,8 +156,14 @@ static int Open (vlc_object_t *obj)
      if (vlc_gl_MakeCurrent (sys->gl))
          goto error;
  
@@ -215,7 +243,7 @@ index ec67110..b329438 100644
      vlc_gl_ReleaseCurrent (sys->gl);
  
      if (sys->vgl == NULL)
-@@ -279,6 +285,14 @@ static int Control (vout_display_t *vd, int query, va_list ap)
+@@ -279,6 +299,14 @@ static int Control (vout_display_t *vd, int query, va_list ap)
        case VOUT_DISPLAY_CHANGE_VIEWPOINT:
          return vout_display_opengl_SetViewpoint (sys->vgl,
              &va_arg (ap, const vout_display_cfg_t* )->viewpoint);

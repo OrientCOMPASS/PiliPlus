@@ -894,12 +894,39 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   //   vr / vr-layout / vr-projection / vr-eye / vr-stereo-output
   //   vr-fov / vr-yaw / vr-pitch / vr-head-tracking / vr-reset-view
   //
+  // 反向只读取两个元数据属性(vr_metadata.patch, 「自动(按片源元数据)」
+  // 模式的数据来源, 见 _maybeResolveVrAuto):
+  //
+  //   vr-metadata-projection / vr-metadata-layout
+  //
   // 这些属性在 mpv 侧是"热参数": 改动**不会**触发渲染链重建或 GLSL 重编译
   // (那是旧用户着色器方案的根本限制, 见 docs/piliplayer.md §9.1),
-  // 拖拽跟手下发即可, 也不再有"变体预算"。
+  // 拖拽跟手下发即可, 也不再有"变体预算"。手动环视的视角收敛(180° 偏航
+  // 边界 / 极点俯仰)由 Dart(clamped)与 native(vr_manual_angles)双层兜底,
+  // 头追开启时两侧都放宽(需求第 3 条)。
 
-  /// 当前片源的立体布局, [VrProjection.off] 表示普通视频
+  /// 当前**生效**的片源布局, [VrProjection.off] 表示普通视频。
+  /// 永远不会是 [VrProjection.auto]: auto 是"待解析"状态(见 [vrRequested]),
+  /// 解析成功后这里会变成具体的格式。
   final Rx<VrProjection> vrProjection = Rx<VrProjection>(VrProjection.off);
+
+  /// 用户/自动识别**请求**的片源布局, 可以是 [VrProjection.auto]
+  /// (按片源元数据识别)。设置面板的「VR/全景」菜单显示与修改的是它;
+  /// 环视夹取、属性下发等一律以 [vrProjection](生效值)为准。
+  final Rx<VrProjection> vrRequested = Rx<VrProjection>(VrProjection.off);
+
+  /// 本次播放会话内 auto 是否已解析(避免 tracks 事件反复触发解析)
+  bool _vrAutoResolved = false;
+
+  /// VR 渲染视口的宽高比, 由 VrControlLayer 上报;
+  /// 用于计算俯仰角的极点收敛边界(与 mpv 侧 vr_manual_angles 同一公式)
+  double? _vrAspect;
+
+  void setVrViewport(double width, double height) {
+    if (width > 0 && height > 0) {
+      _vrAspect = width / height;
+    }
+  }
 
   /// VR 操作模式(参考 PiliPlus#364 提出的"切换操作模式"方案)。
   ///
@@ -956,7 +983,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (!vrMpvSupported.value && vrEnabled && Platform.isAndroid) {
       vrControlMode.value = false;
       setVrGyro(false, persist: false, toast: false);
-      SmartDialog.showToast('当前 libmpv 不含 VR 渲染支持，请安装本分支 CI 构建的包');
+      _toastVrEngineUnsupported();
     }
   }
 
@@ -972,14 +999,27 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     String source, {
     bool autoDetect = false,
   }) {
-    var projection = hint;
-    if (projection == null && autoDetect && Pref.vrAutoDetect) {
-      final detected = VrProjection.detectFromName(mediaName(source));
-      if (detected.enabled) {
-        projection = detected;
-      }
+    VrProjection requested;
+    if (hint != null) {
+      requested = hint;
+    } else if (autoDetect) {
+      // 本地/局域网源: 「VR/全景自动识别」开启时按文件名关键词识别, 识别不到
+      // 回退「自动(按片源元数据)」(需求第 5 条), 待文件加载后由
+      // _maybeResolveVrAuto 解析; 该开关关闭时不做任何自动进入(用户可在
+      // 播放页菜单手动选, 含「自动」)。
+      requested = Pref.vrAutoDetect
+          ? VrProjection.detectFromName(mediaName(source))
+          : VrProjection.off;
+    } else {
+      // 在线源地址里常带 360/1080p 之类的清晰度字样, 不猜;
+      // 需要 VR 时在播放页菜单里手动选择(含「自动」)
+      requested = VrProjection.off;
     }
-    vrProjection.value = projection ?? VrProjection.off;
+    vrRequested.value = requested;
+    _vrAutoResolved = false;
+    // auto 解析前按平面播放(解析结果出来才切 VR, 见 _maybeResolveVrAuto)
+    vrProjection.value =
+        requested == VrProjection.auto ? VrProjection.off : requested;
     vrView.value = VrViewState(fov: Pref.vrDefaultFov);
     _vrLastApplyMs = 0;
     if (!vrEnabled) {
@@ -991,13 +1031,103 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       // 桌面端 libmpv 未打 VR 补丁: 明确提示, 不进入操作模式
       vrControlMode.value = false;
       setVrGyro(false, persist: false, toast: false);
-      SmartDialog.showToast('当前平台的 libmpv 不支持 VR 渲染(仅安卓)');
+      SmartDialog.showToast(_vrEngineUnsupportedMessage);
       return;
     }
     vrControlMode.value = true;
     setVrGyro(Pref.vrGyro, persist: false, toast: false);
     SmartDialog.showToast(
       '已识别为${vrProjection.value.label}片源，已进入 VR 操作模式\n'
+      '单指拖拽环视，双指缩放视场角，也可用屏幕按钮微调',
+      displayTime: const Duration(milliseconds: 3000),
+    );
+  }
+
+  /// 引擎不支持 VR 时的统一提示文案(需求第 8 条: 必须明确提示, 不静默失效)
+  String get _vrEngineUnsupportedMessage => Platform.isAndroid
+      ? '当前 libmpv 不含 VR 渲染支持，请安装本分支 CI 构建的包'
+      : '当前平台的 libmpv 不支持 VR 渲染(仅安卓)';
+
+  void _toastVrEngineUnsupported() =>
+      SmartDialog.showToast(_vrEngineUnsupportedMessage);
+
+  /// 「自动(按片源元数据)」解析: 读取定制 libmpv 的 `vr-metadata-*` 只读属性
+  /// (vr_metadata.patch 从容器 side data 提取), 映射成具体片源布局。
+  ///
+  /// 触发时机: ① 文件加载后轨道列表就绪(stream.tracks 首次带视频轨);
+  /// ② 用户在播放中手动选「自动」(此时文件已加载, 立即解析)。
+  /// [userRequested] 为 true 时, "没有元数据"也要明确提示(用户主动选的);
+  /// 文件名回退进来的 auto 则静默保持平面(普通视频不该被打扰)。
+  void _maybeResolveVrAuto({bool userRequested = false, int attempt = 0}) {
+    if (vrRequested.value != VrProjection.auto || _vrAutoResolved) {
+      return;
+    }
+    final player = _vrNativePlayer;
+    if (player == null) {
+      return;
+    }
+    if (!vrMpvSupported.value) {
+      _vrAutoResolved = true;
+      if (userRequested) {
+        _toastVrEngineUnsupported();
+      }
+      return;
+    }
+    final projection = player.getProperty('vr-metadata-projection');
+    if (projection.isEmpty) {
+      // 文件还没加载完 / 当前视频轨还没选定(TRACKS_CHANGED 可能早于选定轨),
+      // 或纯音频文件根本没有视频轨: 有限次重试, 不置 resolved。
+      if (attempt < 6) {
+        Future.delayed(
+          const Duration(milliseconds: 400),
+          () => _maybeResolveVrAuto(
+            userRequested: userRequested,
+            attempt: attempt + 1,
+          ),
+        );
+        return;
+      }
+      // 重试耗尽仍读不到: 放弃。用户手动选「自动」时明确提示(需求第 8 条);
+      // 文件名回退进来的 auto 保持静默(普通/纯音频视频不该被打扰)。
+      _vrAutoResolved = true;
+      if (userRequested) {
+        SmartDialog.showToast('读不到片源全景元数据，按普通视频播放');
+      }
+      return;
+    }
+    _vrAutoResolved = true;
+    final layout = player.getProperty('vr-metadata-layout');
+    final resolution = VrProjection.resolveMetadata(
+      projection: projection,
+      layout: layout,
+    );
+    if (resolution.isVr) {
+      _applyAutoResolvedVr(resolution.projection);
+    } else if (resolution.unsupportedReason != null) {
+      // 范围外格式(cubemap/鱼眼/棋盘格…): 明确提示, 按平面播放
+      SmartDialog.showToast(
+        resolution.unsupportedReason!,
+        displayTime: const Duration(seconds: 4),
+      );
+    } else if (userRequested) {
+      SmartDialog.showToast('片源没有全景元数据，按普通视频播放');
+    }
+  }
+
+  /// auto 解析出全景片源: 原位切到 VR(不重载文件、不丢进度),
+  /// 进入操作模式并提示识别结果
+  void _applyAutoResolvedVr(VrProjection projection) {
+    if (!Platform.isAndroid) {
+      SmartDialog.showToast(_vrEngineUnsupportedMessage);
+      return;
+    }
+    vrProjection.value = projection;
+    vrView.value = VrViewState(fov: vrView.value.fov);
+    applyVrView(force: true);
+    vrControlMode.value = true;
+    setVrGyro(Pref.vrGyro, persist: false, toast: false);
+    SmartDialog.showToast(
+      '按片源元数据识别为${projection.label}，已进入 VR 操作模式\n'
       '单指拖拽环视，双指缩放视场角，也可用屏幕按钮微调',
       displayTime: const Duration(milliseconds: 3000),
     );
@@ -1038,19 +1168,25 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
   }
 
-  /// 切换片源布局
+  /// 切换片源布局。播放中切换只改 mpv 热属性, 不重载文件,
+  /// 当前进度原位生效(需求第 6 条)。
   Future<void> setVrProjection(
     VrProjection projection, {
     bool resetView = true,
   }) async {
-    if (projection.enabled && !vrMpvSupported.value) {
-      SmartDialog.showToast(
-        Platform.isAndroid
-            ? '当前 libmpv 不含 VR 渲染支持，请安装本分支 CI 构建的包'
-            : '当前平台的 libmpv 不支持 VR 渲染(仅安卓)',
-      );
+    vrRequested.value = projection;
+    if (projection == VrProjection.auto) {
+      // 立即按元数据解析(文件已加载); 引擎不支持时 _maybeResolveVrAuto
+      // 会明确提示
+      _vrAutoResolved = false;
+      _maybeResolveVrAuto(userRequested: true);
       return;
     }
+    if (projection.enabled && !vrMpvSupported.value) {
+      _toastVrEngineUnsupported();
+      return;
+    }
+    _vrAutoResolved = true; // 手动选定后不再自动改写本次会话的布局
     vrProjection.value = projection;
     if (resetView) {
       vrView.value = VrViewState(fov: vrView.value.fov);
@@ -1104,7 +1240,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             VrViewState.maxFov,
           ),
         )
-        .clamped(vrProjection.value);
+        .clamped(
+          vrProjection.value,
+          aspect: _vrAspect,
+          gyro: vrGyroEnabled.value,
+        );
     applyVrView();
   }
 
@@ -1126,7 +1266,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           yaw: cur.yaw - dx * scale / max(width, 1.0),
           pitch: cur.pitch + dy * scale / max(height, 1.0),
         )
-        .clamped(vrProjection.value);
+        .clamped(
+          vrProjection.value,
+          aspect: _vrAspect,
+          gyro: vrGyroEnabled.value,
+        );
     applyVrView();
   }
 
@@ -1137,7 +1281,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
     vrView.value = vrView.value
         .copyWith(fov: fov.clamp(VrViewState.minFov, VrViewState.maxFov))
-        .clamped(vrProjection.value);
+        .clamped(
+          vrProjection.value,
+          aspect: _vrAspect,
+          gyro: vrGyroEnabled.value,
+        );
     applyVrView();
   }
 
@@ -1440,10 +1588,28 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _subscriptions = [
       /// mpv 自己的轨道表: 内嵌字幕/音轨要靠它才能列给用户
       /// (B 站视频没有内嵌轨, 本地/局域网片源经常有)
-      stream.tracks.listen((tracks) => mpvTracks.value = tracks),
+      stream.tracks.listen((tracks) {
+        mpvTracks.value = tracks;
+        // 轨道表就绪: 尝试解析「自动(按片源元数据)」。注意 mpv 的
+        // TRACKS_CHANGED 可能在"选定当前视频轨"之前触发, 此刻读 vr-metadata-*
+        // 可能仍是"不可用"(空串), 故 _maybeResolveVrAuto 内带有限重试;
+        // 下面 stream.track(选定轨变化)是更可靠的时机, 两处都触发一次。
+        if (tracks.video.isNotEmpty) {
+          _maybeResolveVrAuto();
+        }
+      }),
 
       /// 当前实际选中的轨道, 面板上"当前字幕流"以此为准
-      stream.track.listen((track) => currentTrack.value = track),
+      stream.track.listen((track) {
+        currentTrack.value = track;
+        // 选定视频轨后 current_track 才就位, vr-metadata-* 属性此时可读,
+        // 这是「自动(按片源元数据)」解析最可靠的触发点(与字幕同一套 id 约定:
+        // 'no'/空 表示没有选定视频轨)
+        final vid = track.video.id;
+        if (vid != 'no' && vid.isNotEmpty) {
+          _maybeResolveVrAuto();
+        }
+      }),
 
       /// playing
       stream.playing.listen((bool playing) {
@@ -2106,6 +2272,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     // VR 状态是单次播放会话的, 播放器销毁后复位
     // (头追随 mpv 实例一起销毁, Dart 侧没有需要停的传感器)
     vrProjection.value = VrProjection.off;
+    vrRequested.value = VrProjection.off;
+    _vrAutoResolved = false;
+    _vrAspect = null;
     vrControlMode.value = false;
     vrError.value = null;
     vrGyroEnabled.value = false;

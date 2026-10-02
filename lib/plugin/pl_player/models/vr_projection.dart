@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:PiliPlus/models/common/enum_with_label.dart';
 
 /// VR / 全景视频的片源布局。
@@ -6,8 +8,16 @@ import 'package:PiliPlus/models/common/enum_with_label.dart';
 /// libmpv 在渲染链末端把平面画面重投影到球面(见 tool/libmpv-vr 与
 /// docs/piliplayer.md §15)。本模型同时定义了 Dart 侧枚举到 mpv
 /// `vr-layout` / `vr-projection` 属性值的映射。
+///
+/// 支持矩阵(需求 REQUIREMENTS.md 第 1 条): 水平覆盖 360°/180° ×
+/// 立体布局 单目/左右(SBS)/上下(TB), 另加:
+///   * [VrProjection.auto] —— 自动(按片源元数据): 文件加载后读取定制
+///     libmpv 的 `vr-metadata-projection` / `vr-metadata-layout` 只读属性
+///     解析成具体格式(见 [resolveMetadata]);
+///   * [VrProjection.off] —— 强制平面(普通 2D), 不做任何重投影。
 enum VrProjection with EnumWithLabel {
-  off('关闭'),
+  off('强制平面（2D）'),
+  auto('自动（元数据）'),
   equirect360('等距柱状 360°'),
   equirect180('等距柱状 180°'),
   sbs360('左右格式 360°'),
@@ -20,7 +30,10 @@ enum VrProjection with EnumWithLabel {
   final String label;
   const VrProjection(this.label);
 
-  bool get enabled => this != VrProjection.off;
+  /// VR 重投影当前是否生效。[off] 是强制平面; [auto] 是"待解析"状态,
+  /// 解析前按平面播放, 解析成功后 `vrProjection` 会变成具体格式,
+  /// 因此二者都不算 enabled。
+  bool get enabled => this != VrProjection.off && this != VrProjection.auto;
 
   /// 双目(3D)片源: 渲染时只取其中一只眼睛的画面
   bool get isStereo =>
@@ -33,7 +46,9 @@ enum VrProjection with EnumWithLabel {
   bool get isSideBySide =>
       this == VrProjection.sbs360 || this == VrProjection.sbs180;
 
-  /// mpv `vr-layout` 属性值(片源立体布局)
+  /// mpv `vr-layout` 属性值(片源立体布局)。
+  /// [off]/[auto] 不会下发到 mpv(effective 状态永远不是二者), 仅为完备性
+  /// 返回 mono。
   String get mpvLayout {
     if (isSideBySide) {
       return 'sbs';
@@ -47,7 +62,8 @@ enum VrProjection with EnumWithLabel {
   /// mpv `vr-projection` 属性值(水平覆盖角)
   String get mpvCoverage => coverageH >= 360.0 ? '360' : '180';
 
-  /// 水平覆盖角度, 360° 片源可以无限水平旋转, 180° 片源需要在边界处收敛
+  /// 水平覆盖角度, 360° 片源可以无限水平旋转, 180° 片源需要在边界处收敛。
+  /// [off]/[auto] 不参与环视, 返回 360 仅作中性值。
   double get coverageH =>
       this == VrProjection.equirect180 ||
           this == VrProjection.sbs180 ||
@@ -73,6 +89,9 @@ enum VrProjection with EnumWithLabel {
   /// 只认明确的关键词, 并且对 `360`/`180`/`vr`/`3d`/`tb` 这类容易误伤的短词
   /// 做词边界匹配(否则清晰度 `360p`、`1080p` 会被误判成全景片源)。
   /// 宽高比不作为判据: 2:1 也可能是普通宽银幕视频。
+  ///
+  /// 识别不到时回退 [VrProjection.auto](按片源元数据识别, 需求第 5 条),
+  /// 而不是直接判定为平面: 文件名没有关键词 ≠ 片源不是全景。
   static VrProjection detectFromName(String name) {
     final n = name.toLowerCase();
     // 字母边界匹配, 允许数字紧邻(如 `360vr`)
@@ -102,7 +121,7 @@ enum VrProjection with EnumWithLabel {
         has(['equirect', 'equi-angular', 'panoram', 'spherical']);
     // 只有 `3d` 字样无法判断片源布局, 不乱猜
     if (!pano && !sbs && !tb) {
-      return VrProjection.off;
+      return VrProjection.auto;
     }
 
     // tb 与 sbs 同时出现时以 sbs 为准(更常见的命名)
@@ -116,6 +135,82 @@ enum VrProjection with EnumWithLabel {
         ? VrProjection.equirect180
         : VrProjection.equirect360;
   }
+
+  /// 解析定制 libmpv 报告的片源元数据(`vr-metadata-projection` /
+  /// `vr-metadata-layout` 只读属性, 由 vr_metadata.patch 从 mov `sv3d`/`st3d`/
+  /// `prji` 与 mkv `Projection`/`StereoMode` side data 提取)。
+  ///
+  /// 取值(与 mpv 侧 player/command.c 的映射一一对应):
+  ///   * [projection]: `360` / `180` / `cubemap` / `other` / `none`
+  ///   * [layout]: `sbs` / `tb` / `mono` / `other` / `none`
+  ///
+  /// cubemap 与非等距柱状投影、棋盘格等立体排布在需求范围外(第 9 条),
+  /// 返回 [VrAutoResolution.unsupported], UI 必须明确提示而不是静默失效
+  /// (第 8 条)。
+  static VrAutoResolution resolveMetadata({
+    required String projection,
+    required String layout,
+  }) {
+    switch (projection) {
+      case '360':
+      case '180':
+        final is360 = projection == '360';
+        switch (layout) {
+          case 'sbs':
+            return VrAutoResolution.vr(
+              is360 ? VrProjection.sbs360 : VrProjection.sbs180,
+            );
+          case 'tb':
+            return VrAutoResolution.vr(
+              is360 ? VrProjection.tb360 : VrProjection.tb180,
+            );
+          case 'mono':
+          case 'none':
+          case '':
+            return VrAutoResolution.vr(
+              is360 ? VrProjection.equirect360 : VrProjection.equirect180,
+            );
+          default:
+            return const VrAutoResolution.unsupported(
+              '不支持该立体排布(棋盘格/交织等), 已按普通视频播放',
+            );
+        }
+      case 'cubemap':
+        return const VrAutoResolution.unsupported(
+          '不支持 cubemap 立方体全景片源, 已按普通视频播放',
+        );
+      case 'none':
+      case '':
+        return const VrAutoResolution.flat();
+      default:
+        return const VrAutoResolution.unsupported(
+          '不支持该全景投影类型(鱼眼/矩形等), 已按普通视频播放',
+        );
+    }
+  }
+}
+
+/// [VrProjection.resolveMetadata] 的解析结果。
+class VrAutoResolution {
+  /// 识别为可渲染的全景片源
+  const VrAutoResolution.vr(this.projection) : unsupportedReason = null;
+
+  /// 没有全景元数据(或元数据明确是平面): 按普通视频播放, 无需提示
+  const VrAutoResolution.flat()
+    : projection = VrProjection.off,
+      unsupportedReason = null;
+
+  /// 识别到全景/立体元数据但渲染器不支持(范围外格式): 必须明确提示
+  const VrAutoResolution.unsupported(this.unsupportedReason)
+    : projection = VrProjection.off;
+
+  /// 生效的片源布局, [VrProjection.off] 表示平面播放
+  final VrProjection projection;
+
+  /// "识别到但不支持"的原因文案; 非 null 时 UI 必须提示用户
+  final String? unsupportedReason;
+
+  bool get isVr => projection.enabled;
 }
 
 /// 双目片源要渲染哪一只眼睛(手机端为单屏显示, 只取一只)
@@ -131,10 +226,12 @@ enum VrEye with EnumWithLabel {
 
 /// 视角参数。yaw/pitch 单位为度, fov 为水平视场角(度)。
 class VrViewState {
-  /// 默认水平视场角: 手机竖屏/横屏下接近人眼舒适范围
+  /// 默认水平视场角: 手机竖屏/平板横屏下接近人眼舒适范围
   static const double kVrDefaultFov = 90.0;
   static const double minFov = 25.0;
   static const double maxFov = 120.0;
+
+  /// 陀螺仪模式下手动俯仰分量的上限(需求允许放宽收敛)
   static const double maxPitch = 89.0;
 
   const VrViewState({
@@ -147,15 +244,52 @@ class VrViewState {
   final double pitch;
   final double fov;
 
-  VrViewState clamped(VrProjection projection) {
+  /// 水平视场角 + 视口宽高比 -> 垂直视场角(度)。
+  /// 与 mpv 侧 `vr_fovy_from_hfov`(vr.c) 的换算一致, 用于俯仰收敛:
+  /// 视口垂直方向不能越过等距柱状图的极点, 否则转出画面见黑。
+  /// [aspect] 未知时按 1.0 处理(比常见横屏更保守, 收敛更紧, 不会露黑边)。
+  static double verticalFov(double hfov, double? aspect) {
+    final a = (aspect == null || aspect < 0.01) ? 1.0 : aspect;
+    final halfH = math.tan(hfov * math.pi / 360.0);
+    final vfov = 2 * math.atan(halfH / a) * 180.0 / math.pi;
+    return vfov.clamp(1.0, 179.0);
+  }
+
+  /// 手动俯仰的收敛边界(±), 与 mpv 侧 `vr_manual_angles` 的兜底一致
+  static double pitchLimit(double fov, double? aspect) =>
+      math.max(0.0, 90.0 - verticalFov(fov, aspect) / 2);
+
+  /// 夹取视角。
+  ///
+  /// 手动模式([gyro] 为 false)下按需求第 3 条收敛, 转出画面见黑不可接受:
+  ///   * 360° 片源: 偏航回绕, 俯仰在极点收敛(±(90 - 垂直视场/2));
+  ///   * 180° 片源: 偏航另在覆盖边界收敛(±(180 - 水平视场)/2)。
+  /// 陀螺仪模式([gyro] 为 true)下画面朝向以头姿为主、手动分量是叠加偏移,
+  /// 按需求放宽: 偏航只回绕不夹取, 俯仰放宽到 ±[maxPitch]
+  /// (native 侧头追开启时同样不做夹取, 见 vr.c `vr_manual_angles`)。
+  ///
+  /// [aspect] 是渲染视口的宽高比, 由 VrControlLayer 上报; 缺省按 1.0 收敛。
+  VrViewState clamped(
+    VrProjection projection, {
+    double? aspect,
+    bool gyro = false,
+  }) {
     final fov = this.fov.clamp(minFov, maxFov);
+    if (gyro) {
+      return VrViewState(
+        yaw: _wrap180(yaw),
+        pitch: pitch.clamp(-maxPitch, maxPitch),
+        fov: fov,
+      );
+    }
     final range = projection.yawRange(fov);
+    final limit = pitchLimit(fov, aspect);
     return VrViewState(
       // 360° 片源: 偏航角回绕, 避免数值无限增长
       yaw: projection.coverageH >= 360.0
           ? _wrap180(yaw)
           : yaw.clamp(range.min, range.max),
-      pitch: pitch.clamp(-maxPitch, maxPitch),
+      pitch: pitch.clamp(-limit, limit),
       fov: fov,
     );
   }

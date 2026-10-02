@@ -300,7 +300,9 @@ List<SettingsModel> get playSettings => [
   // VR / 全景
   const SwitchModel(
     title: 'VR/全景自动识别',
-    subtitle: '按文件名关键词(360、VR、equirect、SBS 等)自动进入全景模式',
+    subtitle:
+        '按文件名关键词(360、VR、equirect、SBS 等)自动进入全景模式；'
+        '识别不到时按片源元数据(容器内 spherical/stereo 标记)自动判断',
     leading: Icon(Icons.vrpano_outlined),
     setKey: SettingBoxKey.vrAutoDetect,
     defaultVal: true,

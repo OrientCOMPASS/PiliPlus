@@ -507,7 +507,9 @@ class HeaderControlState extends State<HeaderControl>
                   title: const Text('VR/全景', style: titleStyle),
                   titleStyle: theme.textTheme.bodyLarge,
                   value: () {
-                    final value = plPlayerController.vrProjection.value;
+                    // 菜单绑定"请求"的布局: 可以是「自动(元数据)」;
+                    // 实际生效的布局(auto 解析后)见 vrProjection
+                    final value = plPlayerController.vrRequested.value;
                     return (value, value.label);
                   },
                   itemBuilder: (_) => enumItemBuilder(VrProjection.values),

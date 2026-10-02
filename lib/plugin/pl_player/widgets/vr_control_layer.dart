@@ -68,6 +68,9 @@ class _VrControlLayerState extends State<VrControlLayer> {
 
   @override
   Widget build(BuildContext context) {
+    // 上报渲染视口宽高比: 俯仰角的极点收敛边界依赖它
+    // (与 mpv 侧 vr_manual_angles 同一公式, 双层兜底)
+    _c.setVrViewport(widget.width, widget.height);
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -95,6 +98,7 @@ class _VrControlLayerState extends State<VrControlLayer> {
                     onTap: () => _c.setVrControlMode(false),
                     icon: Icons.gesture_outlined,
                     label:
+                        '${_c.vrProjection.value.label}  ·  '
                         '偏航 ${view.yaw.toStringAsFixed(1)}°  '
                         '俯仰 ${view.pitch.toStringAsFixed(1)}°  '
                         '视场 ${view.fov.toStringAsFixed(0)}°  ·  点按退出VR操作',

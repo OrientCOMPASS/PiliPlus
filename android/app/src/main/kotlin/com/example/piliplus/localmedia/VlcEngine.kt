@@ -43,6 +43,18 @@ object VlcEngine {
     fun ensureInit(context: Context): LibVLC {
         libVlc?.let { return it }
         lastInitError = null
+
+        // CRITICAL: org.videolan.libvlc.LibVLC.loadLibraries() calls
+        // System.exit(1) when a native library fails to load — a silent
+        // process death with zero diagnostics. We preload the libraries
+        // ourselves first so a failure becomes a catchable error with the
+        // real linker message preserved in the log.
+        val preloadError = preloadNativeLibs()
+        if (preloadError != null) {
+            lastInitError = "native library load failed: $preloadError"
+            throw RuntimeException(lastInitError)
+        }
+
         try {
             val options = ArrayList<String>()
             // The app draws its own OSD/controls; keep libvlc quiet on screen.
@@ -51,7 +63,9 @@ object VlcEngine {
             // Reasonable default for LAN playback; per-media options may
             // override. Never touches https handling (no downgrade anywhere).
             options.add("--network-caching=2000")
+            LogCollector.i(TAG, "LibVLC ctor begin")
             val instance = LibVLC(context.applicationContext, options)
+            LogCollector.i(TAG, "LibVLC ctor ok")
             Dialog.setCallbacks(instance, object : Dialog.Callbacks {
                 override fun onDisplay(dialog: Dialog.ErrorMessage) {
                     main.post { handleDialog(dialog) }
@@ -85,6 +99,31 @@ object VlcEngine {
             LogCollector.e(TAG, "libvlc init failed", t)
             throw t
         }
+    }
+
+    /**
+     * Loads c++_shared/vlc/vlcjni with per-library error capture.
+     * Returns null on success, or a diagnostic string on failure.
+     * Once loaded here, LibVLC.loadLibraries() becomes a silent no-op
+     * (System.loadLibrary of an already-loaded library returns quietly).
+     */
+    private fun preloadNativeLibs(): String? {
+        val results = ArrayList<String>()
+        for (name in listOf("c++_shared", "vlc", "vlcjni")) {
+            try {
+                System.loadLibrary(name)
+                results.add("$name=ok")
+            } catch (t: Throwable) {
+                results.add("$name=FAIL(${t.javaClass.simpleName}: ${t.message})")
+                LogCollector.e(TAG, "System.loadLibrary($name) failed", t)
+                if (name != "c++_shared") {
+                    // Fatal for engine use; do NOT touch LibVLC (System.exit).
+                    return results.joinToString("; ")
+                }
+            }
+        }
+        LogCollector.i(TAG, "native preload: ${results.joinToString("; ")}")
+        return null
     }
 
     private fun handleDialog(dialog: Dialog) {

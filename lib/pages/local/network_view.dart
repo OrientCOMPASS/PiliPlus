@@ -1,4 +1,5 @@
 import 'package:PiliPlus/pages/local_player/controller.dart';
+import 'package:PiliPlus/services/local_media/local_media_channel.dart';
 import 'package:PiliPlus/services/local_media/local_network_service.dart';
 import 'package:PiliPlus/services/local_media/models.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
@@ -38,6 +39,55 @@ class _LocalNetworkViewState extends State<LocalNetworkView>
     super.build(context);
     return ListView(
       children: [
+        Obx(() {
+          final err = _service.engineError.value;
+          if (err.isEmpty) return const SizedBox.shrink();
+          return Container(
+            margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.redAccent.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.redAccent),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(err, style: const TextStyle(fontSize: 12)),
+                const SizedBox(height: 6),
+                TextButton.icon(
+                  onPressed: () async {
+                    final logs = await LocalMediaChannel.instance.logGet();
+                    if (!context.mounted) return;
+                    showDialog<void>(
+                      context: context,
+                      builder: (context) => AlertDialog(
+                        title: const Text('引擎日志（最近）'),
+                        content: SizedBox(
+                          width: double.maxFinite,
+                          child: SingleChildScrollView(
+                            child: SelectableText(
+                              logs.isEmpty ? '(空)' : logs.join('\n'),
+                              style: const TextStyle(fontSize: 11),
+                            ),
+                          ),
+                        ),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(context),
+                            child: const Text('关闭'),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.description_outlined, size: 16),
+                  label: const Text('查看引擎日志'),
+                ),
+              ],
+            ),
+          );
+        }),
         _sectionHeader(
           context,
           '发现的网络位置（SMB）',

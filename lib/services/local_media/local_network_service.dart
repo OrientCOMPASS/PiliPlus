@@ -22,6 +22,7 @@ class LocalNetworkService extends GetxService {
 
   final RxList<NetItem> discovered = <NetItem>[].obs;
   final RxBool discovering = false.obs;
+  final RxString engineError = ''.obs;
   final RxString browseUrl = ''.obs;
   final RxList<NetItem> browseItems = <NetItem>[].obs;
   final RxBool browsing = false.obs;
@@ -113,11 +114,13 @@ class LocalNetworkService extends GetxService {
   Future<void> startDiscovery() async {
     discovering.value = true;
     discovered.clear();
+    engineError.value = '';
     try {
       await _ch.engineInit();
       await _ch.netDiscover();
     } catch (e) {
       discovering.value = false;
+      engineError.value = '播放引擎初始化失败：$e';
       LocalLogRing.instance.e('LocalNetwork', 'discovery failed: $e');
     }
   }

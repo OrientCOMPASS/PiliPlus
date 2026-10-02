@@ -47,6 +47,18 @@ object LocalMediaPlugin : MethodChannel.MethodCallHandler {
         messenger: io.flutter.plugin.common.BinaryMessenger
     ) {
         appContext = context.applicationContext
+        // Start diagnostics FIRST: file-backed log + logcat capture + uncaught
+        // handler, so even a hard failure during engine init leaves a trail
+        // that survives the process death.
+        try {
+            LogCollector.attach(appContext)
+            LogCollector.i(
+                TAG,
+                "attach: ${Build.MANUFACTURER} ${Build.MODEL} android=${Build.VERSION.RELEASE} sdk=${Build.VERSION.SDK_INT} abis=${Build.SUPPORTED_ABIS.joinToString()}"
+            )
+        } catch (t: Throwable) {
+            android.util.Log.e(TAG, "LogCollector attach failed", t)
+        }
         val channel = MethodChannel(messenger, CHANNEL)
         channel.setMethodCallHandler(this)
         methodChannel = channel

@@ -159,6 +159,8 @@ class LocalPlayerController extends GetxController {
         await _openCurrent(resume: true);
       }
     } catch (e, st) {
+      status.value = LocalPlayStatus.error;
+      errorMessage.value = '视频组件初始化失败：$e';
       LocalLogRing.instance.e('LocalPlayer', 'attachView failed', st);
     }
   }

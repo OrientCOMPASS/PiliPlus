@@ -27,10 +27,23 @@ object VideoViews {
 
     class Factory : PlatformViewFactory(StandardMessageCodec.INSTANCE) {
         override fun create(context: Context, viewId: Int, args: Any?): PlatformView {
-            val layout = VLCVideoLayout(context)
-            put(viewId, layout)
+            // Never crash the platform thread: fall back to an error card the
+            // user can see (and that gets logged persistently).
+            val view: View = try {
+                val layout = VLCVideoLayout(context)
+                put(viewId, layout)
+                layout
+            } catch (t: Throwable) {
+                LogCollector.e("VideoViews", "VLCVideoLayout creation failed", t)
+                android.widget.TextView(context).apply {
+                    text = "视频组件初始化失败：${t.message}"
+                    setTextColor(0xFFFF5252.toInt())
+                    setBackgroundColor(0xFF000000.toInt())
+                    setPadding(32, 32, 32, 32)
+                }
+            }
             return object : PlatformView {
-                override fun getView(): View = layout
+                override fun getView(): View = view
 
                 override fun dispose() {
                     LocalMediaPlugin.onVideoViewDisposed(viewId)

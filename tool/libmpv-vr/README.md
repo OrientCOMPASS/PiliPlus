@@ -27,6 +27,16 @@
   `vr-head-tracking`、`vr-reset-view`(递增计数触发回正)。
   视角参数是"热"参数：变更不触发渲染链重建（见 patch 内
   `only_vr_opts_changed`），头追在 native 侧逐帧运行，不经 Dart 往返。
+  手动环视（头追关闭）时 `vr_manual_angles()` 还会在 native 侧兜底夹取视角：
+  180° 片源的偏航在覆盖边界收敛、俯仰在极点收敛（转出画面见黑不可接受），
+  头追开启时不夹取（陀螺仪模式按需求放宽）。
+- `buildscripts/patches/mpv/vr_metadata.patch`：**多格式 VR 需求新增**。
+  片源元数据识别：`demux_lavf` 解析 lavf 的 spherical（mov `sv3d`/`prji`、
+  mkv `Projection`）与 stereo3d（mov `st3d`、mkv `StereoMode`）side data，
+  以只读属性暴露给客户端，供应用侧的「自动（按片源元数据）」模式使用：
+  `vr-metadata-projection` = none/360/180/cubemap/other、
+  `vr-metadata-layout` = none/mono/sbs/tb/other。
+  （cubemap 与其他投影为"识别到但不支持"，应用侧必须明确提示而非静默失效。）
 
 ## jar 组装策略
 

@@ -272,10 +272,10 @@ index f8e05b1..ccb7a15 100644
                            struct mp_hwdec_devices *devs,
 diff --git a/video/out/gpu/vr.c b/video/out/gpu/vr.c
 new file mode 100644
-index 0000000..2c7e4e9
+index 0000000..9c74c50
 --- /dev/null
 +++ b/video/out/gpu/vr.c
-@@ -0,0 +1,813 @@
+@@ -0,0 +1,858 @@
 +/*
 + * VR / panoramic video reprojection for vo=gpu (PiliPlus).
 + * See vr.h for the design notes and xl_player provenance.
@@ -909,19 +909,58 @@ index 0000000..2c7e4e9
 +                        vr->num_dist);
 +}
 +
++// Effective manual yaw/pitch (degrees) for this frame, bounded so that the
++// viewport never leaves the source coverage in manual mode (REQUIREMENTS:
++// on 180° sources manual yaw must converge at the coverage border - looking
++// past it into black is not acceptable; pitch converges at the poles of the
++// equirect map, which are its vertical border). With head tracking active
++// the pose comes from the device and is deliberately left unbounded ("gyro
++// mode may relax"), matching the Dart-side rules in vr_projection.dart.
++//
++// `aspect` is the W/H of the eye viewport actually rendered, so the vertical
++// fov (and with it the pitch bound) matches vr_perspective() exactly.
++static void vr_manual_angles(const struct vr_ctx *vr,
++                             const struct gl_video_opts *opts, float aspect,
++                             float *yaw_deg, float *pitch_deg)
++{
++    float yaw = opts->vr_yaw;
++    float pitch = opts->vr_pitch;
++
++    if (!vr->tracker) {
++        if (opts->vr_projection == VR_PROJ_180) {
++            float limit = MPMAX(0.0f, (180.0f - opts->vr_fov) * 0.5f);
++            yaw = MPMIN(MPMAX(yaw, -limit), limit);
++        } else {
++            // 360°: wrap into [-180, 180) to keep the value bounded
++            yaw = fmodf(yaw + 180.0f, 360.0f);
++            if (yaw < 0.0f)
++                yaw += 360.0f;
++            yaw -= 180.0f;
++        }
++        float vfov = vr_fovy_from_hfov(opts->vr_fov, aspect);
++        float plimit = MPMAX(0.0f, 90.0f - vfov * 0.5f);
++        pitch = MPMIN(MPMAX(pitch, -plimit), plimit);
++    }
++
++    *yaw_deg = yaw;
++    *pitch_deg = pitch;
++}
++
 +// Model matrix composition, identical to the previous PiliPlus native player
 +// (docs/piliplayer.md 14.4): tracker on => head * ref^-1 * rotY(yaw) *
-+// rotX(pitch); tracker off => rotX(pitch) * rotY(yaw).
++// rotX(pitch); tracker off => rotX(pitch) * rotY(yaw). yaw_deg/pitch_deg are
++// the (already bounded, see vr_manual_angles) manual offsets in degrees.
 +static void vr_compute_model(struct vr_ctx *vr,
-+                             const struct gl_video_opts *opts, float model[16])
++                             const struct gl_video_opts *opts,
++                             float yaw_deg, float pitch_deg, float model[16])
 +{
 +    if (opts->vr_reset_view != vr->last_reset_count) {
 +        vr->last_reset_count = opts->vr_reset_view;
 +        vr->want_reset = true;
 +    }
 +
-+    float yaw = opts->vr_yaw * (float)VR_DEG2RAD;
-+    float pitch = opts->vr_pitch * (float)VR_DEG2RAD;
++    float yaw = yaw_deg * (float)VR_DEG2RAD;
++    float pitch = pitch_deg * (float)VR_DEG2RAD;
 +
 +    if (vr->tracker) {
 +        float head[16];
@@ -1030,11 +1069,11 @@ index 0000000..2c7e4e9
 +    struct gl_transform t;
 +    gl_transform_ortho_fbo(&t, target);
 +
-+    float model[16];
-+    vr_compute_model(vr, opts, model);
-+
 +    if (!opts->vr_stereo_output) {
 +        float aspect = (float)W / (float)H;
++        float yaw, pitch, model[16];
++        vr_manual_angles(vr, opts, aspect, &yaw, &pitch);
++        vr_compute_model(vr, opts, yaw, pitch, model);
 +        float proj[16], view[16], mv[16], mvp[16];
 +        vr_perspective(vr_fovy_from_hfov(opts->vr_fov, aspect), aspect,
 +                       0.01f, 10.0f, proj);
@@ -1066,6 +1105,12 @@ index 0000000..2c7e4e9
 +    gl_transform_ortho_fbo(&ti, &ifbo);
 +
 +    float aspect = (float)W / (float)H / 2.0f;
++    float yaw, pitch, model[16];
++    // Same manual bounds as the mono path (per-eye aspect); Cardboard output
++    // is a bonus mode and not part of the REQUIREMENTS matrix, but keeping the
++    // rules identical avoids surprises.
++    vr_manual_angles(vr, opts, aspect, &yaw, &pitch);
++    vr_compute_model(vr, opts, yaw, pitch, model);
 +    float proj[16];
 +    vr_perspective(60.0f, aspect, 0.01f, 100.0f, proj);
 +

@@ -26,11 +26,15 @@ UPSTREAM_JAR_SHA256="98df6410375cc7a4be7e6eff56f9ccd88fa52678973cc23bcf7e934ab8c
 ./download.sh
 ./patch.sh
 
-# sanity: the VR patch must have applied (patch.sh does git apply; a failed
-# hunk would already abort, but check the files exist too)
+# sanity: the VR patches must have applied (patch.sh does git apply; a failed
+# hunk would already abort, but check the files/needles exist too)
 test -f deps/mpv/video/out/gpu/vr.c
 test -f deps/mpv/video/out/gpu/vr_tracker.c
 grep -q "vr-head-tracking" deps/mpv/video/out/gpu/video.c
+grep -q "vr_manual_angles" deps/mpv/video/out/gpu/vr.c
+# metadata patch (vr-metadata-* properties + demux_lavf spherical/stereo3d)
+grep -q "mp_vr_projection_from_spherical" deps/mpv/demux/demux_lavf.c
+grep -q "vr-metadata-projection" deps/mpv/player/command.c
 
 cp flavors/default.sh scripts/ffmpeg.sh
 ./build.sh mpv --arch arm64
@@ -44,7 +48,12 @@ if ! strings -a "$NEW_SO" | grep -q "vr-head-tracking"; then
     echo "FATAL: libmpv.so does not contain the VR options" >&2
     exit 1
 fi
-echo "libmpv.so contains VR options ✓"
+# the metadata properties (from vr_metadata.patch) must be present too
+if ! strings -a "$NEW_SO" | grep -q "vr-metadata-projection"; then
+    echo "FATAL: libmpv.so does not contain the vr-metadata-* properties" >&2
+    exit 1
+fi
+echo "libmpv.so contains VR options + metadata properties ✓"
 
 # --------------------------------------------------
 # 2. jar assembly: upstream jar with our libmpv.so swapped in

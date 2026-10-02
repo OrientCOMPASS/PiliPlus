@@ -105,7 +105,10 @@ else
 fi
 
 cd "$WORK/libvlcjni"
-./buildsystem/compile-libvlc.sh -a "$ABI" $CONTRIB_FLAGS --release
+# --static-cpp: libvlc/libvlcjni statically link libc++ so the app process
+# (which also hosts libmpv with its own C++ runtime) has zero shared-runtime
+# coupling; also avoids libc++_shared merge/load issues on devices.
+./buildsystem/compile-libvlc.sh -a "$ABI" $CONTRIB_FLAGS --release --static-cpp
 
 # ---- 6. assemble the AAR -----------------------------------------------------
 echo "==> assembling AAR"

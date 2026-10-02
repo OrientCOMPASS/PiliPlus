@@ -47,18 +47,18 @@ jobs:
                   distribution: temurin
                   java-version: "21"
 
-            - name: Select NDK (r27-r29)
+            - name: Select NDK (prefer r27 LTS)
               run: |
                   set -x
                   SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+                  SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
                   NDK_DIR=""
-                  for d in "$SDK"/ndk/29.* "$SDK"/ndk/28.* "$SDK"/ndk/27.*; do
+                  for d in "$SDK"/ndk/27.*; do
                     if [ -d "$d" ]; then NDK_DIR="$d"; break; fi
                   done
                   if [ -z "$NDK_DIR" ]; then
-                    SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
-                    VER=$("$SDKMANAGER" --list 2>/dev/null | grep -oE 'ndk;2[789]\.[0-9][0-9.]*' | sort -uV | tail -1 || true)
-                    if [ -z "$VER" ]; then VER="ndk;28.0.14206865"; fi
+                    VER=$("$SDKMANAGER" --list 2>/dev/null | grep -oE 'ndk;27\.[0-9][0-9.]*' | sort -uV | tail -1 || true)
+                    if [ -z "$VER" ]; then VER="ndk;27.3.13750724"; fi
                     yes | "$SDKMANAGER" --install "$VER" >/dev/null
                     NDK_DIR="$SDK/${VER//;//}"
                   fi

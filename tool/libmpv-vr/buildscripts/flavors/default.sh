@@ -227,6 +227,7 @@ cpuflags=
 	--enable-protocol=crypto \
 	--enable-protocol=data \
 	--enable-protocol=ffrtmphttp \
+	--enable-protocol=fd \
 	--enable-protocol=file \
 	--enable-protocol=ftp \
 	--enable-protocol=hls \

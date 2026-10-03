@@ -12,7 +12,7 @@ index fb10be5..04dfbc9 100644
      'video/out/vo.c',
      'video/out/vo_gpu.c',
 diff --git a/video/out/gpu/video.c b/video/out/gpu/video.c
-index c0a1be8..18e9ee0 100644
+index c0a1be8..9b66083 100644
 --- a/video/out/gpu/video.c
 +++ b/video/out/gpu/video.c
 @@ -20,6 +20,7 @@
@@ -79,7 +79,7 @@ index c0a1be8..18e9ee0 100644
 +            {"180", VR_PROJ_180})},
 +        {"vr-eye", OPT_CHOICE(vr_eye, {"left", 0}, {"right", 1})},
 +        {"vr-stereo-output", OPT_BOOL(vr_stereo_output)},
-+        {"vr-fov", OPT_FLOAT(vr_fov), M_RANGE(10.0, 150.0)},
++        {"vr-fov", OPT_FLOAT(vr_fov), M_RANGE(10.0, 180.0)},
 +        {"vr-yaw", OPT_FLOAT(vr_yaw), M_RANGE(-360.0, 360.0)},
 +        {"vr-pitch", OPT_FLOAT(vr_pitch), M_RANGE(-90.0, 90.0)},
 +        {"vr-head-tracking", OPT_BOOL(vr_head_tracking)},
@@ -270,7 +270,7 @@ index c0a1be8..18e9ee0 100644
 +        return;
 +    opts->vr_yaw = MPMIN(MPMAX(y, -360.0f), 360.0f);
 +    opts->vr_pitch = MPMIN(MPMAX(p, -90.0f), 90.0f);
-+    opts->vr_fov = MPMIN(MPMAX(f, 10.0f), 150.0f);
++    opts->vr_fov = MPMIN(MPMAX(f, 10.0f), 180.0f);
 +}
 +
 +// Returns true if the only differences between the two option sets are the
@@ -419,10 +419,10 @@ index f8e05b1..fcff2cc 100644
                            struct mp_hwdec_devices *devs,
 diff --git a/video/out/gpu/vr.c b/video/out/gpu/vr.c
 new file mode 100644
-index 0000000..f3e27ad
+index 0000000..25b3faa
 --- /dev/null
 +++ b/video/out/gpu/vr.c
-@@ -0,0 +1,1005 @@
+@@ -0,0 +1,1004 @@
 +/*
 + * VR / panoramic video reprojection for vo=gpu (PiliPlus).
 + * See vr.h for the design notes and xl_player provenance.
@@ -1132,20 +1132,19 @@ index 0000000..f3e27ad
 +
 +    // Bounds only apply to manual look-around (incl. "tracker created but
 +    // no reference sampled yet"); gyro mode is deliberately unbounded.
++    //
++    // VR_FREE_LOOK (round 16, per requirement owner): the coverage clamp for
++    // 180° sources and the pole clamp (90 - vfov/2) are GONE - dragging is
++    // unrestricted now; on 180° sources looking past the coverage simply
++    // shows black, which the owner explicitly accepts. Only sanity bounds
++    // remain: yaw wraps into [-180, 180) and pitch stays within ±90 (the
++    // equirect poles are a hard singularity, also the option M_RANGE).
 +    if (!vr->tracker || !vr->has_ref) {
-+        if (opts->vr_projection == VR_PROJ_180) {
-+            float limit = MPMAX(0.0f, (180.0f - opts->vr_fov) * 0.5f);
-+            yaw = MPMIN(MPMAX(yaw, -limit), limit);
-+        } else {
-+            // 360°: wrap into [-180, 180) to keep the value bounded
-+            yaw = fmodf(yaw + 180.0f, 360.0f);
-+            if (yaw < 0.0f)
-+                yaw += 360.0f;
-+            yaw -= 180.0f;
-+        }
-+        float vfov = vr_fovy_from_hfov(opts->vr_fov, aspect);
-+        float plimit = MPMAX(0.0f, 90.0f - vfov * 0.5f);
-+        pitch = MPMIN(MPMAX(pitch, -plimit), plimit);
++        yaw = fmodf(yaw + 180.0f, 360.0f);
++        if (yaw < 0.0f)
++            yaw += 360.0f;
++        yaw -= 180.0f;
++        pitch = MPMIN(MPMAX(pitch, -90.0f), 90.0f);
 +    }
 +
 +    *yaw_deg = yaw;

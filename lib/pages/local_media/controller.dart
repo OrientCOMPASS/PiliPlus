@@ -44,20 +44,23 @@ class LocalMediaController extends GetxController {
   final RxInt scanTotal = 0.obs;
   final RxnString networkError = RxnString();
 
+  /// 安卓 14+「选择照片和视频」部分访问的提示文案; null 表示权限正常。
+  /// 部分访问下未勾选的文件对应用完全不可见, 用户会误以为"列表过滤了
+  /// 我的文件"(第十三轮真机反馈), 必须明确提示。
+  final RxnString accessNotice = RxnString();
+
   @override
   void onInit() {
     super.onInit();
     library.loadCache();
     savedSources.value = LocalMediaService.loadSources();
     refreshDevices();
+    refreshAccessNotice();
     // 第一次进入且没有缓存时自动扫描一次
     if (library.folders.isEmpty) {
       library.scan();
-    } else if (library.isStale) {
-      // 缓存过期(>30min)后台静默重扫: 新拷入设备/存储卡的文件应自动
-      // 出现, 而不是只有记得手动点刷新才认得。只探测权限、不弹授权框,
-      // 没权限就保持展示旧缓存(scan 自身会把错误写进 lastError, 这里跳过)。
-      _staleRescan();
+    } else {
+      maybeRescanIfStale();
     }
   }
 
@@ -71,11 +74,34 @@ class LocalMediaController extends GetxController {
     deviceSources.value = await LocalMediaService.deviceSources();
   }
 
-  Future<void> _staleRescan() async {
+  /// 缓存过期(>30min)后台静默重扫: 新拷入设备/存储卡的文件应自动出现,
+  /// 而不是只有记得手动点刷新才认得。只探测权限、不弹授权框, 没权限就
+  /// 保持展示旧缓存(scan 自身会把错误写进 lastError, 这里跳过)。
+  ///
+  /// 不只在 [onInit] 里查一次——`putOrFind` 的控制器一个进程只 init 一遍,
+  /// 而"用电脑拷完文件再切回应用"发生在 init 之后, 所以回前台/切回本
+  /// 板块时也要查(见 [onResumed])。
+  Future<void> maybeRescanIfStale() async {
+    if (library.scanning.value || !library.isStale) {
+      return;
+    }
     if (!await LocalMediaService.hasDevicePermission()) {
       return;
     }
     await library.scan();
+  }
+
+  /// 刷新"部分访问"权限提示(只探测状态, 不弹授权框)
+  Future<void> refreshAccessNotice() async {
+    accessNotice.value = await LocalMediaService.deviceAccessLimited()
+        ? '当前只有「部分访问」照片和视频的权限, 未勾选的文件不会出现在列表里。'
+        : null;
+  }
+
+  /// 板块重新可见(应用回前台 / 切回本 Tab)时调用
+  void onResumed() {
+    refreshAccessNotice();
+    maybeRescanIfStale();
   }
 
   Future<void> rescanLibrary() async {

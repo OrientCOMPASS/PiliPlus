@@ -6,9 +6,12 @@ import 'package:archive/archive.dart' show getCrc32;
 /// 扩展名白名单。
 ///
 /// 只列出安卓端打包的 FFmpeg **确实启用了对应 demuxer** 的容器:
-/// mov(mp4/m4v/mov/3gp)、matroska(mkv/webm)、avi、mpegts(ts/m2ts/mts)、
-/// flv、mpegps(mpg/mpeg/vob)、asf(wmv/asf)、hls(m3u8)。
+/// mov(mp4/m4v/mov/3gp/f4v/insv)、matroska(mkv/webm)、avi、
+/// mpegts(ts/m2ts/mts/m2t/tp)、flv、mpegps(mpg/mpeg/vob/m1v/m2v)、
+/// asf(wmv/asf)、hls(m3u8)、裸 hevc 流(h265/hevc/265)。
 /// 未启用的容器(如 rmvb、ogv)即使列出来也播不了, 因此不放进白名单。
+/// 扩展名不在名单里不代表播不了——mpv 按**内容**探测打开文件, 本机来源
+/// 对大文件还做了文件头嗅探兜底(见 `LocalMediaService.sniffVideoHeader`)。
 abstract final class LocalMediaExtensions {
   static const Set<String> videos = {
     'mp4',
@@ -20,15 +23,26 @@ abstract final class LocalMediaExtensions {
     'ts',
     'm2ts',
     'mts',
+    'm2t',
+    'tp',
     'flv',
+    'f4v',
     'mpg',
     'mpeg',
+    'm1v',
+    'm2v',
     'vob',
     'wmv',
     'asf',
     '3gp',
     '3g2',
     'm3u8',
+    // VR/全景设备与裸流: Insta360 的 .insv 就是 mov 容器;
+    // 裸 HEVC 流(demuxer=hevc 已启用)常见于相机/录屏导出
+    'insv',
+    'h265',
+    'hevc',
+    '265',
   };
 
   static const Set<String> audios = {
@@ -54,6 +68,21 @@ abstract final class LocalMediaExtensions {
     'stl',
     'sub',
   };
+
+  /// 从文件名提取扩展名(小写、不带点); 没有扩展名返回空串
+  static String of(String name) {
+    final dot = name.lastIndexOf('.');
+    if (dot < 0 || dot == name.length - 1) {
+      return '';
+    }
+    return name.substring(dot + 1).toLowerCase();
+  }
+
+  /// 扩展名是否属于任一已知媒体类别(视频/音频/字幕)。
+  /// 未知扩展名(或没有扩展名)的**大文件**会走文件头嗅探兜底,
+  /// 避免 VR 片源这类非常规命名的视频被静默过滤。
+  static bool known(String ext) =>
+      videos.contains(ext) || audios.contains(ext) || subtitles.contains(ext);
 }
 
 /// 「本地」板块中的一条记录: 目录、视频或音频文件。
@@ -66,6 +95,7 @@ class LocalMediaItem {
     this.size,
     this.modified,
     this.isDirectory = false,
+    this.probedVideo = false,
   });
 
   /// 显示名(文件名或目录名)
@@ -83,15 +113,15 @@ class LocalMediaItem {
   final DateTime? modified;
   final bool isDirectory;
 
-  String get extension {
-    final dot = name.lastIndexOf('.');
-    if (dot < 0 || dot == name.length - 1) {
-      return '';
-    }
-    return name.substring(dot + 1).toLowerCase();
-  }
+  /// 扩展名不在白名单(或没有扩展名), 但**文件头嗅探**确认是视频容器。
+  /// mpv 按内容探测打开文件, 扩展名只是列表过滤的便捷判据——不该成为
+  /// 非常规命名片源(如 VR 素材)被静默丢弃的理由。仅本机来源会嗅探。
+  final bool probedVideo;
 
-  bool get isVideo => LocalMediaExtensions.videos.contains(extension);
+  String get extension => LocalMediaExtensions.of(name);
+
+  bool get isVideo =>
+      probedVideo || LocalMediaExtensions.videos.contains(extension);
 
   bool get isAudio => LocalMediaExtensions.audios.contains(extension);
 
@@ -113,6 +143,7 @@ class LocalMediaItem {
         size: size ?? this.size,
         modified: modified ?? this.modified,
         isDirectory: isDirectory,
+        probedVideo: probedVideo,
       );
 
   @override

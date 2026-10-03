@@ -6,6 +6,7 @@ import 'package:PiliPlus/services/local_media_service.dart';
 import 'package:PiliPlus/services/smb/smb_discovery.dart';
 import 'package:PiliPlus/utils/cache_manager.dart';
 import 'package:PiliPlus/utils/extension/get_ext.dart';
+import 'package:PiliPlus/utils/permission_handler.dart' show openAppSettings;
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
 import 'package:material_ui/material_ui.dart';
@@ -23,7 +24,10 @@ class LocalMediaPage extends StatefulWidget {
 }
 
 class _LocalMediaPageState extends State<LocalMediaPage>
-    with SingleTickerProviderStateMixin, AutomaticKeepAliveClientMixin {
+    with
+        SingleTickerProviderStateMixin,
+        AutomaticKeepAliveClientMixin,
+        WidgetsBindingObserver {
   /// `putOrFind` 而不是 `put`: 顶层 Tab 页会被 MainApp 的 TabBarView 反复重建,
   /// `put` 每次都会把控制器(连同扫描结果)整个换掉。
   final _controller = Get.putOrFind(LocalMediaController.new);
@@ -39,6 +43,7 @@ class _LocalMediaPageState extends State<LocalMediaPage>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // TabController 不是响应式的, 切 Tab 时用 setState 刷新右上角动作按钮
     _tabController.addListener(_onTabChanged);
   }
@@ -47,10 +52,25 @@ class _LocalMediaPageState extends State<LocalMediaPage>
     if (mounted) {
       setState(() {});
     }
+    // 切回「媒体库」: 缓存过期就静默补扫(控制器的 onInit 一个进程只跑
+    // 一次, 覆盖不到"拷完文件再切回来"的场景)
+    if (_tabController.index == 0) {
+      _controller.onResumed();
+    }
+  }
+
+  /// 应用回前台: 用户很可能刚用电脑/文件管理器拷了新视频进来,
+  /// 缓存过期就静默补扫, 并刷新"部分访问"权限提示
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _controller.onResumed();
+    }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _tabController.removeListener(_onTabChanged);
     _tabController.dispose();
     super.dispose();
@@ -135,6 +155,36 @@ class _LocalMediaPageState extends State<LocalMediaPage>
             title: const Text('正在扫描本机视频…'),
             subtitle: Text(
               '已发现 ${folders.length} 个文件夹 / ${library.scannedFiles.value} 个视频',
+            ),
+          ),
+        );
+      }
+
+      // 安卓 14+「选择照片和视频」部分访问: 未勾选的文件根本不可见,
+      // 必须明说, 不能让用户以为是列表在"过滤"文件
+      if (!scanning && _controller.accessNotice.value case final notice?) {
+        children.add(
+          ListTile(
+            leading: const Icon(Icons.lock_person_outlined),
+            title: const Text('存储权限为「部分访问」'),
+            subtitle: Text('$notice可在系统设置中改为「允许访问全部」。'),
+            trailing: TextButton(
+              onPressed: openAppSettings,
+              child: const Text('去设置'),
+            ),
+          ),
+        );
+      }
+
+      // 扫描触到上限: 结果不完整也要明说(不静默吞文件)
+      if (!scanning && library.truncated.value) {
+        children.add(
+          ListTile(
+            leading: const Icon(Icons.warning_amber_rounded),
+            title: const Text('扫描已达上限，结果可能不完整'),
+            subtitle: const Text(
+              '本机视频文件过多, 只列出了前面一部分; '
+              '找不到的文件请用上方「存储卷」直接浏览目录',
             ),
           ),
         );

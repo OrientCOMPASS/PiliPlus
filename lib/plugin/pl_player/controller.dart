@@ -1,4 +1,4 @@
-import 'dart:async' show StreamSubscription, Timer;
+import 'dart:async' show StreamSubscription, Timer, unawaited;
 import 'dart:convert' show ascii, utf8;
 import 'dart:io' show Platform;
 import 'dart:math' show max, min;
@@ -1063,7 +1063,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       return;
     }
     final player = _vrNativePlayer;
-    if (player == null) {
+    // 延迟重试可能落在播放器销毁之后(退出页面), 别再碰属性
+    if (player == null || _playerCount == 0) {
       return;
     }
     if (!vrMpvSupported.value) {
@@ -1073,7 +1074,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }
       return;
     }
-    final projection = player.getProperty('vr-metadata-projection');
+    String projection;
+    try {
+      projection = player.getProperty('vr-metadata-projection');
+    } catch (_) {
+      // 与销毁竞态等: 放弃本次解析, 不打扰播放
+      _vrAutoResolved = true;
+      return;
+    }
     if (projection.isEmpty) {
       // 文件还没加载完 / 当前视频轨还没选定(TRACKS_CHANGED 可能早于选定轨),
       // 或纯音频文件根本没有视频轨: 有限次重试, 不置 resolved。
@@ -1096,7 +1104,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       return;
     }
     _vrAutoResolved = true;
-    final layout = player.getProperty('vr-metadata-layout');
+    String layout;
+    try {
+      layout = player.getProperty('vr-metadata-layout');
+    } catch (_) {
+      layout = '';
+    }
     final resolution = VrProjection.resolveMetadata(
       projection: projection,
       layout: layout,
@@ -2263,68 +2276,84 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
 
     _playerCount = 0;
-    if (removeSafeArea) {
-      showSystemBar();
-    }
-    danmakuController = null;
-    mpvTracks.value = const Tracks();
-    currentTrack.value = const Track();
-    // VR 状态是单次播放会话的, 播放器销毁后复位
-    // (头追随 mpv 实例一起销毁, Dart 侧没有需要停的传感器)
-    vrProjection.value = VrProjection.off;
-    vrRequested.value = VrProjection.off;
-    _vrAutoResolved = false;
-    _vrAspect = null;
-    vrControlMode.value = false;
-    vrError.value = null;
-    vrGyroEnabled.value = false;
-    vrMpvSupported.value = false;
-    _vrApplyTimer?.cancel();
-    _vrApplyTimer = null;
-    isLocalMedia = false;
-    _stopOrientationListener();
-    _disableAutoEnterPip();
-    setPlayCallBack(null);
-    dmState.clear();
-    if (showSeekPreview) {
-      _clearPreview();
-    }
-    if (Platform.isAndroid) {
-      AndroidHelper$ToDart.onUserLeaveHint?.release();
-      AndroidHelper$ToDart.onUserLeaveHint = null;
-    }
-    _timer?.cancel();
-    // _position.close();
-    // _playerEventSubs?.cancel();
-    // _sliderPosition.close();
-    // _sliderTempPosition.close();
-    // _isSliderMoving.close();
-    // _duration.close();
-    // _buffered.close();
-    // _showControls.close();
-    // _controlsLock.close();
-
-    // playerStatus.close();
-    // dataStatus.close();
-
-    if (PlatformUtils.isDesktop && isAlwaysOnTop.value) {
-      windowManager.setAlwaysOnTop(false);
-    }
-
+    // 真机反馈「退出视频后仍在传输」的加固(第十三轮): mpv 活着 = demuxer
+    // 缓存继续从局域网/在线源拉流。两处保险:
+    //   ① 先摘监听、立刻向 mpv 下发 stop(网络取流马上停, 不等销毁流程);
+    //   ② 播放器销毁放进 finally —— 下面这条清理链很长, 任何一步抛异常
+    //      都不能再把播放器落下(落下就是无限期继续下载)。
     _removeListeners();
     _positionListeners.clear();
     _statusListeners.clear();
-    if (playerStatus.isPlaying) {
-      WakelockPlus.disable();
+    setPlayCallBack(null);
+    try {
+      final player = _videoPlayerController;
+      if (player != null) {
+        unawaited(player.command(const ['stop']).catchError((Object _) {}));
+      }
+    } catch (_) {
+      // 已销毁等竞态: dispose 内部还会再 stop 一次, 忽略
     }
-    if (kDebugMode) {
-      debugPrint('dispose player');
+    try {
+      if (removeSafeArea) {
+        showSystemBar();
+      }
+      danmakuController = null;
+      mpvTracks.value = const Tracks();
+      currentTrack.value = const Track();
+      // VR 状态是单次播放会话的, 播放器销毁后复位
+      // (头追随 mpv 实例一起销毁, Dart 侧没有需要停的传感器)
+      vrProjection.value = VrProjection.off;
+      vrRequested.value = VrProjection.off;
+      _vrAutoResolved = false;
+      _vrAspect = null;
+      vrControlMode.value = false;
+      vrError.value = null;
+      vrGyroEnabled.value = false;
+      vrMpvSupported.value = false;
+      _vrApplyTimer?.cancel();
+      _vrApplyTimer = null;
+      isLocalMedia = false;
+      _stopOrientationListener();
+      _disableAutoEnterPip();
+      dmState.clear();
+      if (showSeekPreview) {
+        _clearPreview();
+      }
+      if (Platform.isAndroid) {
+        AndroidHelper$ToDart.onUserLeaveHint?.release();
+        AndroidHelper$ToDart.onUserLeaveHint = null;
+      }
+      _timer?.cancel();
+      // _position.close();
+      // _playerEventSubs?.cancel();
+      // _sliderPosition.close();
+      // _sliderTempPosition.close();
+      // _isSliderMoving.close();
+      // _duration.close();
+      // _buffered.close();
+      // _showControls.close();
+      // _controlsLock.close();
+
+      // playerStatus.close();
+      // dataStatus.close();
+
+      if (PlatformUtils.isDesktop && isAlwaysOnTop.value) {
+        windowManager.setAlwaysOnTop(false);
+      }
+
+      if (playerStatus.isPlaying) {
+        WakelockPlus.disable();
+      }
+    } finally {
+      if (kDebugMode) {
+        debugPrint('dispose player');
+      }
+      _videoPlayerController?.dispose();
+      _videoPlayerController = null;
+      _videoController = null;
+      _instance = null;
+      videoPlayerServiceHandler?.clear();
     }
-    _videoPlayerController?.dispose();
-    _videoPlayerController = null;
-    _videoController = null;
-    _instance = null;
-    videoPlayerServiceHandler?.clear();
   }
 
   static void updatePlayCount() {

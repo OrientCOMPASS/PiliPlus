@@ -132,6 +132,107 @@ abstract final class LocalMediaService {
     }
   }
 
+  /// 安卓 14+「选择照片和视频」(部分访问)是否生效。
+  /// 部分访问下**未勾选的文件对应用完全不可见**(FUSE 连列目录都不给),
+  /// 用户会以为是列表"过滤"了自己的文件——必须明确提示, 不静默失效。
+  static Future<bool> deviceAccessLimited() async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+    try {
+      if ((await Permission.videos.status).isLimited) {
+        return true;
+      }
+      return (await Permission.storage.status).isLimited;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // ==================== 文件头嗅探 ====================
+
+  /// 嗅探的大小门槛: 只对**未知扩展名**且不小于此值的文件做内容探测。
+  /// 正经视频(尤其 VR/全景片源)远大于此; 小文件(文档/缩略图/缓存)
+  /// 不值得为它多开一次文件。
+  static const int probeMinBytes = 8 * 1024 * 1024;
+
+  /// 嗅探读取的字节数: MPEG-TS 要看 0/188/376 三个同步字节, 取 1KiB 足够。
+  static const int probeHeaderBytes = 1024;
+
+  /// 判断文件头是否为本应用能播的视频容器(纯函数, 可单测)。
+  ///
+  /// 为什么需要它: mpv/FFmpeg 打开文件靠**内容探测**, 扩展名白名单只是
+  /// 展示层的过滤。VR 素材命名经常不按常理(Insta360 的 `.insv`、下载丢
+  /// 扩展名、`video.360` 之类), 只认扩展名会把它们静默吃掉——真机反馈
+  /// "本机文件列表过滤了我准备的 VR 视频"的兜底修复。
+  ///
+  /// 只认扩展名白名单覆盖到的容器魔数: ISO-BMFF(ftyp)、Matroska/WebM
+  /// (EBML)、AVI(RIFF)、MPEG-TS、FLV、ASF/WMV、MPEG-PS。
+  static bool sniffVideoHeader(List<int> b) {
+    if (b.length < 12) {
+      return false;
+    }
+    // ISO-BMFF: 'ftyp' @4 (mp4/mov/m4v/3gp/f4v/insv…)
+    if (b[4] == 0x66 && b[5] == 0x74 && b[6] == 0x79 && b[7] == 0x70) {
+      return true;
+    }
+    // Matroska/WebM: EBML 头 0x1A45DFA3
+    if (b[0] == 0x1a && b[1] == 0x45 && b[2] == 0xdf && b[3] == 0xa3) {
+      return true;
+    }
+    // AVI: 'RIFF' … 'AVI '
+    if (b[0] == 0x52 &&
+        b[1] == 0x49 &&
+        b[2] == 0x46 &&
+        b[3] == 0x46 &&
+        b[8] == 0x41 &&
+        b[9] == 0x56 &&
+        b[10] == 0x49 &&
+        b[11] == 0x20) {
+      return true;
+    }
+    // FLV
+    if (b[0] == 0x46 && b[1] == 0x4c && b[2] == 0x56) {
+      return true;
+    }
+    // ASF (wmv/asf): 30 26 B2 75 8E 66 CF 11
+    if (b.length >= 16 &&
+        b[0] == 0x30 &&
+        b[1] == 0x26 &&
+        b[2] == 0xb2 &&
+        b[3] == 0x75 &&
+        b[4] == 0x8e &&
+        b[5] == 0x66 &&
+        b[6] == 0xcf &&
+        b[7] == 0x11) {
+      return true;
+    }
+    // MPEG-PS: pack header 00 00 01 BA / 视频序列头 00 00 01 B3
+    if (b[0] == 0 && b[1] == 0 && b[2] == 1 && (b[3] == 0xba || b[3] == 0xb3)) {
+      return true;
+    }
+    // MPEG-TS: 0/188/376 三处都是同步字节 0x47
+    if (b.length >= 564 && b[0] == 0x47 && b[188] == 0x47 && b[376] == 0x47) {
+      return true;
+    }
+    return false;
+  }
+
+  /// 读取 [path] 的文件头做 [sniffVideoHeader] 判断。
+  /// 读不到(无权限/失效链接)按 false 处理, 不影响目录里其它条目。
+  static Future<bool> sniffVideoFile(String path) async {
+    try {
+      final raf = await File(path).open();
+      try {
+        return sniffVideoHeader(await raf.read(probeHeaderBytes));
+      } finally {
+        await raf.close();
+      }
+    } catch (_) {
+      return false;
+    }
+  }
+
   // ==================== 浏览 ====================
 
   /// 列目录。失败时返回 [Error](带人类可读的原因)。
@@ -390,6 +491,15 @@ abstract final class LocalMediaService {
       if (stat == null) {
         continue;
       }
+      // 未知扩展名(或没有扩展名)的大文件: 嗅探文件头。mpv 按内容探测
+      // 打开文件, 白名单只是展示层过滤——不该把非常规命名的 VR 片源
+      // 静默吃掉。
+      var probedVideo = false;
+      if (!isDir &&
+          stat.size >= probeMinBytes &&
+          !LocalMediaExtensions.known(LocalMediaExtensions.of(name))) {
+        probedVideo = await sniffVideoFile(entity.path);
+      }
       items.add(
         LocalMediaItem(
           name: name,
@@ -398,6 +508,7 @@ abstract final class LocalMediaService {
           size: isDir ? null : stat.size,
           modified: stat.modified,
           isDirectory: isDir,
+          probedVideo: probedVideo,
         ),
       );
     }

@@ -104,6 +104,16 @@ void main() {
       // rmvb / ogv 没有对应 demuxer, 显示出来也播不了
       expect(LocalMediaExtensions.videos, isNot(contains('rmvb')));
       expect(LocalMediaExtensions.videos, isNot(contains('ogv')));
+      // VR 素材常见容器: Insta360 的 .insv 是 mov 家族, 裸 HEVC 流有 demuxer
+      expect(LocalMediaExtensions.videos, containsAll(['insv', 'hevc']));
+    });
+
+    test('known(): 三个类别合并判定(嗅探只针对三不沾的文件)', () {
+      expect(LocalMediaExtensions.known('mp4'), isTrue);
+      expect(LocalMediaExtensions.known('flac'), isTrue);
+      expect(LocalMediaExtensions.known('ass'), isTrue);
+      expect(LocalMediaExtensions.known('txt'), isFalse);
+      expect(LocalMediaExtensions.known(''), isFalse);
     });
 
     test('条目类型判定', () {
@@ -431,6 +441,120 @@ void main() {
         source: source,
       );
       expect(await LocalMediaService.findMatchingSubtitles(video), isEmpty);
+    });
+  });
+
+  group('文件头嗅探(非常规命名 VR 片源的兜底)', () {
+    List<int> padded(List<int> head) =>
+        [...head, ...List<int>.filled(600, 0)];
+
+    test('认得白名单容器的魔数', () {
+      // ISO-BMFF: 'ftyp' @4 (mp4/mov/m4v/3gp/f4v/insv…)
+      expect(
+        LocalMediaService.sniffVideoHeader(
+          padded([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]),
+        ),
+        isTrue,
+      );
+      // Matroska/WebM: EBML 头
+      expect(
+        LocalMediaService.sniffVideoHeader(padded([0x1a, 0x45, 0xdf, 0xa3])),
+        isTrue,
+      );
+      // AVI: RIFF…AVI␣
+      expect(
+        LocalMediaService.sniffVideoHeader(
+          padded([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x41, 0x56, 0x49, 0x20]),
+        ),
+        isTrue,
+      );
+      // FLV
+      expect(
+        LocalMediaService.sniffVideoHeader(padded([0x46, 0x4c, 0x56, 0x01])),
+        isTrue,
+      );
+      // ASF (wmv/asf)
+      expect(
+        LocalMediaService.sniffVideoHeader(
+          padded([
+            0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11,
+            0xa6, 0xd9, 0x00, 0xaa, 0x00, 0x62, 0xce, 0x6c,
+          ]),
+        ),
+        isTrue,
+      );
+      // MPEG-PS
+      expect(
+        LocalMediaService.sniffVideoHeader(padded([0, 0, 1, 0xba])),
+        isTrue,
+      );
+    });
+
+    test('MPEG-TS: 0/188/376 三处同步字节才算', () {
+      final ts = List<int>.filled(600, 0)
+        ..[0] = 0x47
+        ..[188] = 0x47
+        ..[376] = 0x47;
+      expect(LocalMediaService.sniffVideoHeader(ts), isTrue);
+      ts[376] = 0;
+      expect(LocalMediaService.sniffVideoHeader(ts), isFalse);
+    });
+
+    test('非视频/太短的一律 false, 不会误报', () {
+      // PDF
+      expect(
+        LocalMediaService.sniffVideoHeader(
+          padded([0x25, 0x50, 0x44, 0x46, 0x2d]),
+        ),
+        isFalse,
+      );
+      // ZIP/APK/JPG 都不该被当成视频
+      expect(
+        LocalMediaService.sniffVideoHeader(padded([0x50, 0x4b, 3, 4])),
+        isFalse,
+      );
+      expect(
+        LocalMediaService.sniffVideoHeader(
+          padded([0xff, 0xd8, 0xff, 0xe0]),
+        ),
+        isFalse,
+      );
+      expect(LocalMediaService.sniffVideoHeader(const [1, 2, 3]), isFalse);
+      expect(LocalMediaService.sniffVideoHeader(const []), isFalse);
+    });
+
+    test('probedVideo 的条目按视频对待(可播放/可进列表)', () {
+      const item = LocalMediaItem(
+        name: '我的全景视频',
+        uri: '/storage/emulated/0/DCIM/我的全景视频',
+        source: device,
+        probedVideo: true,
+      );
+      expect(item.extension, '');
+      expect(item.isVideo, isTrue);
+      expect(item.isPlayable, isTrue);
+      expect(item.copyWith(uri: '/x').probedVideo, isTrue);
+    });
+
+    test('sniffVideoFile: 真实文件读取(读不到按 false)', () async {
+      final dir = Directory.systemTemp.createTempSync('pili_sniff_test');
+      try {
+        final mp4 = File('${dir.path}/noext_video');
+        mp4.writeAsBytesSync([
+          0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70,
+          0x69, 0x73, 0x6f, 0x6d, ...List<int>.filled(64, 0),
+        ]);
+        expect(await LocalMediaService.sniffVideoFile(mp4.path), isTrue);
+        final junk = File('${dir.path}/junk');
+        junk.writeAsBytesSync(List<int>.filled(128, 0x42));
+        expect(await LocalMediaService.sniffVideoFile(junk.path), isFalse);
+        expect(
+          await LocalMediaService.sniffVideoFile('${dir.path}/不存在'),
+          isFalse,
+        );
+      } finally {
+        dir.deleteSync(recursive: true);
+      }
     });
   });
 

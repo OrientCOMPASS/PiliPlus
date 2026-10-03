@@ -57,19 +57,22 @@ class LocalMediaFolder {
 ///
 /// 扫描结果缓存在本机, 下次进入板块立刻可见, 再按需重新扫描。
 class LocalMediaLibrary {
-  /// 跳过的目录名(应用私有目录、缩略图缓存等)
+  /// 跳过的目录名(应用私有目录、缩略图缓存等)。
+  /// 刻意**不收** `backup` 这类用户常用目录名: 把自己的视频放在名为
+  /// backup 的文件夹里是完全正当的用法, 静默跳过会被当成"列表过滤了
+  /// 我的文件"(第十三轮真机反馈)。
   static const Set<String> skipDirNames = {
     'android',
     'lost.dir',
     '.thumbnails',
     '.thumbdata',
     '.cache',
-    'backup',
   };
 
-  /// 单次扫描上限, 防止超大存储卡把 UI 拖死
-  static const int maxFiles = 20000;
-  static const int maxFolders = 4000;
+  /// 单次扫描上限, 防止超大存储卡把 UI 拖死。
+  /// 触到上限时置 [truncated], 界面**明确提示**结果不完整, 不静默吞文件。
+  static const int maxFiles = 60000;
+  static const int maxFolders = 8000;
 
   /// 缓存超过这个时长视为过期: 进入板块时后台静默重扫一次,
   /// 新拷入的文件不必记得手动点刷新才会出现(边扫边出, 旧列表不闪断)
@@ -87,6 +90,9 @@ class LocalMediaLibrary {
   final RxBool scanning = false.obs;
   final RxnString lastError = RxnString();
   final RxInt scannedFiles = 0.obs;
+
+  /// 最近一次扫描是否触到 [maxFiles]/[maxFolders] 上限(结果可能不完整)
+  final RxBool truncated = false.obs;
   DateTime? lastScanAt;
 
   /// 已发现的媒体文件数(不走 Rx, 由 [_progressTimer] 批量同步)
@@ -140,6 +146,7 @@ class LocalMediaLibrary {
     }
     scanning.value = true;
     lastError.value = null;
+    truncated.value = false;
     _abort = false;
     _fileCount = 0;
     _lastPublish = null;
@@ -217,7 +224,12 @@ class LocalMediaLibrary {
         ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
 
   Future<void> _walk(String path, Map<String, _FolderAgg> byFolder) async {
-    if (_abort || byFolder.length > maxFolders || _fileCount > maxFiles) {
+    if (_abort) {
+      return;
+    }
+    if (byFolder.length > maxFolders || _fileCount > maxFiles) {
+      // 触到上限: 明确置位, 界面提示"结果可能不完整"(不静默吞文件)
+      truncated.value = true;
       return;
     }
     final dir = Directory(path);
@@ -245,7 +257,23 @@ class LocalMediaLibrary {
       if (entity is! File) {
         continue;
       }
-      if (!LocalMediaExtensions.videos.contains(_ext(name))) {
+      final ext = LocalMediaExtensions.of(name);
+      var playable = LocalMediaExtensions.videos.contains(ext);
+      if (!playable && !LocalMediaExtensions.known(ext)) {
+        // 未知扩展名(或没有扩展名)的大文件: 嗅探文件头兜底。
+        // VR 素材命名经常不按常理(.insv/无扩展名), mpv 打开文件本来
+        // 就按内容探测, 列表不该只认扩展名(第十三轮真机反馈)。
+        try {
+          // ignore: avoid_slow_async_io
+          final st = await entity.stat();
+          if (st.size >= LocalMediaService.probeMinBytes) {
+            playable = await LocalMediaService.sniffVideoFile(entity.path);
+          }
+        } catch (_) {
+          // 读不到属性/内容就按不可播放处理
+        }
+      }
+      if (!playable) {
         continue;
       }
       final agg = byFolder.putIfAbsent(path, () => _FolderAgg(path));
@@ -272,14 +300,6 @@ class LocalMediaLibrary {
     }
     final name = path.substring(i + 1);
     return name.isEmpty ? path : name;
-  }
-
-  static String _ext(String name) {
-    final dot = name.lastIndexOf('.');
-    if (dot < 0 || dot == name.length - 1) {
-      return '';
-    }
-    return name.substring(dot + 1).toLowerCase();
   }
 
   /// 某个文件夹下的可播放条目

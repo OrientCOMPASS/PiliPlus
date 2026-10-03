@@ -1636,3 +1636,136 @@ config.h/avconfig.h/NDK sensor 桩）做 `gcc -fsyntax-only` 全绿。
   对 strict 路径无 issue、`dart format` 解析通过；
 - CI：libmpv 工作流出包（含 strings 自检）→ app 工作流 analyze/test/release，
   结果见对应 run 与 release `v2.1.5-test`（沿用固定测试 tag，未 bump 版本）。
+
+## 18. 第十三轮：真机反馈三则（VR 平面 2D 根因 / 媒体库过滤 / 退出仍在传输）
+
+> 本轮全部来自 v2.1.5-test（构建自 `273c378`）的装机实测反馈：
+> ① 本机文件列表"过滤"了准备的 VR 视频；② 局域网播放 VR 手动切换后
+> 仍是平面 2D；③ 退出视频后观察到仍在传输。
+
+### 18.1 「VR 不生效、永远平面 2D」：根因是 vo=gpu 的自动 dumb mode
+
+先排除了一批嫌疑（都做了实证）：
+
+- **APK 里的 libmpv 是不是旧的？** 下载 release 的
+  `app-arm64-v8a-release.apk` 解包，`lib/arm64-v8a/libmpv.so` 与滚动
+  release `libmpv-vr` 的 jar 内 so **逐字节一致**（sha256
+  `19abfac5…`），且 `vr-head-tracking`/`vr-metadata-projection` 等选项
+  字符串都在 —— 包没问题。
+- **media_kit 安卓端是不是不走 vo=gpu？** 复核 fork（ref native）源码：
+  `NativeVideoController.supported` 不含 Android，安卓固定
+  `AndroidVideoController`（`vo=gpu` + `gpu-context=android` + wid），
+  补丁挂接的渲染路径成立。
+- **选项热更新链路断没断？** `gl_video_conf` 组级
+  `.change_flags = UPDATE_VIDEO` → `command.c` 发
+  `VOCTRL_UPDATE_RENDER_OPTS`，且 `gl_video_render_frame` 每帧都调
+  `gl_video_update_options`（`m_config_cache_update`），属性下发能到达。
+
+真正的根因在 mpv 的"节能直拷"优化：`check_gl_features()` 里
+
+```c
+p->forced_dumb_mode = p->opts.dumb_mode > 0 || !have_fbo || !have_texrg;
+bool voluntarily_dumb = check_dumb_mode(p);
+if (p->forced_dumb_mode || voluntarily_dumb) {
+    p->dumb_mode = true;
+    p->opts = (struct gl_video_opts){ /* 白名单字段 */ };  // vr 字段被清零
+```
+
+`check_dumb_mode()` 在"没有任何高级处理"（缩放全 bilinear、无
+deband/插帧/用户着色器、关 correct/linear/sigmoid downscaling…）时返回
+true。**media_kit 创建播放器时恰好把这一整套全设了**（`scale=bilinear`、
+`dscale=bilinear`、`dither=no`、`correct-downscaling=no`、
+`linear-downscaling=no`、`sigmoid-upscaling=no`），于是安卓端**所有**播放
+默认都进自愿 dumb mode。而 VR 分支的条件是
+
+```c
+if (p->opts.vr && !p->dumb_mode) { …球面重投影… } else { …常规直出… }
+```
+
+dumb mode 下永远走 else；更糟的是白名单赋值把 `p->opts.vr` 清零、
+`only_vr_opts_changed(&p->opts, new)` 拿被改写过的 `p->opts` 做比较又几乎
+必然不等 → 每次改 VR 属性都触发 `reinit_from_options` → 再次进 dumb →
+再清零。VR 在这条链路上**结构性死亡**，应用侧探测（`vr` 属性存在）、
+属性下发、VR 操作模式 UI 全部正常，唯独画面永远平面 —— 与真机现象逐条
+吻合（第十一轮反馈里 VR 视频根本没进列表，所以这个问题当时没暴露）。
+
+**修复（`vr_vo_gpu.patch`，标记 `VR_DUMB_FIX`）：**
+
+1. `check_dumb_mode()`：`o->vr` 为真直接返回 false —— VR 重投影需要完整
+   渲染链（中间纹理 + 球面网格 draw），与 dumb mode 语义互斥；
+2. `vr` 总开关翻转**不再走热更新**，强制 `reinit_from_options`（dumb 资格
+   需要重算，白名单也要随之解除/恢复）；其余 VR 视角字段
+   （layout/projection/eye/stereo/fov/yaw/pitch/head-tracking/reset）维持
+   热更新，拖拽环视不重建渲染链；
+3. 热更新比较基准从 `p->opts`（会被 `check_gl_features` 改写：dumb 白名单、
+   compute-peak 回退等，导致比较恒不等 → reinit 风暴）改为影子副本
+   `opts_cache_copy`（只在 init/更新时同步 cache 原值），且热路径只回拷
+   VR 字段、不再整struct覆盖 `p->opts`（保留特性探测做的调整）；
+4. 被**强制** dumb（无可用 FBO，极老设备）且请求了 VR 时打 WARN 日志，
+   不再静默失效（对应需求第 8 条的 native 侧兜底）。
+
+`bundle_vr_arm64.sh` 自检新增 `grep VR_DUMB_FIX`，防止补丁没打上就出包。
+补丁在 pristine v0.41.0 上三补丁叠加 `git apply` 重放验证通过，CI 全量
+重编 libmpv 并重新发布滚动 jar。
+
+### 18.2 「本机文件列表过滤了我准备的 VR 视频」：把过滤点逐一补漏
+
+上一轮（§16.4）的判断是扫描缓存过期，补了">30min 静默重扫"。本轮反馈
+说明重扫没解决 —— 那是真过滤。把设备侧所有过滤点过了一遍并逐个补漏：
+
+1. **重扫时机只有 onInit**：`putOrFind` 的控制器一个进程只 init 一次，
+   "用电脑拷完文件再切回应用"发生在 init 之后，永远不会触发重扫。现在
+   应用**回前台**、**切回「媒体库」Tab** 都会做过期检查
+   （`onResumed → maybeRescanIfStale`，权限只探测不弹框）。
+2. **`backup` 目录被无条件跳过**：把自己的视频放进名为 backup 的文件夹
+   是正当用法，从 `skipDirNames` 移除（android/lost.dir/隐藏目录/缩略图
+   缓存照旧跳过）。
+3. **扩展名白名单**是仅有的文件级过滤：补齐打包 FFmpeg 确实能解封装的
+   容器 —— `insv`（Insta360，mov 家族）、`f4v`、`m2t`/`tp`（mpegts）、
+   `m1v`/`m2v`（mpegvideo）、`h265`/`hevc`/`265`（裸 HEVC 流，demuxer 已
+   启用）。rmvb/ogv 仍不放（没有 demuxer/解码器，放了也播不了）。
+4. **文件头嗅探兜底**（新增）：扩展名三不沾（非视频/音频/字幕白名单）且
+   ≥8MiB 的本机文件，读前 1KiB 认魔数 —— ftyp(mp4/mov/insv…)、EBML
+   (mkv/webm)、RIFF-AVI、MPEG-TS(0/188/376 三处 0x47)、FLV、ASF、
+   MPEG-PS。命中即按视频对待（`LocalMediaItem.probedVideo`），媒体库扫描
+   与目录浏览都接入。mpv 打开文件本来就按内容探测，列表不该只认扩展名。
+   纯函数 `sniffVideoHeader` 带单测（含误报防护：PDF/ZIP/JPG 必须 false）。
+5. **静默的上限与权限**：扫描上限提到 60000 文件/8000 文件夹，触到上限
+   置 `truncated` 并在界面**明确提示**"结果可能不完整，请用存储卷直接
+   浏览"；安卓 14+「选择照片和视频」部分访问会让未勾选文件彻底不可见，
+   探测到 `isLimited` 时在媒体库顶部提示并给"去设置"入口 —— 两类
+   "看起来像被过滤"的场景都不再静默。
+
+若重扫后仍看不到具体某个文件，请提供**文件名与所在目录**，剩下的可能性
+只有系统层可见性（部分访问未勾选、SD 卡未挂载）可以排查。
+
+### 18.3 「退出视频后仍在传输」：退出即断流 + 销毁兜底
+
+链路核对：SMB 回环代理的泵在写失败时最多再送一个 512KB 块（§16.1），
+SMB 会话池只保持空闲连接（2 分钟自动关）——持续传输只能是 **mpv 还活着**
+（demuxer 缓存继续拉流：本地/局域网档前向 32MiB/3s，在线档 16s×倍速，
+高码率全景片源非常显眼）。而 `PlPlayerController.dispose()` 的清理链很
+长，播放器销毁在**最后一行**，中间任何一步抛异常都会把 mpv 落下。加固：
+
+1. dispose 第一步先摘监听、随即向 mpv 下发 `stop`（fire-and-forget）——
+   网络取流在退出瞬间就停，不等销毁流程走完；
+2. 播放器销毁挪进 `try/finally`：前面的 UI/状态清理无论哪步抛异常，
+   `_videoPlayerController.dispose()` 必然执行；
+3. `_maybeResolveVrAuto` 的延迟重试加 `_playerCount == 0` 守卫、属性读取
+   包 try/catch（与销毁竞态时不再产生未捕获异常）。
+
+media_kit 侧 `dispose()` 本身是 stop(2s 超时) → 5 秒后
+`mpv_terminate_destroy`；有了 ①，这 5 秒窗口内不再有网络读取。若真机仍
+观察到**长时间**（分钟级）传输，请抓 logcat（标签 mpv/PlPlayer）与 NAS
+侧连接来源，那就是另一条路径了。
+
+### 18.4 本轮验证
+
+- native：patch 三补丁叠加 pristine v0.41.0 `git apply` 通过；CI 全量
+  重编（`[198/236] video_out_gpu_video.c.o` → `[236/236] Linking
+  libmpv.so`）+ strings 自检 + `VR_DUMB_FIX` 源码自检，滚动 jar 已更新；
+- Dart：嗅探纯函数/白名单/probedVideo 单测新增；改动文件
+  `dart format` 解析通过；类型与 lint 走 CI（analyze 零容忍路径含全部
+  改动文件）；
+- APK：release 包解包比对 libmpv.so sha256 的流程本轮已跑通，出包后
+  以同一方法确认新 jar 进包（见交付说明）。

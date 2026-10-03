@@ -30,6 +30,17 @@
   手动环视（头追关闭）时 `vr_manual_angles()` 还会在 native 侧兜底夹取视角：
   180° 片源的偏航在覆盖边界收敛、俯仰在极点收敛（转出画面见黑不可接受），
   头追开启时不夹取（陀螺仪模式按需求放宽）。
+  **VR_GYRO_CONT（第十四轮，真机"陀螺仪开关跳变/背对画面"修复）**：
+  开启头追时不再直接使用原始设备姿态——等首个真实陀螺仪样本到达后采样
+  参考系 `ref_inv = head⁻¹·B·A⁻¹`（A=on 模式手动部 Ry·Rx，B=off 模式
+  Rx·Ry，角度均含折叠偏置），使开启瞬间画面**逐元素连续**（也根治"切入
+  陀螺仪背对画面要转 180°"）；关闭头追时把最后一次跟踪模型的中心方向
+  分解回 yaw/pitch 折叠进 `bias_yaw/bias_pitch`（滚转分量丢弃），手动模式
+  在偏置之上继续，关闭瞬间视角不跳；「视角摆正」(vr-reset-view) 清零偏置
+  并以当前姿态为新参考。1.5x 倍速卡顿缓解：头追关闭且视角未变时恢复
+  "静止帧 blit 缓存"（此前 VR 一律禁用缓存，暂停/OSD 重绘都全链重渲染），
+  VR 视角热更新会精确失效该缓存。数学已用独立 C 程序对随机姿态 5 万组
+  数值验证（开启连续性 ~4e-7、折叠中心误差 ~1e-6）。
   **VR_DUMB_FIX（第十三轮，真机"VR 不生效"的根因修复）**：mpv 的 vo=gpu 有
   一个"无高级处理就走 dumb mode 直拷"的自动优化，media_kit 安卓端的默认
   选项（bilinear 缩放、关 dither/downscaling 附加项）恰好满足其条件，导致
@@ -40,6 +51,21 @@
   dumb（无可用 FBO）时打 WARN 日志说明 VR 被禁用。热更新比较基准也从
   `p->opts`（会被 check_gl_features 改写，导致比较恒不等 → 每次拖视角都
   全链重建）改为影子副本 `opts_cache_copy`，并且只回拷 VR 字段。
+- `buildscripts/patches/ffmpeg/libsmb2.patch`：**第十四轮新增**（对齐 VLC 的
+  SMB 行为）。安卓端打包的 FFmpeg 原本没有任何 smb 协议（libsmbclient 是
+  GPLv3+Samba 全家桶，没法用），应用侧此前用"Dart SMB2 客户端 + 回环 HTTP
+  代理"喂 mpv——播放泵长期占用会话池导致目录浏览变慢、seek 重连易断流、
+  退出后代理泵还有残余传输。本补丁给 ffmpeg 增加 `smb://` URLProtocol
+  （`libavformat/libsmb2.c`，基于 **libsmb2**——VLC 安卓 smb access 用的同一
+  个库，LGPL、静态链入 libmpv.so）：mpv 直接持有 SMB socket，seek 是同句柄
+  定位读（不重连），停播即断开；URL 形如
+  `smb://[domain;][user[:pass]@]host[:port]/share/path`（各分量百分号编码，
+  密码不落日志），命令级超时默认 10s（`timeout` AVOption）。配套：
+  `depinfo.sh`/`download-deps.sh`/`scripts/libsmb2.sh`（cmake 静态+PIC 构建，
+  安装后把不自包含的头文件补齐 stddef/stdint/time 前置与 umbrella include，
+  ffmpeg configure 的单头探测才能通过）与 `flavors/default.sh` 的
+  `--enable-libsmb2`。`patch.sh` 同时改为**按补丁内容哈希跳过重复应用**
+  （ffmpeg 树不再因 mpv 补丁迭代而被 clean 全量重编）。
 - `buildscripts/patches/mpv/vr_metadata.patch`：**多格式 VR 需求新增**。
   片源元数据识别：`demux_lavf` 解析 lavf 的 spherical（mov `sv3d`/`prji`、
   mkv `Projection`）与 stereo3d（mov `st3d`、mkv `StereoMode`）side data，

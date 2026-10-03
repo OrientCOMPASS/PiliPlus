@@ -36,9 +36,16 @@ grep -q "vr_manual_angles" deps/mpv/video/out/gpu/vr.c
 # default options (bilinear/no-dither) put every Android playback in dumb mode
 # and the VR branch in pass_draw_to_screen never runs (flat 2D forever).
 grep -q "VR_DUMB_FIX" deps/mpv/video/out/gpu/video.c
+# VR_GYRO_CONT: gyro on/off must not jump the view (reference sampling with
+# exact continuation + head-pose fold into manual bias on disable).
+grep -q "VR_GYRO_CONT" deps/mpv/video/out/gpu/vr.c
 # metadata patch (vr-metadata-* properties + demux_lavf spherical/stereo3d)
 grep -q "mp_vr_projection_from_spherical" deps/mpv/demux/demux_lavf.c
 grep -q "vr-metadata-projection" deps/mpv/player/command.c
+# ffmpeg smb:// protocol via libsmb2 (VLC-parity LAN playback, no loopback
+# HTTP proxy: seeks are positioned reads, quit closes the socket outright)
+grep -q "ff_libsmb2_protocol" deps/ffmpeg/libavformat/libsmb2.c
+grep -q "enable-libsmb2" flavors/default.sh
 
 cp flavors/default.sh scripts/ffmpeg.sh
 ./build.sh mpv --arch arm64
@@ -57,7 +64,17 @@ if ! strings -a "$NEW_SO" | grep -q "vr-metadata-projection"; then
     echo "FATAL: libmpv.so does not contain the vr-metadata-* properties" >&2
     exit 1
 fi
-echo "libmpv.so contains VR options + metadata properties ✓"
+# the ffmpeg smb:// protocol (patches/ffmpeg/libsmb2.patch) must be compiled in
+if ! strings -a "$NEW_SO" | grep -q "Malformed smb:// url"; then
+    echo "FATAL: libmpv.so does not contain the libsmb2 smb:// protocol" >&2
+    exit 1
+fi
+# libsmb2 must be linked STATICALLY (the jar ships no extra .so files)
+if readelf -d "$NEW_SO" | grep NEEDED | grep -qi "smb2"; then
+    echo "FATAL: libmpv.so has a dynamic dependency on libsmb2" >&2
+    exit 1
+fi
+echo "libmpv.so contains VR options + metadata properties + smb:// protocol ✓"
 
 # --------------------------------------------------
 # 2. jar assembly: upstream jar with our libmpv.so swapped in

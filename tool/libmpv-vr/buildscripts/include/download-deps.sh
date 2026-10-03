@@ -27,6 +27,10 @@ git config --global advice.detachedHead false
 # ffmpeg
 [ ! -d ffmpeg ] && git clone --depth 1 --branch n$v_ffmpeg https://github.com/FFmpeg/FFmpeg.git ffmpeg
 
+# libsmb2 (SMB2/3 client for ffmpeg's smb:// protocol - the same library
+# VLC's smb access module uses; see patches/ffmpeg/libsmb2.patch)
+[ ! -d libsmb2 ] && git clone --depth 1 --branch libsmb2-$v_libsmb2 https://github.com/sahlberg/libsmb2.git libsmb2
+
 # freetype2
 [ ! -d freetype ] && git clone --depth 1 --branch VER-$v_freetype https://gitlab.freedesktop.org/freetype/freetype.git freetype
 

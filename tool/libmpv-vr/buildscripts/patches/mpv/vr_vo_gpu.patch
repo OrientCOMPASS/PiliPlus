@@ -12,7 +12,7 @@ index fb10be5..04dfbc9 100644
      'video/out/vo.c',
      'video/out/vo_gpu.c',
 diff --git a/video/out/gpu/video.c b/video/out/gpu/video.c
-index c0a1be8..9e30455 100644
+index c0a1be8..71d7406 100644
 --- a/video/out/gpu/video.c
 +++ b/video/out/gpu/video.c
 @@ -39,6 +39,7 @@
@@ -126,19 +126,22 @@ index c0a1be8..9e30455 100644
                             (p->frames_drawn || !frame->still);
          if (interpolate) {
              double ratio = frame->ideal_frame_duration / frame->vsync_interval;
-@@ -3473,7 +3529,10 @@ void gl_video_render_frame(struct gl_video *p, struct vo_frame *frame,
+@@ -3473,7 +3529,14 @@ void gl_video_render_frame(struct gl_video *p, struct vo_frame *frame,
                  // texture to speed up subsequent re-draws (if any exist)
                  bool repeats = frame->num_vsyncs > 1 && frame->display_synced;
                  bool r = false;
--                if ((repeats || frame->still) && !p->dumb_mode &&
-+                // Under VR the output depends on the (continuously changing)
-+                // head pose, so caching a rendered frame for re-blit is not
-+                // possible - every redraw must re-render.
-+                if ((repeats || frame->still) && !p->dumb_mode && !p->opts.vr &&
++                // Under VR with head tracking the output changes every frame
++                // (device pose), so caching is impossible then. With manual
++                // look the rendered frame only changes when the view options
++                // change - and those invalidate output_tex_valid below - so
++                // repeats/still frames (paused, OSD-only updates, <display Hz
++                // content at speed 1.x) can use the cheap blit like non-VR.
+                 if ((repeats || frame->still) && !p->dumb_mode &&
++                    (!p->opts.vr || !p->opts.vr_head_tracking) &&
                      (p->ra->caps & RA_CAP_BLIT) && fbo->tex->params.blit_dst)
                  {
                      // Attempt to use the same format as the destination FBO
-@@ -3515,7 +3574,12 @@ done:
+@@ -3515,7 +3578,12 @@ done:
  
      debug_check_gl(p, "after video rendering");
  
@@ -152,7 +155,7 @@ index c0a1be8..9e30455 100644
          // If we haven't actually drawn anything so far, then we technically
          // need to consider this the start of a new pass. Let's call it a
          // redraw just because, since it's basically a blank frame anyway
-@@ -3847,6 +3911,14 @@ static bool check_dumb_mode(struct gl_video *p)
+@@ -3847,6 +3915,14 @@ static bool check_dumb_mode(struct gl_video *p)
      struct gl_video_opts *o = &p->opts;
      if (p->use_integer_conversion)
          return false;
@@ -167,7 +170,7 @@ index c0a1be8..9e30455 100644
      if (o->dumb_mode > 0) // requested by user
          return true;
      if (o->dumb_mode < 0) // disabled by user
-@@ -3953,6 +4025,14 @@ static void check_gl_features(struct gl_video *p)
+@@ -3953,6 +4029,14 @@ static void check_gl_features(struct gl_video *p)
      p->forced_dumb_mode = p->opts.dumb_mode > 0 || !have_fbo || !have_texrg;
      bool voluntarily_dumb = check_dumb_mode(p);
      if (p->forced_dumb_mode || voluntarily_dumb) {
@@ -182,7 +185,7 @@ index c0a1be8..9e30455 100644
          if (voluntarily_dumb) {
              MP_VERBOSE(p, "No advanced processing required. Enabling dumb mode.\n");
          } else if (p->opts.dumb_mode <= 0) {
-@@ -4084,6 +4164,7 @@ void gl_video_uninit(struct gl_video *p)
+@@ -4084,6 +4168,7 @@ void gl_video_uninit(struct gl_video *p)
  
      uninit_video(p);
      ra_hwdec_ctx_uninit(&p->hwdec_ctx);
@@ -190,7 +193,7 @@ index c0a1be8..9e30455 100644
      gl_sc_destroy(p->sc);
  
      ra_tex_free(p->ra, &p->lut_3d_texture);
-@@ -4120,6 +4201,13 @@ bool gl_video_showing_interpolated_frame(struct gl_video *p)
+@@ -4120,6 +4205,13 @@ bool gl_video_showing_interpolated_frame(struct gl_video *p)
      return p->is_interpolated;
  }
  
@@ -204,7 +207,7 @@ index c0a1be8..9e30455 100644
  static bool is_imgfmt_desc_supported(struct gl_video *p,
                                       const struct ra_imgfmt_desc *desc)
  {
-@@ -4181,9 +4269,11 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
+@@ -4181,9 +4273,11 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
      };
      // make sure this variable is initialized to *something*
      p->pass = p->pass_fresh;
@@ -216,7 +219,7 @@ index c0a1be8..9e30455 100644
      for (int n = 0; n < SCALER_COUNT; n++)
          p->scaler[n] = (struct scaler){.index = n};
      // our VAO always has the vec2 position as the first element
-@@ -4199,11 +4289,73 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
+@@ -4199,11 +4293,76 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
      return p;
  }
  
@@ -283,6 +286,9 @@ index c0a1be8..9e30455 100644
 +        // render chain each time.
 +        if (only_vr_view_opts_changed(&p->opts_cache_copy, new_opts)) {
 +            copy_vr_opts(&p->opts, new_opts);
++            // This path only runs when VR view fields changed (drag/zoom/
++            // gyro/reset/...): the cached output frame shows the old view.
++            p->output_tex_valid = false;
 +        } else {
 +            gl_lcms_update_options(p->cms);
 +            reinit_from_options(p);
@@ -341,10 +347,10 @@ index f8e05b1..ccb7a15 100644
                            struct mp_hwdec_devices *devs,
 diff --git a/video/out/gpu/vr.c b/video/out/gpu/vr.c
 new file mode 100644
-index 0000000..9c74c50
+index 0000000..6cc0b08
 --- /dev/null
 +++ b/video/out/gpu/vr.c
-@@ -0,0 +1,858 @@
+@@ -0,0 +1,959 @@
 +/*
 + * VR / panoramic video reprojection for vo=gpu (PiliPlus).
 + * See vr.h for the design notes and xl_player provenance.
@@ -427,6 +433,17 @@ index 0000000..9c74c50
 +    bool want_reset;
 +    bool has_ref;
 +    float ref_inv[16];
++
++    // VR_GYRO_CONT (PiliPlus round 14): gyro on/off must not jump the view.
++    //  - enabling: ref is sampled (once real sensor data arrives) such that
++    //    the head-tracked model *exactly* continues the current manual view;
++    //  - disabling: the last tracked model is decomposed into yaw/pitch and
++    //    folded into bias_yaw/bias_pitch, which are added to the manual
++    //    offsets (clamped as a whole, so 180 deg sources stay bounded).
++    // Both are cleared by vr-reset-view ("recenter").
++    float bias_yaw, bias_pitch;
++    float last_model[16];   // last model rendered while tracking
++    bool have_last_tracked;
 +
 +    // Stereo intermediate texture
 +    struct ra_tex *stereo_tex;
@@ -589,6 +606,41 @@ index 0000000..9c74c50
 +        }
 +    }
 +    memcpy(out, tmp, sizeof(tmp));
++}
++
++// out = transpose(in) for a rotation matrix (4x4, column-major, affine part
++// preserved as identity translation). The inverse of a rotation is its
++// transpose.
++static void vr_rot_transpose(const float *in, float *out)
++{
++    for (int r = 0; r < 4; r++) {
++        for (int c = 0; c < 4; c++) {
++            out[c * 4 + r] =
++                (r == 3 || c == 3) ? (r == c ? 1.0f : 0.0f) : in[r * 4 + c];
++        }
++    }
++}
++
++// Center direction of the sphere for a model matrix: the world-space point
++// that lands in the middle of the screen, i.e. d with M*d = (0,0,-1).
++// For rotations d = -row2(M) = -(m[2], m[6], m[10]).
++static void vr_center_dir(const float m[16], float d[3])
++{
++    d[0] = -m[2];
++    d[1] = -m[6];
++    d[2] = -m[10];
++}
++
++// Inverse of vr_center_dir for the manual model M = rotX(pitch)*rotY(yaw):
++//   d = (cos(p)*sin(y), -sin(p), -cos(p)*cos(y))
++// (verified numerically against the rotate helpers above; roll is lost,
++// which is exactly what folding a head pose into manual offsets should do).
++static void vr_angles_from_dir(const float d[3], float *yaw_deg,
++                               float *pitch_deg)
++{
++    float d1 = MPMIN(MPMAX(d[1], -1.0f), 1.0f);
++    *pitch_deg = -(float)(asin(d1) / VR_DEG2RAD);
++    *yaw_deg = (float)(atan2(d[0], -d[2]) / VR_DEG2RAD);
 +}
 +
 +// ---------------------------------------------------------------------------
@@ -992,10 +1044,15 @@ index 0000000..9c74c50
 +                             const struct gl_video_opts *opts, float aspect,
 +                             float *yaw_deg, float *pitch_deg)
 +{
-+    float yaw = opts->vr_yaw;
-+    float pitch = opts->vr_pitch;
++    // VR_GYRO_CONT: the folded bias is part of the effective manual angle in
++    // *both* modes (while tracking it is additionally baked into ref_inv at
++    // sampling time, keeping the view continuous across toggles).
++    float yaw = opts->vr_yaw + vr->bias_yaw;
++    float pitch = opts->vr_pitch + vr->bias_pitch;
 +
-+    if (!vr->tracker) {
++    // Bounds only apply to manual look-around (incl. "tracker created but
++    // no reference sampled yet"); gyro mode is deliberately unbounded.
++    if (!vr->tracker || !vr->has_ref) {
 +        if (opts->vr_projection == VR_PROJ_180) {
 +            float limit = MPMAX(0.0f, (180.0f - opts->vr_fov) * 0.5f);
 +            yaw = MPMIN(MPMAX(yaw, -limit), limit);
@@ -1026,38 +1083,64 @@ index 0000000..9c74c50
 +    if (opts->vr_reset_view != vr->last_reset_count) {
 +        vr->last_reset_count = opts->vr_reset_view;
 +        vr->want_reset = true;
++        // VR_GYRO_CONT: "recenter" also clears the folded gyro residual -
++        // the current pose/orientation becomes the new zero.
++        vr->bias_yaw = vr->bias_pitch = 0.0f;
 +    }
 +
++    // yaw_deg/pitch_deg come from vr_manual_angles(): in manual mode (and
++    // while the tracker warms up) they already include the folded bias and
++    // the coverage clamps; when tracking with a sampled reference they are
++    // the raw option angles (the bias is baked into ref_inv, see below).
 +    float yaw = yaw_deg * (float)VR_DEG2RAD;
 +    float pitch = pitch_deg * (float)VR_DEG2RAD;
 +
-+    if (vr->tracker) {
++    if (vr->tracker && vr_tracker_has_samples(vr->tracker)) {
 +        float head[16];
 +        vr_tracker_get_view(vr->tracker, head);
-+        if (vr->want_reset) {
-+            // sample current head pose as the new reference; the inverse of a
-+            // rotation matrix is its transpose
-+            for (int r = 0; r < 4; r++) {
-+                for (int c = 0; c < 4; c++) {
-+                    vr->ref_inv[c * 4 + r] =
-+                        (r == 3 || c == 3) ? (r == c ? 1.0f : 0.0f)
-+                                           : head[r * 4 + c];
-+                }
-+            }
++        if (vr->want_reset || !vr->has_ref) {
++            // VR_GYRO_CONT: pick ref_inv so the tracked model continues the
++            // manual model *exactly* at this instant. yaw/pitch here are the
++            // effective manual angles (opts + folded bias, see
++            // vr_manual_angles):
++            //   M_on = head * ref_inv * A,  A = rotY(yaw) * rotX(pitch)
++            //   want   M_on == B,           B = rotX(pitch) * rotY(yaw)
++            //   =>     ref_inv = head^-1 * B * A^-1
++            // For yaw=pitch=0 this reduces to ref_inv = head^-1 (the classic
++            // "current pose is the new forward" recenter).
++            float A[16], B[16], Ai[16], headi[16], tmp[16];
++            vr_identity(A);
++            vr_rotate_y(A, yaw);
++            vr_rotate_x(A, pitch);
++            vr_identity(B);
++            vr_rotate_x(B, pitch);
++            vr_rotate_y(B, yaw);
++            vr_rot_transpose(head, headi);
++            vr_rot_transpose(A, Ai);
++            vr_multiply(tmp, headi, B);
++            vr_multiply(vr->ref_inv, tmp, Ai);
 +            vr->has_ref = true;
 +            vr->want_reset = false;
 +        }
-+        memcpy(model, head, sizeof(float) * 16);
-+        if (vr->has_ref)
-+            vr_multiply(model, model, vr->ref_inv);
++        // model = head * ref_inv * rotY(yaw) * rotX(pitch)
++        float H[16];
++        vr_multiply(H, head, vr->ref_inv);
++        memcpy(model, H, sizeof(float) * 16);
 +        vr_rotate_y(model, yaw);
 +        vr_rotate_x(model, pitch);
++        // remember for the gyro-off fold (vr_sync_opts)
++        memcpy(vr->last_model, model, sizeof(float) * 16);
++        vr->have_last_tracked = true;
 +    } else {
-+        vr->has_ref = false;
-+        vr->want_reset = false;
++        // Manual mode (or tracker still warming up): rotX(pitch)*rotY(yaw),
++        // angles already include the folded bias and the clamps.
 +        vr_identity(model);
 +        vr_rotate_x(model, pitch);
 +        vr_rotate_y(model, yaw);
++        if (!vr->tracker) {
++            vr->has_ref = false;
++            vr->want_reset = false;
++        }
 +    }
 +}
 +
@@ -1101,14 +1184,38 @@ index 0000000..9c74c50
 +            vr->tracker_failed = true;
 +            MP_WARN(vr, "head tracking unavailable on this device\n");
 +        }
++        // VR_GYRO_CONT: sample the reference on the first frame that has
++        // real sensor data, so enabling gyro continues the current view
++        // instead of snapping to the raw device orientation (which also
++        // caused the "starts out facing backwards" complaint).
 +        vr->has_ref = false;
-+        vr->want_reset = false;
++        vr->want_reset = true;
++        vr->have_last_tracked = false;
 +    }
 +    if (!want_tracking && vr->tracker) {
++        // VR_GYRO_CONT: fold the last tracked orientation into the manual
++        // bias so disabling gyro does not jump the view. Roll is dropped
++        // (manual mode has no roll), the view center is preserved exactly.
++        if (vr->have_last_tracked) {
++            float d[3], Y, P;
++            vr_center_dir(vr->last_model, d);
++            vr_angles_from_dir(d, &Y, &P);
++            // new totals: opts + bias == Y/P exactly (the off-mode clamps
++            // may pull them back inside the coverage bounds afterwards)
++            vr->bias_yaw = Y - opts->vr_yaw;
++            vr->bias_pitch = P - opts->vr_pitch;
++            // keep the bias bounded; a full turn is the same orientation
++            vr->bias_yaw = fmodf(vr->bias_yaw + 180.0f, 360.0f);
++            if (vr->bias_yaw < 0.0f)
++                vr->bias_yaw += 360.0f;
++            vr->bias_yaw -= 180.0f;
++            vr->bias_pitch = MPMIN(MPMAX(vr->bias_pitch, -90.0f), 90.0f);
++        }
 +        vr_tracker_destroy(vr->tracker);
 +        vr->tracker = NULL;
 +        vr->has_ref = false;
 +        vr->want_reset = false;
++        vr->have_last_tracked = false;
 +    }
 +    if (!want_tracking)
 +        vr->tracker_failed = false;
@@ -1272,10 +1379,10 @@ index 0000000..525dac7
 +             const struct gl_video_opts *opts);
 diff --git a/video/out/gpu/vr_tracker.c b/video/out/gpu/vr_tracker.c
 new file mode 100644
-index 0000000..33f3359
+index 0000000..74b08fd
 --- /dev/null
 +++ b/video/out/gpu/vr_tracker.c
-@@ -0,0 +1,783 @@
+@@ -0,0 +1,799 @@
 +/*
 + * VR head tracker: Cardboard OrientationEKF + NDK sensor thread, ported to C
 + * from xl_player (see vr_tracker.h for provenance).
@@ -1881,6 +1988,7 @@ index 0000000..33f3359
 +    pthread_t tid;
 +    bool thread_started;
 +    atomic_bool run;
++    atomic_bool has_samples;    // first gyro event processed (pose usable)
 +    pthread_mutex_t lock;   // guards ekf + last_gyro_ts + looper
 +    struct vr_ekf ekf;
 +    struct timeval last_gyro_ts;
@@ -1955,6 +2063,10 @@ index 0000000..33f3359
 +                                               event.data[2] },
 +                                     (double)event.timestamp);
 +                    pthread_mutex_unlock(&t->lock);
++                    // VR_GYRO_CONT: the pose is only meaningful after the
++                    // first gyro sample; the reference is sampled then (not
++                    // at thread start, when the EKF is still at identity).
++                    atomic_store(&t->has_samples, true);
 +                }
 +            }
 +        }
@@ -1969,6 +2081,11 @@ index 0000000..33f3359
 +    return NULL;
 +}
 +
++bool vr_tracker_has_samples(struct vr_tracker *t)
++{
++    return t && atomic_load(&t->has_samples);
++}
++
 +struct vr_tracker *vr_tracker_create(struct mp_log *log)
 +{
 +    struct vr_tracker *t = talloc_zero(NULL, struct vr_tracker);
@@ -1976,6 +2093,7 @@ index 0000000..33f3359
 +    pthread_mutex_init(&t->lock, NULL);
 +    ekf_reset(&t->ekf);
 +    atomic_store(&t->run, true);
++    atomic_store(&t->has_samples, false);
 +    if (pthread_create(&t->tid, NULL, vr_tracker_thread, t) != 0) {
 +        atomic_store(&t->run, false);
 +        pthread_mutex_destroy(&t->lock);
@@ -2038,6 +2156,11 @@ index 0000000..33f3359
 +    struct vr_ekf ekf;
 +};
 +
++bool vr_tracker_has_samples(struct vr_tracker *t)
++{
++    return false;
++}
++
 +struct vr_tracker *vr_tracker_create(struct mp_log *log)
 +{
 +    mp_msg(log, MSGL_V, "VR head tracking is only available on Android\n");
@@ -2061,10 +2184,10 @@ index 0000000..33f3359
 +#endif
 diff --git a/video/out/gpu/vr_tracker.h b/video/out/gpu/vr_tracker.h
 new file mode 100644
-index 0000000..93685e9
+index 0000000..9e23fe4
 --- /dev/null
 +++ b/video/out/gpu/vr_tracker.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,50 @@
 +/*
 + * VR head tracker for vo=gpu.
 + *
@@ -2089,6 +2212,8 @@ index 0000000..93685e9
 +
 +#pragma once
 +
++#include <stdbool.h>
++
 +struct mp_log;
 +
 +struct vr_tracker;
@@ -2097,6 +2222,10 @@ index 0000000..93685e9
 +// tracking is unavailable on this platform or the sensors could not be
 +// opened. Thread-safe against vr_tracker_get_view() from the render thread.
 +struct vr_tracker *vr_tracker_create(struct mp_log *log);
++
++// True once the first gyroscope sample has been processed - before that the
++// predicted pose is meaningless (EKF still at its initial state).
++bool vr_tracker_has_samples(struct vr_tracker *t);
 +
 +// Stop the sensor thread and free everything. Safe to call with NULL/*NULL.
 +void vr_tracker_destroy(struct vr_tracker *t);

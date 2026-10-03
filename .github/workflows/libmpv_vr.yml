@@ -73,6 +73,7 @@ jobs:
                         'tool/libmpv-vr/buildscripts/scripts/harfbuzz.sh',
                         'tool/libmpv-vr/buildscripts/scripts/libass.sh',
                         'tool/libmpv-vr/buildscripts/scripts/libplacebo.sh',
+                        'tool/libmpv-vr/buildscripts/scripts/libsmb2.sh',
                         'tool/libmpv-vr/buildscripts/scripts/libwebp.sh',
                         'tool/libmpv-vr/buildscripts/scripts/mbedtls.sh'
                       ) }}

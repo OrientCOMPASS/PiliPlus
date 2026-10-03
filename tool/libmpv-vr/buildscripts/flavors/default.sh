@@ -71,6 +71,7 @@ cpuflags=
 	--enable-mbedtls \
 	\
 	--enable-libdav1d \
+	--enable-libsmb2 \
 	\
 	--enable-avutil \
 	--enable-avcodec \

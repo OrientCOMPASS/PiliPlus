@@ -12,7 +12,7 @@ index fb10be5..04dfbc9 100644
      'video/out/vo.c',
      'video/out/vo_gpu.c',
 diff --git a/video/out/gpu/video.c b/video/out/gpu/video.c
-index c0a1be8..71d7406 100644
+index c0a1be8..139d90d 100644
 --- a/video/out/gpu/video.c
 +++ b/video/out/gpu/video.c
 @@ -39,6 +39,7 @@
@@ -207,7 +207,17 @@ index c0a1be8..71d7406 100644
  static bool is_imgfmt_desc_supported(struct gl_video *p,
                                       const struct ra_imgfmt_desc *desc)
  {
-@@ -4181,9 +4273,11 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
+@@ -4154,6 +4246,9 @@ void gl_video_config(struct gl_video *p, struct mp_image_params *params)
+         p->image_params = *params;
+         if (params->imgfmt)
+             init_video(p);
++        // VR_GYRO_CONT: a different video stream restarts the manual zero
++        // point (the client re-zeroes its view offsets per file).
++        vr_new_stream(p->vr);
+     }
+ 
+     gl_video_reset_surfaces(p);
+@@ -4181,9 +4276,11 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
      };
      // make sure this variable is initialized to *something*
      p->pass = p->pass_fresh;
@@ -219,7 +229,7 @@ index c0a1be8..71d7406 100644
      for (int n = 0; n < SCALER_COUNT; n++)
          p->scaler[n] = (struct scaler){.index = n};
      // our VAO always has the vec2 position as the first element
-@@ -4199,11 +4293,76 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
+@@ -4199,11 +4296,76 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
      return p;
  }
  
@@ -347,10 +357,10 @@ index f8e05b1..ccb7a15 100644
                            struct mp_hwdec_devices *devs,
 diff --git a/video/out/gpu/vr.c b/video/out/gpu/vr.c
 new file mode 100644
-index 0000000..6cc0b08
+index 0000000..544ab5b
 --- /dev/null
 +++ b/video/out/gpu/vr.c
-@@ -0,0 +1,959 @@
+@@ -0,0 +1,981 @@
 +/*
 + * VR / panoramic video reprojection for vo=gpu (PiliPlus).
 + * See vr.h for the design notes and xl_player provenance.
@@ -444,6 +454,7 @@ index 0000000..6cc0b08
 +    float bias_yaw, bias_pitch;
 +    float last_model[16];   // last model rendered while tracking
 +    bool have_last_tracked;
++    bool was_vr;            // previous opts->vr (rising-edge detection)
 +
 +    // Stereo intermediate texture
 +    struct ra_tex *stereo_tex;
@@ -1172,10 +1183,31 @@ index 0000000..6cc0b08
 +        *vr_ptr = NULL;
 +}
 +
++void vr_new_stream(struct vr_ctx *vr)
++{
++    if (!vr)
++        return;
++    // VR_GYRO_CONT: the folded bias belongs to one stream's manual zero
++    // point; the client re-zeroes its view offsets for every new file, so
++    // the bias must not survive playlist advances. The head reference does
++    // survive on purpose - gyro viewing continues smoothly across items.
++    vr->bias_yaw = vr->bias_pitch = 0.0f;
++    vr->have_last_tracked = false;
++}
++
 +void vr_sync_opts(struct vr_ctx *vr, const struct gl_video_opts *opts)
 +{
 +    if (!vr)
 +        return;
++
++    if (opts->vr && !vr->was_vr) {
++        // VR_GYRO_CONT: a fresh VR session restarts the manual zero point -
++        // the client resets its view offsets whenever VR is (re-)enabled, so
++        // a folded bias from the previous session must not leak over.
++        vr->bias_yaw = vr->bias_pitch = 0.0f;
++        vr->have_last_tracked = false;
++    }
++    vr->was_vr = opts->vr;
 +
 +    bool want_tracking = opts->vr && opts->vr_head_tracking;
 +    if (want_tracking && !vr->tracker && !vr->tracker_failed) {
@@ -1312,10 +1344,10 @@ index 0000000..6cc0b08
 +}
 diff --git a/video/out/gpu/vr.h b/video/out/gpu/vr.h
 new file mode 100644
-index 0000000..525dac7
+index 0000000..c631807
 --- /dev/null
 +++ b/video/out/gpu/vr.h
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,65 @@
 +/*
 + * VR / panoramic video reprojection for vo=gpu (PiliPlus).
 + *
@@ -1369,6 +1401,10 @@ index 0000000..525dac7
 +// start/stop the head tracker. Cheap; call whenever options were updated
 +// (before the next vr_draw).
 +void vr_sync_opts(struct vr_ctx *vr, const struct gl_video_opts *opts);
++
++// New video stream (playlist advance / reconfig): drop per-stream manual
++// residue (folded gyro bias). See VR_GYRO_CONT in vr.c.
++void vr_new_stream(struct vr_ctx *vr);
 +
 +// Render the VR view. flat_tex is the fully composited flat frame (the
 +// equirectangular map), target is the destination framebuffer. Uses the

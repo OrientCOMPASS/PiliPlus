@@ -233,6 +233,7 @@ cpuflags=
 	--enable-protocol=http \
 	--enable-protocol=httpproxy \
 	--enable-protocol=https \
+	--enable-protocol=libsmb2 \
 	--enable-protocol=pipe \
 	--enable-protocol=rtmp \
 	--enable-protocol=rtmps \

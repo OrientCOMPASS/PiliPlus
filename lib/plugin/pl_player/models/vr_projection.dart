@@ -229,7 +229,11 @@ class VrViewState {
   /// 默认水平视场角: 手机竖屏/平板横屏下接近人眼舒适范围
   static const double kVrDefaultFov = 90.0;
   static const double minFov = 25.0;
-  static const double maxFov = 120.0;
+
+  /// 第十六轮: 上限对齐 native `vr-fov` 值域(10~180)。注意 fov>~160 时
+  /// native 的背面剔除(w<=0 整三角形丢弃)在视锥边缘可能出现小块空洞
+  /// (极端放大的已知边界, 见 tool/libmpv-vr/README.md), 常规视场不受影响。
+  static const double maxFov = 180.0;
 
   /// 陀螺仪模式下手动俯仰分量的上限(需求允许放宽收敛)
   static const double maxPitch = 89.0;
@@ -259,38 +263,26 @@ class VrViewState {
   static double pitchLimit(double fov, double? aspect) =>
       math.max(0.0, 90.0 - verticalFov(fov, aspect) / 2);
 
-  /// 夹取视角。
+  /// 夹取视角(VR_FREE_LOOK, 第十六轮)。
   ///
-  /// 手动模式([gyro] 为 false)下按需求第 3 条收敛, 转出画面见黑不可接受:
-  ///   * 360° 片源: 偏航回绕, 俯仰在极点收敛(±(90 - 垂直视场/2));
-  ///   * 180° 片源: 偏航另在覆盖边界收敛(±(180 - 水平视场)/2)。
-  /// 陀螺仪模式([gyro] 为 true)下画面朝向以头姿为主、手动分量是叠加偏移,
-  /// 按需求放宽: 偏航只回绕不夹取, 俯仰放宽到 ±[maxPitch]
-  /// (native 侧头追开启时同样不做夹取, 见 vr.c `vr_manual_angles`)。
-  ///
-  /// [aspect] 是渲染视口的宽高比, 由 VrControlLayer 上报; 缺省按 1.0 收敛。
+  /// 需求方明确**放开拖拽角度限制**: 180° 片源的覆盖边界收敛与俯仰
+  /// "视口不越过极点"收敛全部移除——转出覆盖范围看到黑边已被接受
+  /// (推翻 REQUIREMENTS.md 第 3 条的收敛要求, 由需求方本轮拍板)。
+  /// 只保留数学上必要的界限, 与 native `vr_manual_angles` 完全一致:
+  ///   * 偏航回绕到 [-180, 180)(避免数值无限增长);
+  ///   * 俯仰 ±[maxPitch](等距柱状的极点是硬奇异, 也是选项值域);
+  ///   * fov 夹到 [minFov, maxFov]。
+  /// 手动与陀螺仪模式规则相同([gyro]/[projection]/[aspect] 保留签名兼容,
+  /// 不再参与夹取)。
   VrViewState clamped(
     VrProjection projection, {
     double? aspect,
     bool gyro = false,
   }) {
-    final fov = this.fov.clamp(minFov, maxFov);
-    if (gyro) {
-      return VrViewState(
-        yaw: _wrap180(yaw),
-        pitch: pitch.clamp(-maxPitch, maxPitch),
-        fov: fov,
-      );
-    }
-    final range = projection.yawRange(fov);
-    final limit = pitchLimit(fov, aspect);
     return VrViewState(
-      // 360° 片源: 偏航角回绕, 避免数值无限增长
-      yaw: projection.coverageH >= 360.0
-          ? _wrap180(yaw)
-          : yaw.clamp(range.min, range.max),
-      pitch: pitch.clamp(-limit, limit),
-      fov: fov,
+      yaw: _wrap180(yaw),
+      pitch: pitch.clamp(-maxPitch, maxPitch),
+      fov: fov.clamp(minFov, maxFov),
     );
   }
 

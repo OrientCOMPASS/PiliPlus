@@ -57,7 +57,7 @@ void main() {
       expect(VrProjection.equirect360.enabled, isTrue);
     });
 
-    test('180 片源的偏航角要收敛, 避免转出画面出现黑边', () {
+    test('(参考)180 片源覆盖偏航范围计算 —— 自由视角后不再用于夹取', () {
       expect(VrProjection.equirect180.yawRange(90), (min: -45.0, max: 45.0));
       expect(VrProjection.tb180.yawRange(60), (min: -60.0, max: 60.0));
       expect(VrProjection.equirect360.yawRange(90), (min: -180.0, max: 180.0));
@@ -127,74 +127,88 @@ void main() {
   });
 
   group('VrViewState', () {
-    test('360 片源偏航角回绕, 180 片源夹紧', () {
+    test('偏航角只回绕: 180° 片源不再按覆盖边界收敛(VR_FREE_LOOK)', () {
       final wrapped = const VrViewState(yaw: 190).clamped(
         VrProjection.equirect360,
       );
       expect(wrapped.yaw, closeTo(-170, 1e-9));
 
-      final clamped = const VrViewState(yaw: 190).clamped(
+      // 第十六轮: 需求方明确放开拖拽角度限制 —— 180° 片源同样只回绕
+      // (转出覆盖范围看到黑边已被接受)
+      final free = const VrViewState(yaw: 190).clamped(
         VrProjection.equirect180,
       );
-      // fov 默认 90 -> 上限 (180-90)/2 = 45
-      expect(clamped.yaw, 45.0);
+      expect(free.yaw, closeTo(-170, 1e-9));
+      expect(
+        const VrViewState(yaw: 80).clamped(VrProjection.equirect180).yaw,
+        80.0,
+      );
     });
 
-    test('俯仰角在极点收敛: 视口垂直方向不能转出等距柱状图', () {
-      // 横屏视口(aspect 2.0), fov 90 -> vfov = 2*atan(tan45°/2) ≈ 53.1
-      // -> 俯仰上限 ≈ 63.4
+    test('俯仰不再按视口极点收敛, 只留 ±maxPitch(VR_FREE_LOOK)', () {
       final landscape = const VrViewState(pitch: 89).clamped(
         VrProjection.equirect360,
         aspect: 2.0,
       );
-      final limit = VrViewState.pitchLimit(90, 2.0);
-      expect(landscape.pitch, closeTo(limit, 1e-9));
-      expect(landscape.pitch, closeTo(63.4, 0.1));
-      expect(landscape.pitch, lessThan(VrViewState.maxPitch));
-      // 与 mpv vr_fovy_from_hfov 同一公式: vfov = 2*atan(tan(h/2)/aspect)
+      expect(landscape.pitch, 89.0);
+      final over = const VrViewState(pitch: 120).clamped(
+        VrProjection.equirect360,
+      );
+      expect(over.pitch, VrViewState.maxPitch);
+      // verticalFov/pitchLimit 公式保留(与 mpv vr_fovy_from_hfov 同一公式,
+      // 供 HUD/文档参考): vfov = 2*atan(tan(h/2)/aspect)
       expect(VrViewState.verticalFov(90, 2.0), closeTo(53.1, 0.1));
-      // aspect 1.0 时垂直视场 == 水平视场
       expect(VrViewState.verticalFov(90, 1.0), closeTo(90, 1e-9));
+      expect(VrViewState.pitchLimit(90, 2.0), closeTo(63.4, 0.1));
     });
 
-    test('俯仰角与视场角夹紧(aspect 未知时按 1.0 保守收敛)', () {
-      final s = const VrViewState(pitch: 120, fov: 999).clamped(
-        VrProjection.equirect360,
+    test('fov 夹到 [minFov, maxFov=180](第十六轮上限对齐 native)', () {
+      expect(VrViewState.maxFov, 180.0);
+      expect(
+        const VrViewState(fov: 999).clamped(VrProjection.equirect360).fov,
+        VrViewState.maxFov,
       );
-      // fov 999 -> maxFov 120; aspect null -> vfov 120 -> 俯仰上限 30
-      expect(s.fov, VrViewState.maxFov);
-      expect(s.pitch, closeTo(VrViewState.pitchLimit(120, null), 1e-9));
-      expect(s.pitch, closeTo(30.0, 1e-9));
+      expect(
+        const VrViewState(fov: 1).clamped(VrProjection.equirect360).fov,
+        VrViewState.minFov,
+      );
+      // 150~180 区间现在可达(native vr-fov 值域同步放宽)
+      expect(
+        const VrViewState(fov: 170).clamped(VrProjection.equirect360).fov,
+        170.0,
+      );
     });
 
-    test('陀螺仪模式放宽收敛(需求第 3 条)', () {
-      // 180° 片源手动模式偏航上限 45(fov 90), 陀螺仪模式只回绕不夹取
-      final manual = const VrViewState(yaw: 80).clamped(
+    test('手动与陀螺仪模式夹取规则一致(VR_FREE_LOOK)', () {
+      final manual = const VrViewState(yaw: 80, pitch: 88).clamped(
         VrProjection.equirect180,
         aspect: 2.0,
       );
-      expect(manual.yaw, 45.0);
-      final gyro = const VrViewState(yaw: 80).clamped(
+      final gyro = const VrViewState(yaw: 80, pitch: 88).clamped(
         VrProjection.equirect180,
         aspect: 2.0,
         gyro: true,
       );
-      expect(gyro.yaw, 80.0);
-      // 俯仰放宽到 ±maxPitch
-      final gyroPitch = const VrViewState(pitch: 88).clamped(
-        VrProjection.equirect360,
-        aspect: 2.0,
-        gyro: true,
-      );
-      expect(gyroPitch.pitch, 88.0);
+      expect(manual.yaw, gyro.yaw);
+      expect(manual.pitch, gyro.pitch);
+      expect(manual.pitch, 88.0);
     });
 
-    test('fov 变化后 180 片源的偏航上限随之收敛', () {
-      // fov 120 -> 上限 (180-120)/2 = 30, 之前的 45 也要被拉回
-      final s = const VrViewState(yaw: 45, fov: 120).clamped(
-        VrProjection.equirect180,
+    test('fov 变化不影响偏航限制(自由视角)', () {
+      expect(
+        const VrViewState(
+          yaw: 45,
+          fov: 120,
+        ).clamped(VrProjection.equirect180).yaw,
+        45.0,
       );
-      expect(s.yaw, 30.0);
+      expect(
+        const VrViewState(
+          yaw: 45,
+          fov: 170,
+        ).clamped(VrProjection.equirect180).yaw,
+        45.0,
+      );
     });
 
     test('copyWith 保持其余分量', () {

@@ -104,6 +104,20 @@
                 <!--<data android:host="bangumi.bilibili.com"/>-->
                 <!--<data android:host="space.bilibili.com"/>-->
             </intent-filter>
+            <!-- 第十六轮: 注册为系统视频播放器 —— 其它应用的「用其他应用
+                 打开/分享」进来的 content:// 与 file:// 视频, 经
+                 ContentResolver 导出 fd 后以 fd://N 交给定制 libmpv 播放
+                 (ffmpeg --enable-protocol=fd; 见 PiliScheme._openSharedMedia) -->
+            <intent-filter android:label="PiliPlus 播放">
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="video/*" />
+            </intent-filter>
             <intent-filter android:label="PiliPlus">
                 <action android:name="android.intent.action.VIEW" />
                 <action android:name="android.intent.action.SEARCH" />

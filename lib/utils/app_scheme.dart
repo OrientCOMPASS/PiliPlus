@@ -1,6 +1,7 @@
 // ignore_for_file: constant_identifier_names
 
 import 'dart:async' show StreamSubscription;
+import 'dart:io' show Platform;
 
 import 'package:PiliPlus/common/widgets/scaffold/simple_scaffold.dart';
 import 'package:PiliPlus/common/widgets/view_safe_area.dart';
@@ -9,6 +10,8 @@ import 'package:PiliPlus/grpc/bilibili/app/listener/v1.pbenum.dart'
 import 'package:PiliPlus/http/search.dart';
 import 'package:PiliPlus/models/common/fav_type.dart';
 import 'package:PiliPlus/models/common/video/source_type.dart';
+import 'package:PiliPlus/models/local_media/local_media_item.dart';
+import 'package:PiliPlus/models/local_media/local_media_source.dart';
 import 'package:PiliPlus/pages/audio/view.dart';
 import 'package:PiliPlus/pages/dynamics/widgets/vote.dart';
 import 'package:PiliPlus/pages/fan/view.dart';
@@ -27,6 +30,7 @@ import 'package:PiliPlus/utils/url_utils.dart';
 import 'package:PiliPlus/utils/utils.dart';
 import 'package:app_links/app_links.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show MethodChannel;
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
 import 'package:material_ui/material_ui.dart';
@@ -65,6 +69,80 @@ abstract final class PiliScheme {
       }
     }
     return null;
+  }
+
+  static const MethodChannel _sharedMediaChannel = MethodChannel(
+    'piliplus/local_media',
+  );
+
+  /// 打开系统分享/「用其他应用打开」的视频。
+  ///
+  /// content:// 无法被 mpv 直接读取: Kotlin 侧(MainActivity)经
+  /// ContentResolver 导出文件描述符, 以 `fd://N` 交给定制 libmpv 的
+  /// ffmpeg fd 协议; 播放页退出(await 返回)后关闭 fd。走与「本地」板块
+  /// 完全相同的播放页链路(本地媒体模式: 无 B 站接口/弹幕/上报)。
+  static Future<bool> _openSharedMedia(Uri uri) async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+    int? fd;
+    try {
+      final res = await _sharedMediaChannel.invokeMethod<Map<dynamic, dynamic>?>(
+        'resolveContentMedia',
+        {'uri': uri.toString()},
+      );
+      if (res == null) {
+        return false;
+      }
+      final name =
+          res['name'] is String && (res['name'] as String).isNotEmpty
+          ? res['name'] as String
+          : '分享的视频';
+      final String playUrl;
+      if (res['fd'] is int) {
+        fd = res['fd'] as int;
+        playUrl = 'fd://$fd';
+      } else if (res['path'] is String && (res['path'] as String).isNotEmpty) {
+        playUrl = res['path'] as String;
+      } else {
+        return false;
+      }
+      final item = LocalMediaItem(
+        name: name,
+        uri: playUrl,
+        source: const LocalMediaSource(
+          type: LocalMediaSourceType.device,
+          name: '系统分享',
+          url: '',
+        ),
+      );
+      try {
+        await PageUtils.toVideoPage(
+          aid: 0,
+          bvid: '',
+          cid: item.cid,
+          title: name,
+          extraArguments: {
+            'sourceType': SourceType.localMedia,
+            'localMedia': item,
+            'localPlaylist': [item],
+            'localIndex': 0,
+            'localPlayUrl': playUrl,
+          },
+        );
+      } finally {
+        // 播放页退出即释放 fd(Kotlin 侧另有数量兜底)
+        if (fd != null) {
+          try {
+            await _sharedMediaChannel.invokeMethod('closeFd', {'fd': fd});
+          } catch (_) {}
+        }
+      }
+      return true;
+    } catch (err) {
+      SmartDialog.showToast('无法打开分享的视频: $err');
+      return false;
+    }
   }
 
   static Future<bool> routePushFromUrl(
@@ -427,6 +505,11 @@ abstract final class PiliScheme {
           off: off,
           parameters: parameters,
         );
+      // 系统「用其他应用打开/分享」进来的视频文件(第十六轮: 注册为系统
+      // 视频播放器): content:// 经 ContentResolver 导出 fd 后以 fd://N
+      // 交给定制 libmpv(fd 协议)播放, file:// 直接按路径播。
+      case 'content' || 'file':
+        return _openSharedMedia(uri);
       default:
         final aid = IdUtils.avRegexExact.matchAsPrefix(path)?.group(1);
         final bvid = IdUtils.bvRegexExact.matchAsPrefix(path)?.group(0);

@@ -1992,3 +1992,56 @@ native 侧 vr.c 每帧把**有效视角中心**（头姿×折叠偏置×手动�
 - 出包自检新增：`SMB2_BLANK_PW`、`vr_parse_view_string`、
   `VOCTRL_VR_VIEW_ANGLES` 源码 grep + `vr-view-yaw` strings + libsmb2
   静态链接 readelf 检查。
+
+## 21. 第十六轮：自由视角 + fov 180 + 注册为系统视频播放器
+
+> 需求方本轮拍板（原生部分见提交 `f7202a9`，应用侧本节）：
+> ① **放开 VR 拖拽角度限制**——180° 片源转出覆盖范围看到黑边**已明确接受**
+> （推翻 REQUIREMENTS.md 第 3 条的"手动偏航在覆盖边界收敛"，由需求方变更）；
+> ② 视场角上限放宽到 180°；③ 应用**注册为系统视频播放器**：其它应用
+> "用其他应用打开/分享"的视频直接进本应用播放。
+
+### 21.1 VR_FREE_LOOK：手动视角彻底放开（native `f7202a9` + Dart 对齐）
+
+- native `vr_manual_angles`：移除 180° 覆盖边界夹取与"视口不越过极点"的
+  俯仰夹取；只保留数学上必要的界限——偏航回绕 [-180,180)、俯仰 ±90°
+  （等距柱状极点是硬奇异，也是 `vr-pitch` 选项值域）。
+- Dart `VrViewState.clamped()` 同步放开：手动与陀螺仪模式规则一致
+  （此前手动模式按需求第 3 条收敛）。`verticalFov`/`pitchLimit` 公式保留
+  （与 mpv 同公式，供参考），`yawRange` 保留为覆盖范围计算参考。
+- 单测同步改写：180° 片源偏航只回绕不夹紧、俯仰 ±maxPitch、手动/陀螺仪
+  规则一致、fov 可达 (150,180] 区间。
+
+### 21.2 fov 上限 120 → 180
+
+- native `vr-fov` 值域与 `vr-view` 解析上限放宽到 180（`vr_fovy_from_hfov`
+  原有垂直 fov ≤179° 保护避免 tan(90°) 退化）；
+- Dart `VrViewState.maxFov` 120 → 180：双指缩放与设置页滑杆自动跟随。
+- 已知边界（README 已记录）：fov > ~160 时 native 的背面剔除
+  （w<=0 整三角形丢弃）在视锥边缘可能出现小块空洞，属极端放大场景，
+  常规视场不受影响。
+
+### 21.3 注册为系统视频播放器（fd:// 链路）
+
+安卓端打包的 ffmpeg 本轮补了 `--enable-protocol=fd`（`f7202a9`）。链路：
+
+```
+其它应用 VIEW(content://…, video/*) → MainActivity intent-filter(app_links 转发)
+  → PiliScheme.routePush case 'content'|'file'
+  → MethodChannel resolveContentMedia: Kotlin 查 DISPLAY_NAME +
+    ContentResolver.openFileDescriptor 导出 fd（挂起超过 4 个自动关最旧的）
+  → 组装 LocalMediaItem(uri='fd://N') → PageUtils.toVideoPage(本地媒体链路:
+    无 B 站接口/弹幕/上报; VR 文件名自动识别照常可用)
+  → mpv 经 fd 协议读取（seekable fd 支持定位; 缓存/字幕/倍速全部照常）
+  → 播放页退出(await 返回) → closeFd 释放; fd:// 不写续播记录(地址每会话不同)
+```
+
+file:// 直接按路径播（无需 fd）。桌面平台该入口自动短路（返回 false）。
+
+### 21.4 本轮验证
+
+- native：`f7202a9` 补丁 pristine 重放 + CI 出包（滚动 jar 已更新，
+  libmpv run 37115511821 全绿）；
+- Dart：`dart format` 解析通过；vr_test 自由视角断言全量改写；Kotlin 走
+  CI 编译把关；
+- APK：出包后解包比对 libmpv.so 与滚动 jar 一致（交付说明附校验和）。

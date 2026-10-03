@@ -392,6 +392,10 @@ class VideoDetailController extends GetxController
 
   void _saveLocalProgress(Duration position) {
     final total = plPlayerController.durationInMilliseconds;
+    // fd:// (系统分享打开)的地址每次会话都不同, 续播记录没有意义
+    if (localItem.uri.startsWith('fd://')) {
+      return;
+    }
     LocalMediaProgress.put(
       localItem.uri,
       position,

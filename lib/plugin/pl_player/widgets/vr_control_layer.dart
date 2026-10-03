@@ -92,8 +92,9 @@ class _VrControlLayerState extends State<VrControlLayer> {
 
   void _onScaleEnd(ScaleEndDetails details) {
     // 手势结束强制落一次, 保证最终视角与手指位置一致
-    _c.applyVrView(force: true);
-    _c.hideTaskControls();
+    _c
+      ..applyVrView(force: true)
+      ..hideTaskControls();
   }
 
   @override

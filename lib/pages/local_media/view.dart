@@ -120,8 +120,9 @@ class _LocalMediaPageState extends State<LocalMediaPage>
         // ---------- 快捷方式(仅用户收藏) ----------
         final favorites = _controller.favoriteSources;
         if (favorites.isNotEmpty) {
-          children.add(const Divider(height: 24));
-          children.add(_sectionHeader(context, '快捷方式'));
+          children
+            ..add(const Divider(height: 24))
+            ..add(_sectionHeader(context, '快捷方式'));
           for (final source in favorites) {
             children.add(_buildSource(context, source));
           }

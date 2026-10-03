@@ -244,14 +244,17 @@ jobs:
                     fi
                   fi
                   rm -f "$probe"
-                  cat > android/key.properties <<EOF
-                  storeFile=$ks
-                  storePassword=$sp
-                  keyAlias=$al
-                  keyPassword=$keypass
-                  EOF
-                  chmod 600 android/key.properties
-                  echo "::notice::release 签名已配置并通过私钥解密验证(alias=$al)"
+                  # 经 $GITHUB_ENV 直传 Gradle(build.gradle.kts 环境变量优先):
+                  # 不写 key.properties —— Java Properties 的转义规则会改写
+                  # 含反斜杠等特殊字符的密码, 上一轮 "Get Key failed: Given
+                  # final block not properly padded" 即此坑。
+                  {
+                    echo "PILI_KEYSTORE_FILE=$ks"
+                    echo "PILI_KEYSTORE_PASSWORD=$sp"
+                    echo "PILI_KEY_ALIAS=$al"
+                    echo "PILI_KEY_PASSWORD=$keypass"
+                  } >> "$GITHUB_ENV"
+                  echo "::notice::release 签名已配置并通过私钥解密验证(alias=$al, 环境变量直传)"
 
             - name: Build Release Apk
               if: ${{ matrix.mode == 'release' }}

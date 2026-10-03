@@ -43,12 +43,21 @@ android {
             it.load(properties.inputStream())
     }
 
-    val config = keyProperties.getProperty("storeFile")?.let {
+    // 签名参数优先读环境变量(CI 直传, 原样字节), 其次 key.properties
+    // (本地开发)。不经过 Properties 文件转义 —— 密码含 \ 等字符时
+    // key.properties 会被 Java Properties 解析改变, 导致
+    // "Given final block not properly padded"(第十七轮 CI 实录)。
+    val storeFilePath = System.getenv("PILI_KEYSTORE_FILE")
+        ?: keyProperties.getProperty("storeFile")
+    val config = storeFilePath?.let {
         signingConfigs.create("release") {
             storeFile = file(it)
-            storePassword = keyProperties.getProperty("storePassword")
-            keyAlias = keyProperties.getProperty("keyAlias")
-            keyPassword = keyProperties.getProperty("keyPassword")
+            storePassword = System.getenv("PILI_KEYSTORE_PASSWORD")
+                ?: keyProperties.getProperty("storePassword")
+            keyAlias = System.getenv("PILI_KEY_ALIAS")
+                ?: keyProperties.getProperty("keyAlias")
+            keyPassword = System.getenv("PILI_KEY_PASSWORD")
+                ?: keyProperties.getProperty("keyPassword")
             enableV1Signing = true
             enableV2Signing = true
         }

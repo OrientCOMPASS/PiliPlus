@@ -1896,3 +1896,99 @@ xl 立体模式的一半着色量；我们的立体分屏模式与 xl 等价（�
 - CI：libmpv 全量重建出包（bundle 自检新增 smb 协议 strings + 静态链接
   readelf 检查）→ app analyze/test/release；APK 内 libmpv.so 与滚动 jar
   逐字节比对（交付说明附校验和）。
+
+## 20. 第十五轮：真机反馈四则（分屏闪退 / 媒体库仍缺文件 / SMB 直连认证失败 / VR 手势）
+
+> 第十四轮包（`c159a62`，Lenovo TB-J706F，Android 12）实测反馈：
+> ① VR 面板"立体分屏输出"开关一切换就闪退，且持久化后再进 VR 视频仍闪退；
+> ② 媒体库列表仍缺文件，要求对齐 VLC 的做法；③ SMB 能浏览但直连播放报
+> `Session setup failed with (0xc000000d) STATUS_INVALID_PARAMETER`；
+> ④ VR 手势上下与手指同向、左右与手指反向（两轴不一致），拖动明显卡顿而
+> 陀螺仪流畅，且陀螺仪转动不影响 HUD 读数。
+
+### 20.1 「立体分屏输出」闪退 → 按范围外条款移除
+
+闪退按钮是**立体分屏输出**（Cardboard 头显的左右眼分屏 + 镜头畸变）。
+`REQUIREMENTS.md` 第 9 条明确把它列为**范围外**（第十二轮时按"删除属额外
+风险"保留了下来）；本轮它在真机的 native 渲染路径（双眼两次球面绘制 +
+畸变网格 pass）上触发闪退，且开关持久化导致之后每次 VR 播放都复现。
+处理：**从应用侧整体移除**（VR 面板按钮、顶栏菜单开关、设置项、属性下发
+`vr-stereo-output` 全部删除；libmpv 侧选项保留但永远不再下发，默认 no，
+闪退路径不可达）。已持久化过 `vrStereoOutput=true` 的装机不受影响（该值
+不再被读取）。如日后需要 Cardboard 输出，在真机日志定位闪退点后按需求
+恢复即可。
+
+### 20.2 媒体库仍缺文件 → 对齐 VLC：系统媒体索引 + 自有遍历双源并集
+
+仔细对照 VLC 安卓端的做法：VLC 的媒体库不是"按扩展名过滤的目录遍历"，
+而是**扫描存储卷 + 按内容识别媒体**（libvlc 解析器探测），Android 上的
+系统级等价物是 **MediaStore**（MediaProvider 维护的内容索引——`.insv`、
+无扩展名等文件早已被系统按内容识别为 video/audio）。本轮把媒体库改成
+两路数据源的**并集**：
+
+1. **MediaStore 聚合**（新）：`MainActivity.kt` 增加 MethodChannel
+   `piliplus/local_media`，后台线程查询 Video+Audio 两表，按 DATA 的父目录
+   聚合成（数量/总大小/最新时间），只回传文件夹级结果；Dart 侧
+   `LocalMediaService.queryMediaStoreFolders()` 接收。索引结果秒级先出、
+   先展示；
+2. **自有目录遍历**（保留，第十四轮已放开全部过滤）：补上索引未覆盖的
+   文件（刚拷入还没被 MediaProvider 收录、非常规位置等）；
+3. `LocalMediaLibrary.mergeFolders()` 按路径取并集、数量/大小取较大、时间
+   取最新（纯函数，单测覆盖）。
+
+这样"列表里缺文件"只剩一种可能：该文件对**系统本身**不可见（安卓 14+
+部分访问未勾选、卷未挂载），而这两种情况界面都有明确提示条。
+
+### 20.3 SMB 直连 `STATUS_INVALID_PARAMETER` → 空密码必须显式设置
+
+真机 URL 是 `smb://Administrator@192.168.2.2/...`——**账号存在、密码为空**
+（浏览用的 Dart 客户端同一套凭据工作正常）。根因在 libsmb2 客户端语义：
+
+```c
+/* ntlmssp.c */
+if (auth_data->password == NULL) { anonymous = 1; goto encode; }
+```
+
+`smb2_set_password` 从未被调用（NULL）时 libsmb2 走**匿名登录**，而不是
+"空密码 NTLM"——对设有真实账号（密码恰好为空）的服务器，匿名
+SESSION_SETUP 被拒（Windows 回 `STATUS_INVALID_PARAMETER`）。Dart 客户端
+一直按空字符串算 NTLMv2，所以浏览正常。修复（`SMB2_BLANK_PW`）：协议层
+在有用户名时**必显式** `smb2_set_password(password ? password : "")`。
+
+### 20.4 VR 手势：方向对齐 xl_player、卡顿治根、HUD 显示真实视角
+
+**方向**：xl_player 的触摸在 `SinglePlayerActivity.onScroll` 用
+GestureDetector 的 `distanceX/Y`（= 手指位移取反）累积进 native 的
+`_rx/_ry`，模型 `Rz·Rx·Ry`——两轴统一为"**拖动世界**"语义：手指右移→
+视线向左，手指下移→视线向上。我们此前水平轴一致、俯仰轴与手指同向
+（两轴打架）。修复：`onVrLook` 俯仰增量取反，两轴与 xl 完全一致。
+
+**卡顿**：陀螺仪流畅而拖动卡顿的根因不在渲染，在**属性下发路径**——
+mpv 客户端每次 `setProperty` 都是一次"客户端→core 同步派发 + core
+`UPDATE_VIDEO`→VO 同步 VOCTRL 握手"的跨线程往返，旧实现每批全量下发
+9 个属性 × ~33 批/s ≈ **300 次往返/s**，core/VO 线程被握手塞满。修复
+（libmpv 补丁 + Dart 双侧）：
+- native 新增合并字符串属性 **`vr-view`**（`"yaw=..,pitch=..,fov=.."`，
+  `vr_parse_view_string` 解析覆盖标量字段，夹取照常）——拖拽一批只剩
+  **1 次**往返；
+- Dart `_applyVrProperties` 改**差分下发**（值没变不发；`force` 时全量），
+  连续视角参数一律走 `vr-view`。
+
+**HUD 与陀螺仪"两套量"**：用户观察正确——HUD 此前只显示手动分量。
+native 侧 vr.c 每帧把**有效视角中心**（头姿×折叠偏置×手动偏移的合成
+模型分解回 yaw/pitch）缓存起来，经新 VOCTRL `VOCTRL_VR_VIEW_ANGLES` 暴露
+为只读属性 `vr-view-yaw`/`vr-view-pitch`（属性实现在 vr_metadata.patch，
+避免两补丁重叠改 command.c）；HUD 以 5Hz 轮询显示真实视线方向，旧引擎
+读不到时回退显示手动分量。
+
+### 20.5 本轮验证
+
+- native：三补丁 pristine v0.41.0 重放通过；ffmpeg libsmb2 补丁 pristine
+  n9.0.1 `apply --check` 通过、协议对象原生编译通过；VR 数学回归 5 万组
+  随机组合（开启连续性 4e-7 / 折叠中心 1e-6 / 跟踪帧一致性 2e-7）；
+  CI 首轮失败为 vr.h 缺 `<stdbool.h>`（新声明引入 bool），补上后全绿；
+- Dart/Kotlin：`dart format` 解析通过；mergeFolders/directUrl 纯函数单测；
+  Kotlin 走 CI 编译把关；
+- 出包自检新增：`SMB2_BLANK_PW`、`vr_parse_view_string`、
+  `VOCTRL_VR_VIEW_ANGLES` 源码 grep + `vr-view-yaw` strings + libsmb2
+  静态链接 readelf 检查。

@@ -2,7 +2,6 @@ import 'dart:io';
 
 import 'package:PiliPlus/utils/path_utils.dart' show downloadPath;
 import 'package:dio/dio.dart';
-import 'package:flutter/services.dart';
 
 import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/models/local_media/local_media_item.dart';
@@ -27,65 +26,9 @@ import 'package:webdav_client/webdav_client.dart' as webdav;
 ///   * 已有的 `webdav_client`(原本用于设置备份)浏览局域网 WebDAV。
 /// 播放交给 mpv: 安卓端打包的 FFmpeg 启用了 file/http/https/ftp 协议,
 /// 所以本机和 WebDAV/HTTP/FTP 都能直接播, 不需要在应用内做代理转发。
-/// MediaStore 聚合出的一行"文件夹 → 媒体统计"(见 [LocalMediaService.queryMediaStoreFolders])
-typedef MediaFolderRow =
-    ({String path, int count, int totalSize, DateTime? latest});
-
 abstract final class LocalMediaService {
   /// 安卓主存储的根目录
   static const String primaryStorage = '/storage/emulated/0';
-
-  static const MethodChannel _localMediaChannel = MethodChannel(
-    'piliplus/local_media',
-  );
-
-  /// VLC 对齐的媒体库数据源①: **系统媒体索引**(MediaStore)。
-  ///
-  /// VLC 安卓端的媒体库建立在"扫描存储卷 + 按内容识别媒体"之上, 不依赖
-  /// 扩展名白名单; Android 上的系统级等价物就是 MediaStore(MediaProvider
-  /// 维护): 非常规命名(.insv/无扩展名)的文件早已被系统按内容识别为视频/
-  /// 音频, 可见性与系统权限一致。聚合在 native 侧完成(见 MainActivity.kt
-  /// 的 queryMediaFolders), IPC 只传"文件夹级"结果。
-  ///
-  /// 查询失败/非安卓返回空列表——调用方以自有目录遍历兜底(两路结果取
-  /// 并集, 见 LocalMediaLibrary.mergeFolders)。
-  static Future<List<MediaFolderRow>> queryMediaStoreFolders() async {
-    if (!Platform.isAndroid) {
-      return const [];
-    }
-    try {
-      final rows = await _localMediaChannel.invokeMethod<List<dynamic>?>(
-        'queryMediaFolders',
-      );
-      if (rows == null) {
-        return const [];
-      }
-      final out = <MediaFolderRow>[];
-      for (final row in rows) {
-        if (row is! Map) {
-          continue;
-        }
-        final path = row['path'];
-        final count = row['count'];
-        if (path is! String || path.isEmpty || count is! int) {
-          continue;
-        }
-        final size = row['totalSize'];
-        final latest = row['latest'];
-        out.add((
-          path: path,
-          count: count,
-          totalSize: size is int ? size : 0,
-          latest: latest is int && latest > 0
-              ? DateTime.fromMillisecondsSinceEpoch(latest)
-              : null,
-        ));
-      }
-      return out;
-    } catch (_) {
-      return const [];
-    }
-  }
 
   // ==================== 来源管理 ====================
 

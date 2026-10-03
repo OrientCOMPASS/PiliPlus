@@ -342,6 +342,10 @@ class PgcIntroController extends CommonIntroController {
     );
     int prevIndex = currentIndex - 1;
     PlayRepeat playRepeat = videoDetailCtr.plPlayerController.playRepeat;
+    // 随机播放: 在选集里随机挑一集(避开当前)
+    if (playRepeat == PlayRepeat.shuffleList && episodes.length > 1) {
+      prevIndex = PlayRepeat.randomIndex(episodes.length, currentIndex);
+    }
     if (prevIndex < 0) {
       if (playRepeat == PlayRepeat.listCycle) {
         prevIndex = episodes.length - 1;
@@ -365,6 +369,10 @@ class PgcIntroController extends CommonIntroController {
         (e) => e.cid == videoDetailCtr.cid.value,
       );
       int nextIndex = currentIndex + 1;
+      // 随机播放: 在选集里随机挑一集(避开当前)
+      if (playRepeat == PlayRepeat.shuffleList && episodes.length > 1) {
+        nextIndex = PlayRepeat.randomIndex(episodes.length, currentIndex);
+      }
       // 列表循环
       if (nextIndex >= episodes.length) {
         if (playRepeat == PlayRepeat.listCycle) {

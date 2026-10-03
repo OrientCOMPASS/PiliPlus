@@ -1169,6 +1169,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
     vrControlMode.value = value;
     if (value) {
+      // 进入操作模式先点亮控件(VR 的 HUD/按钮随 showControls 自动隐藏)
+      controls = true;
       // 进入时强制下发一次: 单例播放器可能在属性下发之前就已创建
       applyVrView(force: true);
       // 头追跟随设置项自动启停(退出控制模式即停, 不与常规手势抢方向)

@@ -67,9 +67,15 @@ class _VrControlLayerState extends State<VrControlLayer> {
 
   void _onScaleStart(ScaleStartDetails details) {
     _fovBase = _c.vrView.value.fov;
+    // 触屏操作唤醒控件(与播放器 UI 一致); 陀螺仪动作不产生触摸, 不唤醒
+    _c.controls = true;
   }
 
   void _onScaleUpdate(ScaleUpdateDetails details) {
+    // 拖拽期间保持控件可见(不断续自动隐藏计时)
+    if (_c.showControls.value) {
+      _c.hideTaskControls();
+    }
     if (details.pointerCount > 1) {
       if (details.scale > 0) {
         _c.setVrFov(_fovBase / details.scale);
@@ -87,6 +93,7 @@ class _VrControlLayerState extends State<VrControlLayer> {
   void _onScaleEnd(ScaleEndDetails details) {
     // 手势结束强制落一次, 保证最终视角与手指位置一致
     _c.applyVrView(force: true);
+    _c.hideTaskControls();
   }
 
   @override
@@ -105,12 +112,15 @@ class _VrControlLayerState extends State<VrControlLayer> {
           onScaleEnd: _onScaleEnd,
           child: widget.child,
         ),
-        // 顶部: 视角读数 + 退出控制模式
+        // 顶部: 视角读数 + 退出控制模式(随播放器控件一起自动隐藏)
         Align(
           alignment: Alignment.topCenter,
           child: Padding(
             padding: const EdgeInsets.only(top: 10),
             child: Obx(() {
+              if (!_c.showControls.value) {
+                return const SizedBox.shrink();
+              }
               final view = _c.vrView.value;
               final error = _c.vrError.value;
               // 读数优先显示 native 的**有效**视角(含陀螺仪头姿与折叠
@@ -143,12 +153,15 @@ class _VrControlLayerState extends State<VrControlLayer> {
             }),
           ),
         ),
-        // 右侧: 视场角 / 重置 / 眼位
-        // (左侧方向步进按键已按第十三轮真机反馈移除: 单指拖拽环视已经
+        // 右侧: 视场角 / 重置 / 眼位(随播放器控件一起自动隐藏;
+        // 左侧方向步进按键已按第十三轮真机反馈移除: 单指拖拽环视已经
         // 覆盖全部视角操作, 方向键遮挡画面且与拖拽手势重复)
         Align(
           alignment: Alignment.centerRight,
-          child: Padding(
+          child: Obx(
+            () => !_c.showControls.value
+                ? const SizedBox.shrink()
+                : Padding(
             padding: const EdgeInsets.only(right: 10),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -197,6 +210,7 @@ class _VrControlLayerState extends State<VrControlLayer> {
                 ),
               ],
             ),
+                ),
           ),
         ),
       ],

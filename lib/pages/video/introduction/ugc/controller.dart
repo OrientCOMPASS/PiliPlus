@@ -594,6 +594,17 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
     int prevIndex = currentIndex - 1;
     final PlayRepeat playRepeat = videoDetailCtr.plPlayerController.playRepeat;
 
+    // 随机播放: 在有效分P/选集里随机挑一个(避开当前与无 cid 的条目)
+    if (playRepeat == PlayRepeat.shuffleList && episodes.length > 1) {
+      final valid = [
+        for (int i = 0; i < episodes.length; i++)
+          if (episodes[i].cid != null && i != currentIndex) i,
+      ];
+      if (valid.isNotEmpty) {
+        prevIndex = valid[Random().nextInt(valid.length)];
+      }
+    }
+
     // 列表循环
     if (prevIndex < 0) {
       if (isPart &&
@@ -652,7 +663,8 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
           videoDetailCtr.plPlayerController.playRepeat;
 
       if (episodes.isEmpty) {
-        if (playRepeat == PlayRepeat.listCycle) {
+        if (playRepeat == PlayRepeat.listCycle ||
+            playRepeat == PlayRepeat.shuffleList) {
           videoDetailCtr.plPlayerController.play(repeat: true);
           return true;
         }
@@ -674,6 +686,17 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
       );
 
       int nextIndex = currentIndex + 1;
+
+      // 随机播放: 在有效分P/选集里随机挑一个(避开当前与无 cid 的条目)
+      if (playRepeat == PlayRepeat.shuffleList && episodes.length > 1) {
+        final valid = [
+          for (int i = 0; i < episodes.length; i++)
+            if (episodes[i].cid != null && i != currentIndex) i,
+        ];
+        if (valid.isNotEmpty) {
+          nextIndex = valid[Random().nextInt(valid.length)];
+        }
+      }
 
       if (!isPart &&
           videoDetailCtr.isPlayAll &&

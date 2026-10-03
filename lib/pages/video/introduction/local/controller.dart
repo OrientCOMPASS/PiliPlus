@@ -93,12 +93,17 @@ class LocalIntroController extends CommonIntroController {
 
   @override
   bool nextPlay() {
+    final playCtr = videoDetailCtr.plPlayerController;
+    // 随机播放: 列表内随机挑一条(避开当前)
+    if (playCtr.playRepeat == PlayRepeat.shuffleList && list.length > 1) {
+      playIndex(PlayRepeat.randomIndex(list.length, index.value));
+      return true;
+    }
     final next = index.value + 1;
     if (next < list.length) {
       playIndex(next);
       return true;
     } else {
-      final playCtr = videoDetailCtr.plPlayerController;
       if (playCtr.playRepeat == PlayRepeat.listCycle) {
         if (list.length == 1) {
           if (playCtr.videoPlayerController case final ctr?) {
@@ -115,6 +120,13 @@ class LocalIntroController extends CommonIntroController {
 
   @override
   bool prevPlay() {
+    // 随机播放: "上一个"同样随机挑(随机模式下顺序语义不存在)
+    if (videoDetailCtr.plPlayerController.playRepeat ==
+            PlayRepeat.shuffleList &&
+        list.length > 1) {
+      playIndex(PlayRepeat.randomIndex(list.length, index.value));
+      return true;
+    }
     final prev = index.value - 1;
     if (prev >= 0) {
       playIndex(prev);

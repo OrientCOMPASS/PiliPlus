@@ -1,8 +1,9 @@
+import 'dart:async' show unawaited;
+
 import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/models/local_media/local_media_item.dart';
 import 'package:PiliPlus/models/local_media/local_media_source.dart';
 import 'package:PiliPlus/pages/local_media/browser.dart';
-import 'package:PiliPlus/pages/local_media/library.dart';
 import 'package:PiliPlus/pages/local_media/widgets/smb_dialogs.dart';
 import 'package:PiliPlus/pages/local_media/widgets/source_editor.dart';
 import 'package:PiliPlus/services/local_media_service.dart';
@@ -14,10 +15,9 @@ import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
 import 'package:material_ui/material_ui.dart';
 
-/// 「本地」板块控制器: 本机媒体库(按文件夹归组) + 局域网发现 + 已保存的来源。
+/// 「本地」板块控制器(第十八轮改版): 不再做全盘扫描的"媒体库",
+/// 只负责 本机存储卷入口 + 用户收藏的快捷方式 + 局域网主机发现/来源管理。
 class LocalMediaController extends GetxController {
-  final LocalMediaLibrary library = LocalMediaLibrary();
-
   /// 本机存储卷(主存储 + SD 卡/U 盘)
   final RxList<LocalMediaSource> deviceSources = <LocalMediaSource>[].obs;
 
@@ -27,16 +27,11 @@ class LocalMediaController extends GetxController {
   /// 自动发现的 SMB 主机
   final RxList<SmbHost> discovered = <SmbHost>[].obs;
 
-  /// 本机目录的书签(浏览页里手动收藏的)
-  List<LocalMediaSource> get deviceShortcuts => [
+  /// 用户**主动收藏**的快捷方式(本机路径与网络来源混排)。
+  /// 连接过的主机只存凭据(favorite=false), 不再出现在列表里刷屏。
+  List<LocalMediaSource> get favoriteSources => [
     for (final s in savedSources)
-      if (s.type == LocalMediaSourceType.device) s,
-  ];
-
-  /// 网络来源的书签: 连接过的主机 + 收藏的共享/目录 + 直链
-  List<LocalMediaSource> get networkShortcuts => [
-    for (final s in savedSources)
-      if (s.type != LocalMediaSourceType.device) s,
+      if (s.favorite) s,
   ];
 
   final RxBool scanningNetwork = false.obs;
@@ -52,43 +47,13 @@ class LocalMediaController extends GetxController {
   @override
   void onInit() {
     super.onInit();
-    library.loadCache();
     savedSources.value = LocalMediaService.loadSources();
     refreshDevices();
     refreshAccessNotice();
-    // 第一次进入且没有缓存时自动扫描一次
-    if (library.folders.isEmpty) {
-      library.scan();
-    } else {
-      maybeRescanIfStale();
-    }
-  }
-
-  @override
-  void onClose() {
-    library.cancelScan();
-    super.onClose();
   }
 
   Future<void> refreshDevices() async {
     deviceSources.value = await LocalMediaService.deviceSources();
-  }
-
-  /// 缓存过期(>30min)后台静默重扫: 新拷入设备/存储卡的文件应自动出现,
-  /// 而不是只有记得手动点刷新才认得。只探测权限、不弹授权框, 没权限就
-  /// 保持展示旧缓存(scan 自身会把错误写进 lastError, 这里跳过)。
-  ///
-  /// 不只在 [onInit] 里查一次——`putOrFind` 的控制器一个进程只 init 一遍,
-  /// 而"用电脑拷完文件再切回应用"发生在 init 之后, 所以回前台/切回本
-  /// 板块时也要查(见 [onResumed])。
-  Future<void> maybeRescanIfStale() async {
-    if (library.scanning.value || !library.isStale) {
-      return;
-    }
-    if (!await LocalMediaService.hasDevicePermission()) {
-      return;
-    }
-    await library.scan();
   }
 
   /// 刷新"部分访问"权限提示(只探测状态, 不弹授权框)
@@ -98,21 +63,10 @@ class LocalMediaController extends GetxController {
         : null;
   }
 
-  /// 板块重新可见(应用回前台 / 切回本 Tab)时调用
+  /// 板块重新可见(应用回前台)时调用: 刷新存储卷与权限提示
   void onResumed() {
+    refreshDevices();
     refreshAccessNotice();
-    maybeRescanIfStale();
-  }
-
-  Future<void> rescanLibrary() async {
-    if (!await LocalMediaService.ensureDevicePermission()) {
-      SmartDialog.showToast('未获得存储读取权限，无法扫描本机视频');
-      return;
-    }
-    await library.scan();
-    if (library.lastError.value case final err?) {
-      SmartDialog.showToast(err);
-    }
   }
 
   /// 扫描局域网里开着 SMB(445) 端口的主机
@@ -136,6 +90,11 @@ class LocalMediaController extends GetxController {
         networkError.value =
             '没有发现开启 SMB(445) 的主机。请确认与 NAS/电脑在同一局域网，'
             '或手动添加共享地址。';
+      } else {
+        // 尽力补主机名(第十八轮: 能展示主机名尽量展示): NBNS 被拦时
+        // 发现阶段只有 IP, 这里逐台做一次匿名 SMB2 握手 —— NTLM
+        // CHALLENGE 自带服务器 NetBIOS/DNS 名, 不需要凭据, 查到即回填。
+        unawaited(_probeHostNames(hosts));
       }
     } catch (err) {
       networkError.value = err.toString();
@@ -144,25 +103,56 @@ class LocalMediaController extends GetxController {
     }
   }
 
-  // ==================== 打开 ====================
+  // ==================== 主机名探测 ====================
 
-  /// 媒体库里的文件夹 -> 浏览页
-  Future<void> openFolder(LocalMediaFolder folder) async {
-    final source = LocalMediaSource(
-      type: LocalMediaSourceType.device,
-      name: folder.name,
-      url: folder.path,
-    );
-    final items = await library.itemsOf(folder);
-    Get.to(
-      () => LocalMediaBrowserPage(
-        source: source,
-        path: folder.path,
-        title: folder.name,
-        initialItems: items,
-      ),
-    );
+  int _probeGeneration = 0;
+
+  Future<void> _probeHostNames(List<SmbHost> hosts) async {
+    final generation = ++_probeGeneration;
+    await Future.wait([
+      for (final host in hosts)
+        if (host.name == null || host.name!.isEmpty)
+          _probeHostName(host, generation),
+    ]);
   }
+
+  Future<void> _probeHostName(SmbHost host, int generation) async {
+    Smb2Client? client;
+    try {
+      client = Smb2Client(
+        host: host.address,
+        port: host.port,
+        fallbackAddress: host.address,
+      );
+      try {
+        await client.connect(timeout: const Duration(seconds: 3));
+      } catch (_) {
+        // 匿名认证被拒也没关系: CHALLENGE 阶段已拿到服务器名
+      }
+      if (generation != _probeGeneration) {
+        return; // 已发起新一轮发现, 丢弃过期结果
+      }
+      final name = client.serverInfo?.bestName;
+      if (name != null && name.isNotEmpty && name != host.address) {
+        final index = discovered.indexOf(host);
+        if (index >= 0) {
+          discovered[index] = SmbHost(
+            address: host.address,
+            port: host.port,
+            name: name,
+          );
+        }
+      }
+    } catch (_) {
+      // 探测失败不影响列表(继续显示 IP)
+    } finally {
+      try {
+        await client?.close();
+      } catch (_) {}
+    }
+  }
+
+  // ==================== 打开 ====================
 
   /// 本机存储卷 -> 浏览页
   Future<void> openDevice(LocalMediaSource source) async {
@@ -459,7 +449,8 @@ class LocalMediaController extends GetxController {
     SmartDialog.dismiss();
     switch (res) {
       case Success():
-        await addSource(source);
+        // 手动添加 = 用户主动意愿, 直接进快捷方式
+        await addSource(source, favorite: true);
         openSource(source);
       case Error(:final errMsg):
         SmartDialog.showToast(errMsg ?? '连接失败');
@@ -513,9 +504,18 @@ class LocalMediaController extends GetxController {
 
   // ==================== 来源管理 ====================
 
-  Future<void> addSource(LocalMediaSource source) async {
-    if (!savedSources.contains(source)) {
-      savedSources.add(source);
+  /// 添加/更新来源。[favorite]=true 表示用户**主动收藏**(进快捷方式列表);
+  /// 连接主机时的自动记录默认 false(只留凭据, 不刷屏)。同一来源(== 不
+  /// 含 favorite)已存在时做合并更新, 收藏态只升不降。
+  Future<void> addSource(LocalMediaSource source, {bool favorite = false}) async {
+    final incoming = favorite ? source.copyWith(favorite: true) : source;
+    final index = savedSources.indexOf(incoming);
+    if (index >= 0) {
+      savedSources[index] = incoming.copyWith(
+        favorite: favorite || savedSources[index].favorite,
+      );
+    } else {
+      savedSources.add(incoming);
     }
     await _persist();
   }

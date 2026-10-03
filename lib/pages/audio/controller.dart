@@ -428,6 +428,17 @@ class AudioController extends GetxController
                 break;
               case PlayRepeat.autoPlayRelated:
                 break;
+              case PlayRepeat.shuffleList:
+                // 随机播放: 歌单里随机挑一首(避开当前); 单条则重播
+                {
+                  final total = playlist?.length ?? 0;
+                  if (total > 1) {
+                    playIndex(PlayRepeat.randomIndex(total, index ?? -1));
+                  } else {
+                    onPlay();
+                  }
+                }
+                break;
             }
           }
         }

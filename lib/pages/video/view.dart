@@ -274,6 +274,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
           case PlayRepeat.listOrder:
           case PlayRepeat.listCycle:
           case PlayRepeat.autoPlayRelated:
+          case PlayRepeat.shuffleList:
             exitFlag = !introController.nextPlay();
           case PlayRepeat.pause:
         }

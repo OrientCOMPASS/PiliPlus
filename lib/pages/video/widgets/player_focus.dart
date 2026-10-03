@@ -14,6 +14,9 @@ import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:material_ui/material_ui.dart';
 
 class PlayerFocus extends StatelessWidget {
+  /// 手柄 L1/R1 的单次快退/快进秒数
+  static const int kShoulderSeekSeconds = 60;
+
   const PlayerFocus({
     super.key,
     required this.child,
@@ -110,6 +113,21 @@ class PlayerFocus extends StatelessWidget {
       if (introController?.isTripling ?? false) {
         introController!.onCancelTriple();
       }
+    }
+
+    // 手柄肩键(第十八轮手柄适配): L1/R1 = 快退/快进 60 秒。
+    // 十字键左/右(快退/快进用户设定时长, 默认 10s)与上/下(音量)天然
+    // 映射为方向键, 走下面既有分支; B 键已在 MainActivity 映射为返回。
+    if (key == LogicalKeyboardKey.gameButtonLeft1 ||
+        key == LogicalKeyboardKey.gameButtonRight1) {
+      if (event is KeyDownEvent && hasPlayer && !plPlayerController.isLive) {
+        if (key == LogicalKeyboardKey.gameButtonRight1) {
+          plPlayerController.onForward(kShoulderSeekSeconds);
+        } else {
+          plPlayerController.onBackward(kShoulderSeekSeconds);
+        }
+      }
+      return true;
     }
 
     final isArrowUp = key == LogicalKeyboardKey.arrowUp;

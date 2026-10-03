@@ -762,7 +762,7 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
       SmartDialog.showToast('当前目录无法添加为快捷方式');
       return;
     }
-    await controller.addSource(target);
+    await controller.addSource(target, favorite: true);
     if (mounted) {
       setState(() {}); // 让书签图标立刻变成"已收藏"
     }

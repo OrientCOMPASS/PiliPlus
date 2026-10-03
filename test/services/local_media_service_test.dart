@@ -4,7 +4,6 @@ import 'package:PiliPlus/models/local_media/local_media_item.dart';
 import 'package:PiliPlus/models/local_media/local_media_sort.dart';
 import 'package:PiliPlus/models/local_media/local_media_source.dart';
 import 'package:PiliPlus/pages/local_media/controller.dart';
-import 'package:PiliPlus/pages/local_media/library.dart';
 import 'package:PiliPlus/services/local_media_service.dart';
 import 'package:PiliPlus/services/smb/smb_browse.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -482,54 +481,6 @@ void main() {
       expect(
         SmbBrowse.directUrl(host: 'fe80::1', share: 'pub', remotePath: 'x.mkv'),
         'smb://[fe80::1]/pub/x.mkv',
-      );
-    });
-  });
-
-  group('LocalMediaLibrary.mergeFolders(MediaStore ∪ 自有遍历)', () {
-    LocalMediaFolder f(
-      String path,
-      int count, [
-      int size = 0,
-      DateTime? latest,
-    ]) => LocalMediaFolder(
-      path: path,
-      name: path.substring(path.lastIndexOf('/') + 1),
-      count: count,
-      totalSize: size,
-      latest: latest,
-    );
-
-    test('路径取并集, 数量/大小取较大, 时间取最新', () {
-      final t1 = DateTime(2026, 10, 1);
-      final t2 = DateTime(2026, 10, 3);
-      final merged = LocalMediaLibrary.mergeFolders(
-        [
-          f('/sdcard/Download', 3, 300, t1),
-          f('/sdcard/DCIM/Camera', 10, 900),
-        ],
-        [
-          f('/sdcard/Download', 5, 200, t2),
-          f('/sdcard/VR', 2, 8000),
-        ],
-      );
-      expect(merged.map((e) => e.path), [
-        '/sdcard/DCIM/Camera',
-        '/sdcard/Download',
-        '/sdcard/VR',
-      ]);
-      final dl = merged.firstWhere((e) => e.path == '/sdcard/Download');
-      expect(dl.count, 5);
-      expect(dl.totalSize, 300);
-      expect(dl.latest, t2);
-      expect(merged.firstWhere((e) => e.path == '/sdcard/VR').count, 2);
-    });
-
-    test('空输入安全', () {
-      expect(LocalMediaLibrary.mergeFolders(const [], const []), isEmpty);
-      expect(
-        LocalMediaLibrary.mergeFolders([f('/a', 1)], const []).single.path,
-        '/a',
       );
     });
   });

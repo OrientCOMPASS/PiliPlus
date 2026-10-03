@@ -1024,6 +1024,7 @@ extension _PlayReatExt on PlayRepeat {
     PlayRepeat.listOrder => Icons.keyboard_double_arrow_right_rounded,
     PlayRepeat.singleCycle => Icons.play_circle_outline_rounded,
     PlayRepeat.listCycle => Icons.sync_rounded,
+    PlayRepeat.shuffleList => Icons.shuffle_rounded,
     PlayRepeat.autoPlayRelated => throw UnimplementedError(),
   };
 }

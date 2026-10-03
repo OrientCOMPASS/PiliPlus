@@ -44,6 +44,7 @@ class LocalMediaSource {
     this.password,
     this.domain,
     this.address,
+    this.favorite = false,
   });
 
   final LocalMediaSourceType type;
@@ -58,6 +59,11 @@ class LocalMediaSource {
   /// SMB: url 里写的是主机名时, 这里记录发现阶段拿到的 IP 作为解析兜底
   /// (NBNS 广播在个别网络里会被拦, 有它在就永远连得上)
   final String? address;
+
+  /// 是否为用户**主动收藏**的快捷方式(第十八轮): 只有收藏的才在「本地」
+  /// 板块展示; 连接过的主机会以 favorite=false 存凭据, 不再刷屏列表。
+  /// 刻意**不参与** [operator==] —— 同一来源的收藏态变更走替换更新。
+  final bool favorite;
 
   bool get hasCredential =>
       (username?.isNotEmpty ?? false) || (password?.isNotEmpty ?? false);
@@ -207,6 +213,7 @@ class LocalMediaSource {
     if (password != null) 'password': password,
     if (domain != null) 'domain': domain,
     if (address != null) 'address': address,
+    if (favorite) 'favorite': true,
   };
 
   static LocalMediaSource? fromJson(Object? json) {
@@ -229,6 +236,7 @@ class LocalMediaSource {
       password: json['password'] as String?,
       domain: json['domain'] as String?,
       address: json['address'] as String?,
+      favorite: json['favorite'] == true,
     );
   }
 
@@ -246,6 +254,7 @@ class LocalMediaSource {
     password: password,
     domain: domain,
     address: address,
+    favorite: favorite,
   );
 
   LocalMediaSource copyWith({
@@ -256,6 +265,7 @@ class LocalMediaSource {
     String? password,
     String? domain,
     String? address,
+    bool? favorite,
   }) => LocalMediaSource(
     type: type ?? this.type,
     name: name ?? this.name,
@@ -264,6 +274,7 @@ class LocalMediaSource {
     password: password ?? this.password,
     domain: domain ?? this.domain,
     address: address ?? this.address,
+    favorite: favorite ?? this.favorite,
   );
 
   @override

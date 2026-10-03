@@ -142,7 +142,6 @@ dependencies:
   path: ^1.9.1
   path_provider: ^2.1.5
   permission_handler_android: ^14.0.0
-  permission_handler_apple: ^9.4.7
   permission_handler_platform_interface: ^4.3.0
   pretty_qr_code: ^3.3.0
   protobuf: ^6.0.0
@@ -238,17 +237,11 @@ dev_dependencies:
 
 flutter_launcher_icons:
   android: true
-  ios: true
-  remove_alpha_ios: true
   image_path: assets/images/logo/logo_2.png
   image_path_android: assets/images/logo/logo_2.png
-  image_path_ios: assets/images/logo/logo.png
   adaptive_icon_background: "#ffffff"
   adaptive_icon_foreground: assets/images/logo/logo_2.png
   adaptive_icon_monochrome: assets/images/logo/logo_2.png
-  macos:
-    generate: true
-    image_path: assets/images/logo/logo.png
 
 flutter_native_splash:
   android_12:
@@ -265,10 +258,6 @@ flutter:
   assets:
     - path: assets/images/
     - path: assets/images/logo/
-    - path: assets/images/logo/ico/
-      platforms: [windows]
-    - path: assets/images/logo/desktop/
-      platforms: [linux, macos]
     - path: assets/images/live/
     - path: assets/images/paycoins/
     - path: assets/shaders/

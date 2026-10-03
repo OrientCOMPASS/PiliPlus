@@ -115,45 +115,9 @@ class _VrControlLayerState extends State<VrControlLayer> {
             }),
           ),
         ),
-        // 左侧: 方向步进
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Padding(
-            padding: const EdgeInsets.only(left: 10),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _VrStepButton(
-                  icon: Icons.keyboard_arrow_up,
-                  tooltip: '向上',
-                  onStep: () => _c.vrStep(dpitch: PlPlayerController.vrStepDeg),
-                ),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _VrStepButton(
-                      icon: Icons.keyboard_arrow_left,
-                      tooltip: '向左',
-                      onStep: () =>
-                          _c.vrStep(dyaw: -PlPlayerController.vrStepDeg),
-                    ),
-                    _VrStepButton(
-                      icon: Icons.keyboard_arrow_right,
-                      tooltip: '向右',
-                      onStep: () => _c.vrStep(dyaw: PlPlayerController.vrStepDeg),
-                    ),
-                  ],
-                ),
-                _VrStepButton(
-                  icon: Icons.keyboard_arrow_down,
-                  tooltip: '向下',
-                  onStep: () => _c.vrStep(dpitch: -PlPlayerController.vrStepDeg),
-                ),
-              ],
-            ),
-          ),
-        ),
         // 右侧: 视场角 / 重置 / 眼位
+        // (左侧方向步进按键已按第十三轮真机反馈移除: 单指拖拽环视已经
+        // 覆盖全部视角操作, 方向键遮挡画面且与拖拽手势重复)
         Align(
           alignment: Alignment.centerRight,
           child: Padding(

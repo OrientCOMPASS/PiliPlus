@@ -55,6 +55,10 @@ class LocalMediaFolder {
 /// 本机媒体库扫描: 递归遍历存储卷, 按文件夹归组
 /// (参照 VLC 安卓版「浏览/文件夹」的组织方式)。
 ///
+/// **不按文件类型过滤**: 文件夹里拿到什么文件就计入什么(隐藏目录与
+/// 应用缓存目录除外), 是不是媒体交给播放器在点开时判断——静默过滤曾经
+/// 把用户的 VR 测试片源吞掉(第十三轮真机反馈), 宁可多列不可漏列。
+///
 /// 扫描结果缓存在本机, 下次进入板块立刻可见, 再按需重新扫描。
 class LocalMediaLibrary {
   /// 跳过的目录名(应用私有目录、缩略图缓存等)。
@@ -257,25 +261,8 @@ class LocalMediaLibrary {
       if (entity is! File) {
         continue;
       }
-      final ext = LocalMediaExtensions.of(name);
-      var playable = LocalMediaExtensions.videos.contains(ext);
-      if (!playable && !LocalMediaExtensions.known(ext)) {
-        // 未知扩展名(或没有扩展名)的大文件: 嗅探文件头兜底。
-        // VR 素材命名经常不按常理(.insv/无扩展名), mpv 打开文件本来
-        // 就按内容探测, 列表不该只认扩展名(第十三轮真机反馈)。
-        try {
-          // ignore: avoid_slow_async_io
-          final st = await entity.stat();
-          if (st.size >= LocalMediaService.probeMinBytes) {
-            playable = await LocalMediaService.sniffVideoFile(entity.path);
-          }
-        } catch (_) {
-          // 读不到属性/内容就按不可播放处理
-        }
-      }
-      if (!playable) {
-        continue;
-      }
+      // 不按扩展名过滤(第十三轮真机反馈: 过滤把用户准备的 VR 测试片源
+      // 吞了): 目录里有什么文件就算什么, 能不能播交给播放器判断。
       final agg = byFolder.putIfAbsent(path, () => _FolderAgg(path));
       agg.count++;
       _fileCount++;

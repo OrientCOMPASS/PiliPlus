@@ -5,6 +5,7 @@ import 'package:PiliPlus/models/local_media/local_media_sort.dart';
 import 'package:PiliPlus/models/local_media/local_media_source.dart';
 import 'package:PiliPlus/pages/local_media/controller.dart';
 import 'package:PiliPlus/services/local_media_service.dart';
+import 'package:PiliPlus/services/smb/smb_browse.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// 「本地」板块服务层的纯函数测试: 地址拼接、脱敏、排序、扩展名白名单,
@@ -106,14 +107,6 @@ void main() {
       expect(LocalMediaExtensions.videos, isNot(contains('ogv')));
       // VR 素材常见容器: Insta360 的 .insv 是 mov 家族, 裸 HEVC 流有 demuxer
       expect(LocalMediaExtensions.videos, containsAll(['insv', 'hevc']));
-    });
-
-    test('known(): 三个类别合并判定(嗅探只针对三不沾的文件)', () {
-      expect(LocalMediaExtensions.known('mp4'), isTrue);
-      expect(LocalMediaExtensions.known('flac'), isTrue);
-      expect(LocalMediaExtensions.known('ass'), isTrue);
-      expect(LocalMediaExtensions.known('txt'), isFalse);
-      expect(LocalMediaExtensions.known(''), isFalse);
     });
 
     test('条目类型判定', () {
@@ -444,117 +437,51 @@ void main() {
     });
   });
 
-  group('文件头嗅探(非常规命名 VR 片源的兜底)', () {
-    List<int> padded(List<int> head) =>
-        [...head, ...List<int>.filled(600, 0)];
-
-    test('认得白名单容器的魔数', () {
-      // ISO-BMFF: 'ftyp' @4 (mp4/mov/m4v/3gp/f4v/insv…)
+  group('SmbBrowse.directUrl(smb:// 直连, 定制 libmpv 的 ffmpeg libsmb2 协议)', () {
+    test('匿名 + 默认端口: 无凭据段无端口, 反斜杠路径转 URL 段', () {
       expect(
-        LocalMediaService.sniffVideoHeader(
-          padded([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]),
+        SmbBrowse.directUrl(
+          host: 'NAS',
+          share: 'video',
+          remotePath: r'VR\360.mp4',
         ),
-        isTrue,
-      );
-      // Matroska/WebM: EBML 头
-      expect(
-        LocalMediaService.sniffVideoHeader(padded([0x1a, 0x45, 0xdf, 0xa3])),
-        isTrue,
-      );
-      // AVI: RIFF…AVI␣
-      expect(
-        LocalMediaService.sniffVideoHeader(
-          padded([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x41, 0x56, 0x49, 0x20]),
-        ),
-        isTrue,
-      );
-      // FLV
-      expect(
-        LocalMediaService.sniffVideoHeader(padded([0x46, 0x4c, 0x56, 0x01])),
-        isTrue,
-      );
-      // ASF (wmv/asf)
-      expect(
-        LocalMediaService.sniffVideoHeader(
-          padded([
-            0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11,
-            0xa6, 0xd9, 0x00, 0xaa, 0x00, 0x62, 0xce, 0x6c,
-          ]),
-        ),
-        isTrue,
-      );
-      // MPEG-PS
-      expect(
-        LocalMediaService.sniffVideoHeader(padded([0, 0, 1, 0xba])),
-        isTrue,
+        'smb://NAS/video/VR/360.mp4',
       );
     });
 
-    test('MPEG-TS: 0/188/376 三处同步字节才算', () {
-      final ts = List<int>.filled(600, 0)
-        ..[0] = 0x47
-        ..[188] = 0x47
-        ..[376] = 0x47;
-      expect(LocalMediaService.sniffVideoHeader(ts), isTrue);
-      ts[376] = 0;
-      expect(LocalMediaService.sniffVideoHeader(ts), isFalse);
-    });
-
-    test('非视频/太短的一律 false, 不会误报', () {
-      // PDF
+    test('账号/密码/域名百分号编码, 特殊字符不破坏 URL 结构', () {
       expect(
-        LocalMediaService.sniffVideoHeader(
-          padded([0x25, 0x50, 0x44, 0x46, 0x2d]),
+        SmbBrowse.directUrl(
+          host: 'NAS',
+          share: 'video',
+          remotePath: '第 1集/a+b.mp4',
+          user: 'us;er@x',
+          password: 'p@ss:word/1',
+          domain: 'WORK;GROUP',
         ),
-        isFalse,
+        'smb://WORK%3BGROUP;us%3Ber%40x:p%40ss%3Aword%2F1@NAS/video/'
+        '%E7%AC%AC%201%E9%9B%86/a%2Bb.mp4',
       );
-      // ZIP/APK/JPG 都不该被当成视频
+    });
+
+    test('非默认端口保留; 发现记录的 IP 优先于主机名', () {
       expect(
-        LocalMediaService.sniffVideoHeader(padded([0x50, 0x4b, 3, 4])),
-        isFalse,
-      );
-      expect(
-        LocalMediaService.sniffVideoHeader(
-          padded([0xff, 0xd8, 0xff, 0xe0]),
+        SmbBrowse.directUrl(
+          host: 'NAS',
+          port: 1445,
+          share: 'pub',
+          remotePath: 'x.mkv',
+          address: '192.168.1.5',
         ),
-        isFalse,
+        'smb://192.168.1.5:1445/pub/x.mkv',
       );
-      expect(LocalMediaService.sniffVideoHeader(const [1, 2, 3]), isFalse);
-      expect(LocalMediaService.sniffVideoHeader(const []), isFalse);
     });
 
-    test('probedVideo 的条目按视频对待(可播放/可进列表)', () {
-      const item = LocalMediaItem(
-        name: '我的全景视频',
-        uri: '/storage/emulated/0/DCIM/我的全景视频',
-        source: device,
-        probedVideo: true,
+    test('IPv6 字面量加方括号(libsmb2 支持 [v6]:port)', () {
+      expect(
+        SmbBrowse.directUrl(host: 'fe80::1', share: 'pub', remotePath: 'x.mkv'),
+        'smb://[fe80::1]/pub/x.mkv',
       );
-      expect(item.extension, '');
-      expect(item.isVideo, isTrue);
-      expect(item.isPlayable, isTrue);
-      expect(item.copyWith(uri: '/x').probedVideo, isTrue);
-    });
-
-    test('sniffVideoFile: 真实文件读取(读不到按 false)', () async {
-      final dir = Directory.systemTemp.createTempSync('pili_sniff_test');
-      try {
-        final mp4Path = '${dir.path}/noext_video';
-        File(mp4Path).writeAsBytesSync([
-          0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70,
-          0x69, 0x73, 0x6f, 0x6d, ...List<int>.filled(64, 0),
-        ]);
-        expect(await LocalMediaService.sniffVideoFile(mp4Path), isTrue);
-        final junkPath = '${dir.path}/junk';
-        File(junkPath).writeAsBytesSync(List<int>.filled(128, 0x42));
-        expect(await LocalMediaService.sniffVideoFile(junkPath), isFalse);
-        expect(
-          await LocalMediaService.sniffVideoFile('${dir.path}/不存在'),
-          isFalse,
-        );
-      } finally {
-        dir.deleteSync(recursive: true);
-      }
     });
   });
 

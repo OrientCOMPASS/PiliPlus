@@ -11,6 +11,7 @@ import 'package:PiliPlus/services/smb/smb2_client.dart' show NtStatus, SmbExcept
 import 'package:PiliPlus/services/smb/smb_browse.dart';
 import 'package:PiliPlus/utils/permission_handler.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
+import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
 import 'package:path/path.dart' as p;
@@ -149,90 +150,6 @@ abstract final class LocalMediaService {
     }
   }
 
-  // ==================== 文件头嗅探 ====================
-
-  /// 嗅探的大小门槛: 只对**未知扩展名**且不小于此值的文件做内容探测。
-  /// 正经视频(尤其 VR/全景片源)远大于此; 小文件(文档/缩略图/缓存)
-  /// 不值得为它多开一次文件。
-  static const int probeMinBytes = 8 * 1024 * 1024;
-
-  /// 嗅探读取的字节数: MPEG-TS 要看 0/188/376 三个同步字节, 取 1KiB 足够。
-  static const int probeHeaderBytes = 1024;
-
-  /// 判断文件头是否为本应用能播的视频容器(纯函数, 可单测)。
-  ///
-  /// 为什么需要它: mpv/FFmpeg 打开文件靠**内容探测**, 扩展名白名单只是
-  /// 展示层的过滤。VR 素材命名经常不按常理(Insta360 的 `.insv`、下载丢
-  /// 扩展名、`video.360` 之类), 只认扩展名会把它们静默吃掉——真机反馈
-  /// "本机文件列表过滤了我准备的 VR 视频"的兜底修复。
-  ///
-  /// 只认扩展名白名单覆盖到的容器魔数: ISO-BMFF(ftyp)、Matroska/WebM
-  /// (EBML)、AVI(RIFF)、MPEG-TS、FLV、ASF/WMV、MPEG-PS。
-  static bool sniffVideoHeader(List<int> b) {
-    if (b.length < 12) {
-      return false;
-    }
-    // ISO-BMFF: 'ftyp' @4 (mp4/mov/m4v/3gp/f4v/insv…)
-    if (b[4] == 0x66 && b[5] == 0x74 && b[6] == 0x79 && b[7] == 0x70) {
-      return true;
-    }
-    // Matroska/WebM: EBML 头 0x1A45DFA3
-    if (b[0] == 0x1a && b[1] == 0x45 && b[2] == 0xdf && b[3] == 0xa3) {
-      return true;
-    }
-    // AVI: 'RIFF' … 'AVI '
-    if (b[0] == 0x52 &&
-        b[1] == 0x49 &&
-        b[2] == 0x46 &&
-        b[3] == 0x46 &&
-        b[8] == 0x41 &&
-        b[9] == 0x56 &&
-        b[10] == 0x49 &&
-        b[11] == 0x20) {
-      return true;
-    }
-    // FLV
-    if (b[0] == 0x46 && b[1] == 0x4c && b[2] == 0x56) {
-      return true;
-    }
-    // ASF (wmv/asf): 30 26 B2 75 8E 66 CF 11
-    if (b.length >= 16 &&
-        b[0] == 0x30 &&
-        b[1] == 0x26 &&
-        b[2] == 0xb2 &&
-        b[3] == 0x75 &&
-        b[4] == 0x8e &&
-        b[5] == 0x66 &&
-        b[6] == 0xcf &&
-        b[7] == 0x11) {
-      return true;
-    }
-    // MPEG-PS: pack header 00 00 01 BA / 视频序列头 00 00 01 B3
-    if (b[0] == 0 && b[1] == 0 && b[2] == 1 && (b[3] == 0xba || b[3] == 0xb3)) {
-      return true;
-    }
-    // MPEG-TS: 0/188/376 三处都是同步字节 0x47
-    if (b.length >= 564 && b[0] == 0x47 && b[188] == 0x47 && b[376] == 0x47) {
-      return true;
-    }
-    return false;
-  }
-
-  /// 读取 [path] 的文件头做 [sniffVideoHeader] 判断。
-  /// 读不到(无权限/失效链接)按 false 处理, 不影响目录里其它条目。
-  static Future<bool> sniffVideoFile(String path) async {
-    try {
-      final raf = await File(path).open();
-      try {
-        return sniffVideoHeader(await raf.read(probeHeaderBytes));
-      } finally {
-        await raf.close();
-      }
-    } catch (_) {
-      return false;
-    }
-  }
-
   // ==================== 浏览 ====================
 
   /// 列目录。失败时返回 [Error](带人类可读的原因)。
@@ -241,14 +158,12 @@ abstract final class LocalMediaService {
     required String path,
     LocalMediaSort sort = LocalMediaSort.name,
     bool showHidden = false,
-    bool onlyMedia = true,
   }) async {
     try {
       final items = await listOrThrow(
         source: source,
         path: path,
         showHidden: showHidden,
-        onlyMedia: onlyMedia,
       );
       return Success(sortItems(items, sort));
     } catch (err) {
@@ -261,24 +176,25 @@ abstract final class LocalMediaService {
   /// 浏览页需要它来区分"SMB 要账号"(`SmbException.isAuthFailure`)和其它错误:
   /// 前者要弹凭据框重试并把账号存进来源, 后者只需展示原因。
   /// 排序交给调用方(浏览页有自己的排序状态)。
+  ///
+  /// **不做文件类型过滤**(第十三轮真机反馈"列表过滤了我准备的 VR 视频"
+  /// 之后的彻底简化): 目录里拿到什么就返回什么, 是不是媒体交给 mpv 在
+  /// 播放时按内容判断——最差就是点开报"无法播放", 也好过静默吞文件。
   static Future<List<LocalMediaItem>> listOrThrow({
     required LocalMediaSource source,
     required String path,
     bool showHidden = false,
-    bool onlyMedia = true,
   }) async {
-    final items = switch (source.type) {
+    return switch (source.type) {
       LocalMediaSourceType.device => await _listDevice(
         source,
         path,
         showHidden: showHidden,
-        onlyMedia: onlyMedia,
       ),
       LocalMediaSourceType.webdav => await _listWebDav(
         source,
         path,
         showHidden: showHidden,
-        onlyMedia: onlyMedia,
       ),
       LocalMediaSourceType.smb => await _listSmb(
         source,
@@ -287,7 +203,6 @@ abstract final class LocalMediaService {
       ),
       _ => <LocalMediaItem>[],
     };
-    return onlyMedia ? _filterPlayable(items) : items;
   }
 
   // ==================== 外置字幕自动匹配 ====================
@@ -350,11 +265,7 @@ abstract final class LocalMediaService {
     }
     List<LocalMediaItem> siblings;
     try {
-      siblings = await listOrThrow(
-        source: video.source,
-        path: dir,
-        onlyMedia: false,
-      );
+      siblings = await listOrThrow(source: video.source, path: dir);
     } catch (_) {
       return const [];
     }
@@ -388,7 +299,8 @@ abstract final class LocalMediaService {
     _ => item.remotePath ?? item.uri,
   };
 
-  /// 在 [rootPath] **及其所有子目录**里检索文件名包含 [query] 的可播放媒体。
+  /// 在 [rootPath] **及其所有子目录**里检索文件名包含 [query] 的条目
+  /// (与列表一致: 不按扩展名过滤, 能不能播交给播放器判断)。
   ///
   /// 广度优先: 离当前目录越近的结果越靠前(要搜的东西多半就在附近),
   /// 因此结果**不再按名称重排**, 保留这个顺序。
@@ -442,7 +354,7 @@ abstract final class LocalMediaService {
           queue.add(childPath(source, item));
           continue;
         }
-        if (item.isPlayable && item.name.toLowerCase().contains(keyword)) {
+        if (item.name.toLowerCase().contains(keyword)) {
           results.add(item);
           onFound?.call(item);
           if (results.length >= maxResults) {
@@ -467,7 +379,6 @@ abstract final class LocalMediaService {
     LocalMediaSource source,
     String path, {
     required bool showHidden,
-    required bool onlyMedia,
   }) async {
     final dir = Directory(path);
     if (!dir.existsSync()) {
@@ -491,15 +402,6 @@ abstract final class LocalMediaService {
       if (stat == null) {
         continue;
       }
-      // 未知扩展名(或没有扩展名)的大文件: 嗅探文件头。mpv 按内容探测
-      // 打开文件, 白名单只是展示层过滤——不该把非常规命名的 VR 片源
-      // 静默吃掉。
-      var probedVideo = false;
-      if (!isDir &&
-          stat.size >= probeMinBytes &&
-          !LocalMediaExtensions.known(LocalMediaExtensions.of(name))) {
-        probedVideo = await sniffVideoFile(entity.path);
-      }
       items.add(
         LocalMediaItem(
           name: name,
@@ -508,7 +410,6 @@ abstract final class LocalMediaService {
           size: isDir ? null : stat.size,
           modified: stat.modified,
           isDirectory: isDir,
-          probedVideo: probedVideo,
         ),
       );
     }
@@ -530,7 +431,6 @@ abstract final class LocalMediaService {
     LocalMediaSource source,
     String path, {
     required bool showHidden,
-    required bool onlyMedia,
   }) async {
     final client = _webDavClient(source);
     final files = await client.readDir(path.isEmpty ? '/' : path);
@@ -692,9 +592,13 @@ abstract final class LocalMediaService {
     ];
   }
 
-  /// 交给播放器之前解析出真正可播的地址:
-  /// SMB 需要经本机回环 HTTP 代理(安卓端打包的 FFmpeg 没有 smb 协议),
-  /// 其余协议(WebDAV/HTTP/FTP/本机)直接返回给 mpv。
+  /// 交给播放器之前解析出真正可播的地址。
+  ///
+  /// SMB 默认走定制 libmpv 内置的 **smb:// 协议**(ffmpeg --enable-libsmb2,
+  /// 与 VLC 安卓端同一实现库): mpv 直接持有 SMB 会话 —— seek 是同句柄
+  /// 定位读(不重连、不易断流)、退出播放立即断开(不再有代理泵残余传输)、
+  /// 会话池完全留给目录浏览(跳转不再与播放抢连接)。设置里可切回旧的
+  /// 回环 HTTP 代理路径(兜底)。其余协议(WebDAV/HTTP/FTP/本机)原样返回。
   static Future<String> resolvePlayUrl(LocalMediaItem item) async {
     final source = item.source;
     if (!source.type.needsProxy) {
@@ -702,6 +606,41 @@ abstract final class LocalMediaService {
     }
     // 以**条目自身的 URI** 为准, 而不是来源的 endpoint:
     // 主机级来源(`smb://NAS`)的 endpoint 是 null, 共享名在条目 URI 里。
+    final ep = SmbBrowse.parseEndpoint(item.uri) ?? source.smbEndpoint;
+    if (ep == null) {
+      return playbackUrl(item);
+    }
+    if (Pref.smbNativeProtocol) {
+      return SmbBrowse.directUrl(
+        host: ep.host,
+        port: ep.port,
+        share: ep.share,
+        remotePath: ep.path.isEmpty ? (item.remotePath ?? '') : ep.path,
+        user: source.username,
+        password: source.password,
+        domain: source.domain ?? '',
+        address: source.address,
+      );
+    }
+    return SmbBrowse.serveUrl(
+      host: ep.host,
+      port: ep.port,
+      share: ep.share,
+      remotePath: ep.path.isEmpty ? (item.remotePath ?? '') : ep.path,
+      user: source.username,
+      password: source.password,
+      domain: source.domain ?? '',
+      address: source.address,
+    );
+  }
+
+  /// 下载到本机用的地址: dio 不认识 smb://, SMB 一律经回环 HTTP 代理
+  /// (支持 Range, 能断点/进度), 其余来源与 [resolvePlayUrl] 相同。
+  static Future<String> resolveTransferUrl(LocalMediaItem item) async {
+    final source = item.source;
+    if (!source.type.needsProxy) {
+      return playbackUrl(item);
+    }
     final ep = SmbBrowse.parseEndpoint(item.uri) ?? source.smbEndpoint;
     if (ep == null) {
       return playbackUrl(item);
@@ -725,7 +664,7 @@ abstract final class LocalMediaService {
   /// 目标目录用 app 既有的 [downloadPath]（设置里可改；默认在应用外部存储的
   /// `download/`），重名自动加 ` (1)`/` (2)` 后缀，绝不覆盖已有文件。
   ///
-  /// 地址走 [resolvePlayUrl]，因此三种网络来源是**同一条下载路径**：
+  /// 地址走 [resolveTransferUrl]，三种网络来源是**同一条下载路径**：
   /// SMB 经本机回环 HTTP 代理（支持 Range，dio 能断点/进度），
   /// WebDAV/HTTP 直接下（URL 里的 userinfo 由 dart:io 自动转成 Basic 认证）。
   ///
@@ -736,7 +675,7 @@ abstract final class LocalMediaService {
     bool Function()? cancelled,
     String? dirPath,
   }) async {
-    final url = await resolvePlayUrl(item);
+    final url = await resolveTransferUrl(item);
     final dir = Directory(dirPath ?? downloadPath);
     if (!dir.existsSync()) {
       dir.createSync(recursive: true);
@@ -891,12 +830,6 @@ abstract final class LocalMediaService {
       return Error(_humanize(err, source));
     }
   }
-
-  /// 目录始终保留, 文件只保留播放器能播的
-  static List<LocalMediaItem> _filterPlayable(List<LocalMediaItem> items) => [
-    for (final e in items)
-      if (e.isDirectory || e.isPlayable) e,
-  ];
 
   static List<LocalMediaItem> sortItems(
     List<LocalMediaItem> items,

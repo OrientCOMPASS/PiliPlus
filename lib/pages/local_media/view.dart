@@ -14,7 +14,7 @@ import 'package:material_ui/material_ui.dart';
 /// 「本地」板块(顶层 Tab 之一): 本机媒体库 + 局域网。
 ///
 /// 组织方式参照 VLC 安卓版:
-///   * 媒体库: 扫描本机视频并**按文件夹排列**, 点进去就是该文件夹的播放列表
+///   * 媒体库: 扫描本机文件并**按文件夹排列**, 点进去就是该文件夹的播放列表
 ///   * 网络: 自动发现局域网里的 SMB 主机, 也可手动添加 SMB/WebDAV/HTTP/FTP
 class LocalMediaPage extends StatefulWidget {
   const LocalMediaPage({super.key});
@@ -108,7 +108,7 @@ class _LocalMediaPageState extends State<LocalMediaPage>
           if (_tabController.index == 0)
             Obx(
               () => IconButton(
-                tooltip: '重新扫描本机视频',
+                tooltip: '重新扫描本机文件',
                 onPressed: _controller.library.scanning.value
                     ? null
                     : _controller.rescanLibrary,
@@ -152,9 +152,9 @@ class _LocalMediaPageState extends State<LocalMediaPage>
               height: 20,
               child: CircularProgressIndicator(strokeWidth: 2),
             ),
-            title: const Text('正在扫描本机视频…'),
+            title: const Text('正在扫描本机文件…'),
             subtitle: Text(
-              '已发现 ${folders.length} 个文件夹 / ${library.scannedFiles.value} 个视频',
+              '已发现 ${folders.length} 个文件夹 / ${library.scannedFiles.value} 个文件',
             ),
           ),
         );
@@ -183,7 +183,7 @@ class _LocalMediaPageState extends State<LocalMediaPage>
             leading: Icon(Icons.warning_amber_rounded),
             title: Text('扫描已达上限，结果可能不完整'),
             subtitle: Text(
-              '本机视频文件过多, 只列出了前面一部分; '
+              '本机文件过多, 只列出了前面一部分; '
               '找不到的文件请用上方「存储卷」直接浏览目录',
             ),
           ),
@@ -229,14 +229,14 @@ class _LocalMediaPageState extends State<LocalMediaPage>
               children: [
                 const Icon(Icons.video_library_outlined, size: 56),
                 Text(
-                  library.lastError.value ?? '还没有扫描到本机视频',
+                  library.lastError.value ?? '还没有扫描到本机文件',
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.bodyMedium,
                 ),
                 FilledButton.tonalIcon(
                   onPressed: _controller.rescanLibrary,
                   icon: const Icon(Icons.search),
-                  label: const Text('扫描本机视频'),
+                  label: const Text('扫描本机文件'),
                 ),
               ],
             ),
@@ -257,7 +257,7 @@ class _LocalMediaPageState extends State<LocalMediaPage>
 
   Widget _buildFolder(BuildContext context, LocalMediaFolder folder) {
     final subtitle = <String>[
-      '${folder.count} 个视频',
+      '${folder.count} 个文件',
       CacheManager.formatSize(folder.totalSize),
       if (folder.latest case final latest?) _formatDate(latest),
       folder.path,

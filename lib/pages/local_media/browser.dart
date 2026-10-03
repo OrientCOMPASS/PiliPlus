@@ -480,7 +480,11 @@ class _LocalMediaBrowserPageState extends State<LocalMediaBrowserPage> {
             ? Icons.folder_outlined
             : item.isAudio
             ? Icons.audiotrack_outlined
-            : Icons.movie_outlined,
+            : item.isVideo
+            ? Icons.movie_outlined
+            // 列表不再按类型过滤: 未知类型的文件给通用图标, 点开能不能
+            // 播交给 mpv 判断(最差报"无法播放", 不静默吞文件)
+            : Icons.insert_drive_file_outlined,
       ),
       title: Text(item.name, maxLines: 2, overflow: TextOverflow.ellipsis),
       subtitle: subtitle.isEmpty

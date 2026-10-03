@@ -323,6 +323,17 @@ List<SettingsModel> get playSettings => [
     setKey: SettingBoxKey.vrStereoOutput,
     defaultVal: false,
   ),
+  // 局域网
+  const SwitchModel(
+    title: 'SMB 内置协议直连播放',
+    subtitle:
+        'SMB 视频由定制播放器内置的 smb:// 协议直连读取(与 VLC 同一实现库, '
+        'seek 不重连、退出立即断开、不与目录浏览抢连接)；'
+        '如遇兼容性问题可关闭, 回退旧的回环 HTTP 代理方式',
+    leading: Icon(Icons.lan_outlined),
+    setKey: SettingBoxKey.smbNativeProtocol,
+    defaultVal: true,
+  ),
   const SwitchModel(
     title: 'VR 陀螺仪视角',
     subtitle: '进入 VR 操作模式后转动设备环视(参考头追), 播放中可随时开关',

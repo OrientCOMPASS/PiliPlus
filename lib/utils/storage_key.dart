@@ -242,6 +242,7 @@ abstract final class SettingBoxKey {
       appFont = 'appFont',
       // VR / 全景
       vrAutoDetect = 'vrAutoDetect',
+      smbNativeProtocol = 'smbNativeProtocol',
       vrDefaultFov = 'vrDefaultFov',
       vrEye = 'vrEye',
       vrGyro = 'vrGyro',

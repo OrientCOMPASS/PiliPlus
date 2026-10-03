@@ -1124,6 +1124,11 @@ abstract final class Pref {
   static bool get vrAutoDetect =>
       _setting.get(SettingBoxKey.vrAutoDetect, defaultValue: true);
 
+  /// SMB 播放走定制 libmpv 内置的 smb:// 协议(ffmpeg libsmb2, 与 VLC 同库)。
+  /// 关闭则回退第十轮的"Dart SMB2 客户端 + 回环 HTTP 代理"路径(兜底)。
+  static bool get smbNativeProtocol =>
+      _setting.get(SettingBoxKey.smbNativeProtocol, defaultValue: true);
+
   /// VR 默认水平视场角
   static double get vrDefaultFov =>
       _setting.get(SettingBoxKey.vrDefaultFov, defaultValue: 90.0);

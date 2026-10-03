@@ -158,6 +158,51 @@ abstract final class SmbBrowse {
     );
   }
 
+  /// 拼给定制 libmpv 的 **smb:// 直连地址**(ffmpeg libsmb2 协议, 与 VLC
+  /// 安卓端同一实现路径): `smb://[domain;][user[:pass]@]host[:port]/share/path`。
+  ///
+  /// 各分量做百分号编码(libmpv 侧协议会解码), 密码因此可以含任意字符且
+  /// 不会出现在日志里; [address](发现阶段记录的 IP)优先于主机名——安卓的
+  /// getaddrinfo 不解析 NetBIOS 名, 主机级发现得到的名字必须换回 IP。
+  /// 直连播放让 mpv 自己持有 SMB 会话: seek 是同句柄定位读(不重连)、
+  /// 退出即断开、目录浏览不再与播放抢会话池。
+  static String directUrl({
+    required String host,
+    int port = 445,
+    required String share,
+    required String remotePath,
+    String? user,
+    String? password,
+    String domain = '',
+    String? address,
+  }) {
+    final h = (address != null && address.isNotEmpty) ? address : host;
+    // IPv6 字面量要加方括号(libsmb2 的 host:port 解析支持 [v6]:port)
+    final hostPart = h.contains(':') ? '[$h]' : h;
+    final portPart = port == 445 ? '' : ':$port';
+    final cred = StringBuffer();
+    if (domain.isNotEmpty) {
+      cred
+        ..write(Uri.encodeComponent(domain))
+        ..write(';');
+    }
+    if (user != null && user.isNotEmpty) {
+      cred.write(Uri.encodeComponent(user));
+      if (password != null && password.isNotEmpty) {
+        cred
+          ..write(':')
+          ..write(Uri.encodeComponent(password));
+      }
+      cred.write('@');
+    }
+    final segments = normalizePath(remotePath)
+        .split('\\')
+        .where((e) => e.isNotEmpty)
+        .map(Uri.encodeComponent);
+    return 'smb://$cred$hostPart$portPart/'
+        '${Uri.encodeComponent(share)}/${segments.join('/')}';
+  }
+
   /// 注册到本机回环代理并返回可交给 mpv 的 http URL
   static Future<String> serveUrl({
     required String host,

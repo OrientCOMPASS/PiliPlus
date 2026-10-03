@@ -1769,3 +1769,130 @@ media_kit 侧 `dispose()` 本身是 stop(2s 超时) → 5 秒后
   改动文件）；
 - APK：release 包解包比对 libmpv.so sha256 的流程本轮已跑通，出包后
   以同一方法确认新 jar 进包（见交付说明）。
+
+## 19. 第十四轮：真机反馈（VR 可用后的交互对齐 / SMB 对齐 libvlc / 列表彻底放开）
+
+> 第十三轮修复后真机复测：**VR 已能正确渲染**（VR_DUMB_FIX 生效）。本轮
+> 反馈：① 本机列表仍看不到准备的 VR 测试文件——要求彻底不过滤；② 局域网
+> 退出播放后仍观察到拉流、多次 seek 易断流、目录跳转显著慢于 VLC——要求
+> 对齐 videolan/vlc 的 libvlc smb 行为；③ VR 陀螺仪开/关视角跳变、初次
+> 开启背对画面要转 180°、左侧方向键多余——要求对齐 xl_player 的操作逻辑；
+> ④ 1.5x 倍速画面从体感 60 帧掉到 ~10 帧（xl_player 正常）。
+
+### 19.1 本机/浏览列表：彻底取消文件类型过滤
+
+按需求方要求做到最简：**目录里拿到什么就返回什么**，不再判断"是不是媒体
+文件"——能不能播交给 mpv 在点开时按内容探测，最差就是报"无法播放"，
+也好过静默吞掉用户的测试片源。
+
+- `LocalMediaService.list/listOrThrow/search` 删除 `_filterPlayable`/扩展名
+  门槛；`onlyMedia` 参数整体移除；
+- 媒体库扫描 `_walk` 计入**所有文件**（保留的剪枝只有：隐藏目录、
+  `android`/`lost.dir`/缩略图缓存这类应用私有目录——否则扫描会被系统
+  缓存淹没并触发上限）；文件夹副标题改为"X 个文件"；
+- 上一轮加的文件头嗅探/`probedVideo`/`LocalMediaExtensions.known` 整体
+  移除（过滤都没了，嗅探失去意义）；扩展名表保留但**只用于类型判定**
+  （连播列表归组、字幕匹配、图标）；
+- 浏览页未知类型文件给通用图标；`backup` 目录跳过、回前台/切 Tab 过期
+  重扫、部分访问权限提示、上限提示等上一轮的补漏全部保留。
+
+若这版仍看不到某个文件，只剩系统层可见性一种可能（安卓 14+ 部分访问未
+勾选、卷未挂载），界面会有对应提示。
+
+### 19.2 SMB 对齐 libvlc：定制 libmpv 内置 smb:// 协议（libsmb2）
+
+**旧架构的三宗罪**（都源自"Dart SMB2 客户端 + 回环 HTTP 代理"这层转译）：
+
+1. 退出后仍拉流：mpv 关闭 HTTP 连接后代理泵最多再读一个 512KB 块才退出，
+   且 mpv 侧 stop→terminate 有秒级窗口，NAS 侧看就是"退出后还在传输"；
+2. seek 断流：每次大幅 seek = mpv 弃旧连接、带 Range 重开 → 代理侧要重新
+   取会话/开句柄/走信用流控，多来几次就出现秒级空窗甚至超时断流；
+3. 浏览慢：**播放泵整场占用会话池**（一个 HTTP 请求 = 一次 checkout 到
+   流结束），目录浏览要么等、要么每次现握手（100~300ms/次）。
+
+**VLC 的做法**是 libvlc 内置 libsmb2 access 模块：播放器自己持有 SMB 会话，
+seek = 同句柄定位读，关闭 = socket 随实例销毁。我们照搬：**给定制 libmpv
+的 ffmpeg 打上 `patches/ffmpeg/libsmb2.patch`**，新增 `smb://` URLProtocol
+（`libavformat/libsmb2.c`，ffmpeg 上游只有 GPLv3 的 libsmbclient，从未收
+libsmb2 协议，故自写；接口对照上游 libsmbclient 协议与 VLC smb access）：
+
+- 依赖 `libsmb2 v6.2`（VLC 同款库，LGPL）静态+PIC 链入 libmpv.so，
+  jar 不新增 .so；`readelf -d` 自检无动态依赖；
+- URL：`smb://[domain;][user[:pass]@]host[:port]/share/path`，各分量百分号
+  编码（协议侧解码），密码不进日志；命令级超时默认 10s（`timeout` 选项），
+  网络死掉不会把 mpv 销毁流程拖挂；
+- 只读、可 seek（AVSEEK_SIZE 报文件大小；SEEK_* 走 `smb2_lseek`，同句柄
+  定位读，**不重连**）；
+- 应用侧 `SmbBrowse.directUrl()` 拼地址（发现阶段记录的 IP 优先于主机名——
+  安卓 getaddrinfo 不解析 NetBIOS 名），`resolvePlayUrl` 默认直连；
+  **回环代理保留**为下载通道（dio 不认 smb://）与设置可关的兜底
+  （「SMB 内置协议直连播放」开关，兼容性出问题可一键回退旧路径）；
+- 会话池从此只服务目录浏览：播放中翻目录不再抢连接（③ 的主因即除）。
+
+libsmb2 的上游头文件对外部使用者不自包含（`<time.h>` 被自家 `HAVE_TIME_H`
+守卫、`libsmb2.h` 依赖先包含 `smb2.h`），ffmpeg configure 的单头探测会挂
+——`scripts/libsmb2.sh` 安装后给头文件补前置 include（幂等、带标记）。
+本地已用原生 gcc 完整预演：libsmb2 静态构建 → ffmpeg configure
+（`--enable-libsmb2 --enable-protocol=libsmb2`）→ `libsmb2.o` 编译 →
+符号对照 `libsmb2.a` 全命中；**首次 CI 失败正是 flavor 只开了外部库开关
+没开 `--enable-protocol=libsmb2`**，被 bundle 的 strings 自检拦下（该自检
+本轮新增，值回票价）。
+
+### 19.3 VR 操作对齐 xl_player：陀螺仪开关零跳变
+
+拉取 xl_player 源码对照（`xl_model_ball.c`/`xl_tracker.c`/
+`xl_player_gl_thread.c`）：xl 的手动模式在 native 累积增量
+（`M = Rz·Rx·Ry`），陀螺仪模式 `M = head·Ry(yaw)`（忽略手动俯仰），
+**开启头追时直接采用原始设备姿态**——这正是"初次切入陀螺仪背对画面"的
+行为来源。本轮我们不照抄这个缺陷，而是把两个方向都做成**数学上严格连续**
+（`vr_vo_gpu.patch`，标记 VR_GYRO_CONT）：
+
+- **开启陀螺仪**：等首个真实陀螺仪样本到达（EKF 收敛前不采样，避免用
+  单位阵当头姿）后采样参考系 `ref_inv = head⁻¹·B·A⁻¹`
+  （A = on 模式手动部 `Ry(y)·Rx(p)`，B = off 模式 `Rx(p)·Ry(y)`，角度均含
+  折叠偏置）——开启瞬间画面**逐元素不动**，之后设备转动才生效；
+- **关闭陀螺仪**：把最后一次跟踪模型的中心方向分解回 yaw/pitch
+  （`d = -(m[2],m[6],m[10])`，`p = -asin(d1)`，`y = atan2(d0,-d2)`），
+  **赋值**进 `bias_yaw/bias_pitch`；手动模式在偏置之上继续（180° 片源
+  仍按边界收敛），滚转分量丢弃（回正到水平，街景类应用同款行为）；
+- 「视角摆正」清零偏置并以当前头姿为新参考；VR 总开关 off→on 的上升沿
+  与**换片**（`gl_video_config` 的视频参数变化 / `vr_new_stream`）都重置
+  偏置——Dart 侧每个新会话都会清零视角，native 偏置必须同步归零；
+- 数学验证：独立 C 程序直接引用补丁内的矩阵函数，5 万组随机姿态/偏置/
+  视角组合下"开启连续性"矩阵误差 ~4e-7、"关闭折叠"中心误差 ~1e-6
+  （仅越界夹取场景按需求收敛）。
+
+**左侧方向键已删除**（拖拽环视覆盖全部视角操作；右侧的视场角/摆正/陀螺仪/
+分屏/眼位按钮保留）。
+
+关于"xl 把两只眼渲染到前后两面、我们少渲染一半"的疑问：xl 的 Cardboard
+模式是把球面网格**画两遍**（左右眼各一次，viewport 各占 FBO 一半）再叠
+畸变 pass——不是前后背面。我们的单屏（单眼）模式只画一遍全屏，确实约为
+xl 立体模式的一半着色量；我们的立体分屏模式与 xl 等价（两遍半屏+畸变）。
+
+### 19.4 1.5x 倍速卡顿
+
+三个因素叠加，本轮修掉两个：
+
+1. **代理吞吐天花板（主因嫌疑）**：Dart 代理泵 = 512KB 同步 SMB 读 +
+   信用流控 + Dart 事件循环，高码率全景片源 1.5x 的持续带宽（可达
+   100Mbps+）很容易顶穿，缓存被抽干 → 卡顿-缓冲振荡。19.2 的直连
+   libsmb2（C 实现、大块读）就是 VLC 的吞吐水平；
+2. **VR 下一律禁用静止帧缓存**：改为"头追关闭且视角未变"时恢复 blit
+   缓存（暂停/OSD 重绘/低帧率内容的重复帧不再全链重渲染），VR 视角
+   热更新会精确失效缓存；
+3. 若直连后 1.5x 仍卡：需要真机数据定位——请看播放页菜单里的
+   `hwdec-current`（若是 mediacodec-copy/软解，1.5x 的 4K/8K 解码本身就
+   是瓶颈）与片源规格（分辨率/帧率/码率），并对比同片源 2D（VR 关）1.5x
+   是否也卡，反馈后继续收敛。
+
+### 19.5 本轮验证
+
+- native：三补丁 + ffmpeg libsmb2 补丁在 pristine 树上 `git apply` 重放
+  通过；libsmb2/ffmpeg 协议层在沙盒内**原生编译全链路预演**（configure +
+  单对象编译 + 符号核对）；VR_GYRO_CONT 数学 5 万组数值验证；
+- Dart：`dart format` 解析通过；directUrl 纯函数单测（编码/端口/IPv6/
+  匿名）；strict 路径零容忍由 CI 把关；
+- CI：libmpv 全量重建出包（bundle 自检新增 smb 协议 strings + 静态链接
+  readelf 检查）→ app analyze/test/release；APK 内 libmpv.so 与滚动 jar
+  逐字节比对（交付说明附校验和）。

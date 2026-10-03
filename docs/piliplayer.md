@@ -2247,3 +2247,55 @@ B 键已由 MainActivity `dispatchKeyEvent` 映射为返回键。本轮补齐肩
    R1 = 快进 60 秒**、B = 返回。
 5. **回归**：SMB 直连播放/倍速/退出断流、深链 `piliplayer://play?url=…`、
    系统"打开方式"播本机文件、签名安装（先卸旧包）不受影响。
+
+---
+
+## §24. 仓库精简为 piliplayer 专用（2026-10-03）
+
+为把代码迁移到「专用于 host piliplayer」的新仓库，对仓库做了两阶段清理，
+只保留构建 Android（arm64-v8a）piliplayer 所需的内容；其余平台痕迹全部移除。
+
+### 24.1 第一阶段（`cd8e1c5`）：移除其它平台工程 / CI / 资源
+
+- 删平台工程目录：`ios/`、`linux/`、`macos/`、`windows/`；桌面资源
+  `assets/linux/`、`assets/images/logo/{ico,desktop}/`。
+- 删其它平台 CI：`build.yml` / `ios.yml` / `linux_x64.yml` / `mac.yml` / `win_x64.yml`
+  与 `.github/ISSUE_TEMPLATE/`、`distribute_options.yaml`。
+- 仅保留 `piliplayer_ci.yml`（应用）与 `libmpv_vr.yml`（自编译 libmpv）。
+- `pubspec.yaml` 去桌面资源条目、`flutter_launcher_icons` 收敛到 android。
+- README 重写为 piliplayer（Android-only / VR / 本地局域网）视角。
+
+### 24.2 第二阶段（`30365b0`）：深度清理桌面依赖与死代码（−7526 行）
+
+移除 5 个桌面平台依赖及其全部代码路径（`pubspec.yaml` + `pubspec.lock`）：
+`window_manager` / `tray_manager` / `win32` / `screen_retriever` / `desktop_webview_window`。
+保留 `cupertino_ui` / `material_ui`（`patch.ps1` 与核心 text_field 组件仍依赖）。
+
+- **桌面窗口 / 托盘 / 悬浮窗 PiP**：`main.dart` 桌面初始化块、`pages/main/view.dart`
+  的 `WindowListener`/`TrayListener` 全套（−209 行）、`pl_player/controller.dart` 的
+  `enter/exit/toggleDesktopPip`+`isAlwaysOnTop`+`setAlwaysOnTop`、播放器 UI 与
+  live_room/video 的桌面 PiP、置顶按钮及 `keyP` 快捷键（均 `isDesktop` 守卫）。
+  `isDesktopPip` 收敛为恒 `false` 的 getter，令 UI 中大量 `isFullScreen || isDesktopPip`
+  判断无需逐处改写（安卓上始终走非 PiP 分支）。
+- **桌面 webview**：`webview/view.dart`、`video/note/view.dart`、`login/geetest/*`
+  的 `desktop_webview_window` Linux 分支（仅留 flutter_inappwebview 安卓路径）；
+  删 `linux_cookie_manager.dart`，`login_utils.dart` 去 LinuxCookieManager 调用。
+- **桌面字体枚举**：`font_utils.dart` 去 Windows(win32 `EnumFontFamiliesEx`) 与
+  Linux(fontconfig) 分支，仅留 `_initAndroid`；删生成文件 `fontconfig.g.dart`（−5771 行）。
+- **iOS 补丁基础设施**：`patch.ps1` 精简为 android-only；删 `bottom_sheet_ios_*.patch`、
+  `geetest_ios.patch`、`scripts/cupertino/`、material 的 iOS 补丁、`build.ps1`（原属已删的 build.yml）。
+- 删 `calc_window_position.dart`（screen_retriever，仅桌面窗口定位用）。
+
+**保留的边界**：少量求值恒为 false 的简单平台守卫（设置页/音量/全屏里的
+`PlatformUtils.isDesktop`、`Platform.isWindows/isLinux` 判断，及 `Platform.isIOS ? …`
+三元）未逐处删除——它们不引用任何被移除的依赖、在安卓上不可见，属共享代码的编译接缝；
+全量移除是纯机械改动且带回归风险，收益仅为观感，故留作可选后续。
+
+### 24.3 验证与交付
+
+- 本地：全仓 `lib/`+`test/` 通过 `dart format` 解析检查（无语法错误）；grep 确认
+  5 个依赖与已删符号/文件零残留引用；`STRICT_PATHS` 与 `test/` 未触及。
+- CI（`v2.1.5-test` → `30365b0`，run 37134638417）**全绿一次通过**：
+  Analyze（error 致命）✓ / 新代码零容忍 strict analyze ✓ / Test ✓ /
+  Build Release Apk（arm64-v8a）✓ / release 签名核验 ✓ / 上传 Release ✓。
+- 产物：Release `v2.1.5-test` 的 `app-arm64-v8a-release.apk`（约 23 MB）+ SHA256SUMS。

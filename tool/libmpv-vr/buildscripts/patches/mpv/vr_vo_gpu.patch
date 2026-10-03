@@ -12,7 +12,7 @@ index fb10be5..04dfbc9 100644
      'video/out/vo.c',
      'video/out/vo_gpu.c',
 diff --git a/video/out/gpu/video.c b/video/out/gpu/video.c
-index c0a1be8..a1a7aea 100644
+index c0a1be8..9e30455 100644
 --- a/video/out/gpu/video.c
 +++ b/video/out/gpu/video.c
 @@ -39,6 +39,7 @@
@@ -23,7 +23,7 @@ index c0a1be8..a1a7aea 100644
  #include "video/out/filter_kernels.h"
  #include "video/out/aspect.h"
  #include "video/out/dither.h"
-@@ -204,6 +205,12 @@ struct gl_video {
+@@ -204,6 +205,17 @@ struct gl_video {
      struct ra_tex *error_diffusion_tex[2];
      struct ra_tex *screen_tex;
      struct ra_tex *output_tex;
@@ -32,11 +32,16 @@ index c0a1be8..a1a7aea 100644
 +    // composited flat frame which is then projected onto the sphere.
 +    struct vr_ctx *vr;
 +    struct ra_tex *vr_flat_tex;
++    // Last-seen contents of the option cache, used to tell "only VR view
++    // parameters changed" apart from real reinit-worthy changes. Comparing
++    // against p->opts instead would misfire whenever check_gl_features()
++    // adjusted p->opts (dumb-mode whitelist, compute-peak fallback, ...).
++    struct gl_video_opts opts_cache_copy;
 +
      struct ra_tex **hook_textures;
      int num_hook_textures;
      int idx_hook_textures;
-@@ -410,6 +417,10 @@ static const struct gl_video_opts gl_video_opts_def = {
+@@ -410,6 +422,10 @@ static const struct gl_video_opts gl_video_opts_def = {
      .shader_cache = true,
      .hwdec_interop = "auto",
      .treat_srgb_as_power22 = 1|2|4, // auto
@@ -47,7 +52,7 @@ index c0a1be8..a1a7aea 100644
  };
  
  static OPT_STRING_VALIDATE_FUNC(validate_error_diffusion_opt);
-@@ -556,6 +567,26 @@ const struct m_sub_options gl_video_conf = {
+@@ -556,6 +572,26 @@ const struct m_sub_options gl_video_conf = {
          {"gpu-shader-cache-dir", OPT_STRING(shader_cache_dir), .flags = M_OPT_FILE},
          {"gpu-hwdec-interop",
              OPT_STRING_VALIDATE(hwdec_interop, ra_hwdec_validate_opt)},
@@ -74,7 +79,7 @@ index c0a1be8..a1a7aea 100644
          {"gamut-warning", OPT_REMOVED("Replaced by --gamut-mapping-mode=warn")},
          {"gamut-clipping", OPT_REMOVED("Replaced by --gamut-mapping-mode=desaturate")},
          {"tone-mapping-desaturate", OPT_REMOVED("Replaced by --tone-mapping-mode")},
-@@ -666,6 +697,7 @@ static void uninit_rendering(struct gl_video *p)
+@@ -666,6 +702,7 @@ static void uninit_rendering(struct gl_video *p)
      ra_tex_free(p->ra, &p->blend_subs_tex);
      ra_tex_free(p->ra, &p->screen_tex);
      ra_tex_free(p->ra, &p->output_tex);
@@ -82,7 +87,7 @@ index c0a1be8..a1a7aea 100644
  
      for (int n = 0; n < 2; n++)
          ra_tex_free(p->ra, &p->error_diffusion_tex[n]);
-@@ -3206,8 +3238,24 @@ static void pass_draw_to_screen(struct gl_video *p, const struct ra_fbo *fbo, in
+@@ -3206,8 +3243,24 @@ static void pass_draw_to_screen(struct gl_video *p, const struct ra_fbo *fbo, in
  
      if (flags & RENDER_SCREEN_COLOR)
          pass_dither(p, fbo);
@@ -109,7 +114,7 @@ index c0a1be8..a1a7aea 100644
  }
  
  // flags: bit set of RENDER_FRAME_* flags
-@@ -3445,7 +3493,10 @@ void gl_video_render_frame(struct gl_video *p, struct vo_frame *frame,
+@@ -3445,7 +3498,10 @@ void gl_video_render_frame(struct gl_video *p, struct vo_frame *frame,
      }
  
      if (has_frame) {
@@ -121,7 +126,7 @@ index c0a1be8..a1a7aea 100644
                             (p->frames_drawn || !frame->still);
          if (interpolate) {
              double ratio = frame->ideal_frame_duration / frame->vsync_interval;
-@@ -3473,7 +3524,10 @@ void gl_video_render_frame(struct gl_video *p, struct vo_frame *frame,
+@@ -3473,7 +3529,10 @@ void gl_video_render_frame(struct gl_video *p, struct vo_frame *frame,
                  // texture to speed up subsequent re-draws (if any exist)
                  bool repeats = frame->num_vsyncs > 1 && frame->display_synced;
                  bool r = false;
@@ -133,7 +138,7 @@ index c0a1be8..a1a7aea 100644
                      (p->ra->caps & RA_CAP_BLIT) && fbo->tex->params.blit_dst)
                  {
                      // Attempt to use the same format as the destination FBO
-@@ -3515,7 +3569,12 @@ done:
+@@ -3515,7 +3574,12 @@ done:
  
      debug_check_gl(p, "after video rendering");
  
@@ -147,7 +152,37 @@ index c0a1be8..a1a7aea 100644
          // If we haven't actually drawn anything so far, then we technically
          // need to consider this the start of a new pass. Let's call it a
          // redraw just because, since it's basically a blank frame anyway
-@@ -4084,6 +4143,7 @@ void gl_video_uninit(struct gl_video *p)
+@@ -3847,6 +3911,14 @@ static bool check_dumb_mode(struct gl_video *p)
+     struct gl_video_opts *o = &p->opts;
+     if (p->use_integer_conversion)
+         return false;
++    // VR_DUMB_FIX (PiliPlus): VR reprojection renders through the full chain
++    // (intermediate FBO + sphere mesh draw in pass_draw_to_screen), so it is
++    // never compatible with the "no advanced processing" dumb-mode shortcut.
++    // Without this, clients whose options happen to look "fast" (media_kit on
++    // Android sets bilinear scaling and disables dither/downscaling extras)
++    // would silently end up in dumb mode and VR would stay flat.
++    if (o->vr)
++        return false;
+     if (o->dumb_mode > 0) // requested by user
+         return true;
+     if (o->dumb_mode < 0) // disabled by user
+@@ -3953,6 +4025,14 @@ static void check_gl_features(struct gl_video *p)
+     p->forced_dumb_mode = p->opts.dumb_mode > 0 || !have_fbo || !have_texrg;
+     bool voluntarily_dumb = check_dumb_mode(p);
+     if (p->forced_dumb_mode || voluntarily_dumb) {
++        // VR_DUMB_FIX (PiliPlus): VR can only survive here if dumb mode is
++        // *forced* (no usable FBOs / user override). Say so loudly instead of
++        // silently dropping back to flat rendering.
++        if (p->opts.vr) {
++            MP_WARN(p, "VR reprojection requested but dumb mode is forced "
++                       "(gpu-dumb-mode=%d, have_fbo=%d); VR stays disabled.\n",
++                    p->opts.dumb_mode, have_fbo);
++        }
+         if (voluntarily_dumb) {
+             MP_VERBOSE(p, "No advanced processing required. Enabling dumb mode.\n");
+         } else if (p->opts.dumb_mode <= 0) {
+@@ -4084,6 +4164,7 @@ void gl_video_uninit(struct gl_video *p)
  
      uninit_video(p);
      ra_hwdec_ctx_uninit(&p->hwdec_ctx);
@@ -155,7 +190,7 @@ index c0a1be8..a1a7aea 100644
      gl_sc_destroy(p->sc);
  
      ra_tex_free(p->ra, &p->lut_3d_texture);
-@@ -4120,6 +4180,13 @@ bool gl_video_showing_interpolated_frame(struct gl_video *p)
+@@ -4120,6 +4201,13 @@ bool gl_video_showing_interpolated_frame(struct gl_video *p)
      return p->is_interpolated;
  }
  
@@ -169,7 +204,7 @@ index c0a1be8..a1a7aea 100644
  static bool is_imgfmt_desc_supported(struct gl_video *p,
                                       const struct ra_imgfmt_desc *desc)
  {
-@@ -4181,6 +4248,7 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
+@@ -4181,9 +4269,11 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
      };
      // make sure this variable is initialized to *something*
      p->pass = p->pass_fresh;
@@ -177,22 +212,33 @@ index c0a1be8..a1a7aea 100644
      struct gl_video_opts *opts = p->opts_cache->opts;
      p->cms = gl_lcms_init(p, log, g, opts->icc_opts),
      p->opts = *opts;
-@@ -4199,11 +4267,43 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
++    p->opts_cache_copy = *opts;
+     for (int n = 0; n < SCALER_COUNT; n++)
+         p->scaler[n] = (struct scaler){.index = n};
+     // our VAO always has the vec2 position as the first element
+@@ -4199,11 +4289,73 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
      return p;
  }
  
 +// Returns true if the only differences between the two option sets are the
-+// VR fields. Those are consumed per-frame by vr.c (mesh rebuilds / tracker
-+// start-stop included), so a change confined to them must NOT go through
-+// reinit_from_options(): head tracking and drag-look update yaw/pitch many
-+// times per second, and tearing down the render chain for each update is
-+// both slow and visible (this was the fatal flaw of the old user-shader
-+// approach, see PiliPlus docs/piliplayer.md §9.1).
-+static bool only_vr_opts_changed(const struct gl_video_opts *a,
-+                                 const struct gl_video_opts *b)
++// "hot" VR *view* fields (layout/projection/eye/stereo-output/fov/yaw/pitch/
++// head-tracking/reset-view). Those are consumed per-frame by vr.c (mesh
++// rebuilds / tracker start-stop included), so a change confined to them must
++// NOT go through reinit_from_options(): head tracking and drag-look update
++// yaw/pitch many times per second, and tearing down the render chain for
++// each update is both slow and visible (this was the fatal flaw of the old
++// user-shader approach, see PiliPlus docs/piliplayer.md §9.1).
++//
++// The VR master flag (`vr`) is deliberately NOT hot: toggling it changes
++// dumb-mode eligibility (see VR_DUMB_FIX in check_dumb_mode), so it must go
++// through a full reinit to (un)enter dumb mode and to restore/whitelist
++// p->opts accordingly.
++static bool only_vr_view_opts_changed(const struct gl_video_opts *a,
++                                      const struct gl_video_opts *b)
 +{
++    if (a->vr != b->vr)
++        return false;
 +    struct gl_video_opts x = *a, y = *b;
-+    x.vr = y.vr;
 +    x.vr_layout = y.vr_layout;
 +    x.vr_projection = y.vr_projection;
 +    x.vr_eye = y.vr_eye;
@@ -207,18 +253,41 @@ index c0a1be8..a1a7aea 100644
 +    return memcmp(&x, &y, sizeof(x)) == 0;
 +}
 +
++// Copy just the VR fields of the option struct (hot update). Assigning the
++// whole struct instead would undo the adjustments check_gl_features() made to
++// p->opts (dumb-mode whitelist, compute-peak fallback, ...).
++static void copy_vr_opts(struct gl_video_opts *dst,
++                         const struct gl_video_opts *src)
++{
++    dst->vr = src->vr;
++    dst->vr_layout = src->vr_layout;
++    dst->vr_projection = src->vr_projection;
++    dst->vr_eye = src->vr_eye;
++    dst->vr_stereo_output = src->vr_stereo_output;
++    dst->vr_fov = src->vr_fov;
++    dst->vr_yaw = src->vr_yaw;
++    dst->vr_pitch = src->vr_pitch;
++    dst->vr_head_tracking = src->vr_head_tracking;
++    dst->vr_reset_view = src->vr_reset_view;
++}
++
  static void gl_video_update_options(struct gl_video *p)
  {
      if (m_config_cache_update(p->opts_cache)) {
 -        gl_lcms_update_options(p->cms);
 -        reinit_from_options(p);
 +        struct gl_video_opts *new_opts = p->opts_cache->opts;
-+        if (only_vr_opts_changed(&p->opts, new_opts)) {
-+            p->opts = *new_opts;
++        // Compare against the last-seen *cache* contents, not against p->opts
++        // (which check_gl_features may have mutated): otherwise every VR view
++        // tweak would look like a general option change and rebuild the whole
++        // render chain each time.
++        if (only_vr_view_opts_changed(&p->opts_cache_copy, new_opts)) {
++            copy_vr_opts(&p->opts, new_opts);
 +        } else {
 +            gl_lcms_update_options(p->cms);
 +            reinit_from_options(p);
 +        }
++        p->opts_cache_copy = *new_opts;
 +        vr_sync_opts(p->vr, &p->opts);
      }
  

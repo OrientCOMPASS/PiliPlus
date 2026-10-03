@@ -26,10 +26,20 @@
   `vr-stereo-output`、`vr-fov`(水平视场角,度)、`vr-yaw`、`vr-pitch`、
   `vr-head-tracking`、`vr-reset-view`(递增计数触发回正)。
   视角参数是"热"参数：变更不触发渲染链重建（见 patch 内
-  `only_vr_opts_changed`），头追在 native 侧逐帧运行，不经 Dart 往返。
+  `only_vr_view_opts_changed`），头追在 native 侧逐帧运行，不经 Dart 往返。
   手动环视（头追关闭）时 `vr_manual_angles()` 还会在 native 侧兜底夹取视角：
   180° 片源的偏航在覆盖边界收敛、俯仰在极点收敛（转出画面见黑不可接受），
   头追开启时不夹取（陀螺仪模式按需求放宽）。
+  **VR_DUMB_FIX（第十三轮，真机"VR 不生效"的根因修复）**：mpv 的 vo=gpu 有
+  一个"无高级处理就走 dumb mode 直拷"的自动优化，media_kit 安卓端的默认
+  选项（bilinear 缩放、关 dither/downscaling 附加项）恰好满足其条件，导致
+  **所有播放都进 dumb mode**——VR 分支（`p->opts.vr && !p->dumb_mode`）永远
+  不执行，且 dumb mode 的选项白名单会把 `vr` 清零，画面永远是平面 2D。
+  修复：`check_dumb_mode()` 在 `vr=yes` 时返回 false（VR 需要完整渲染链）；
+  `vr` 开关翻转不再走热更新而是完整 reinit（dumb 资格随之重算）；被强制
+  dumb（无可用 FBO）时打 WARN 日志说明 VR 被禁用。热更新比较基准也从
+  `p->opts`（会被 check_gl_features 改写，导致比较恒不等 → 每次拖视角都
+  全链重建）改为影子副本 `opts_cache_copy`，并且只回拷 VR 字段。
 - `buildscripts/patches/mpv/vr_metadata.patch`：**多格式 VR 需求新增**。
   片源元数据识别：`demux_lavf` 解析 lavf 的 spherical（mov `sv3d`/`prji`、
   mkv `Projection`）与 stereo3d（mov `st3d`、mkv `StereoMode`）side data，

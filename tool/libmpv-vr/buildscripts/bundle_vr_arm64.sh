@@ -32,6 +32,10 @@ test -f deps/mpv/video/out/gpu/vr.c
 test -f deps/mpv/video/out/gpu/vr_tracker.c
 grep -q "vr-head-tracking" deps/mpv/video/out/gpu/video.c
 grep -q "vr_manual_angles" deps/mpv/video/out/gpu/vr.c
+# VR_DUMB_FIX: VR must opt out of voluntary dumb mode, otherwise media_kit's
+# default options (bilinear/no-dither) put every Android playback in dumb mode
+# and the VR branch in pass_draw_to_screen never runs (flat 2D forever).
+grep -q "VR_DUMB_FIX" deps/mpv/video/out/gpu/video.c
 # metadata patch (vr-metadata-* properties + demux_lavf spherical/stereo3d)
 grep -q "mp_vr_projection_from_spherical" deps/mpv/demux/demux_lavf.c
 grep -q "vr-metadata-projection" deps/mpv/player/command.c

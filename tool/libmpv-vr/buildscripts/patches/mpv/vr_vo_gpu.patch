@@ -1430,10 +1430,10 @@ index 0000000..f3e27ad
 +}
 diff --git a/video/out/gpu/vr.h b/video/out/gpu/vr.h
 new file mode 100644
-index 0000000..f7f8314
+index 0000000..f97ef39
 --- /dev/null
 +++ b/video/out/gpu/vr.h
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,72 @@
 +/*
 + * VR / panoramic video reprojection for vo=gpu (PiliPlus).
 + *
@@ -1467,6 +1467,8 @@ index 0000000..f7f8314
 + */
 +
 +#pragma once
++
++#include <stdbool.h>
 +
 +struct gl_shader_cache;
 +struct gl_video_opts;

@@ -1137,12 +1137,6 @@ abstract final class Pref {
   static bool get vrGyro =>
       _setting.get(SettingBoxKey.vrGyro, defaultValue: true);
 
-  /// VR 立体分屏输出(Cardboard 头显模式): 左右眼各渲染一次并做镜头畸变。
-  ///
-  /// 默认关(手机裸屏用单眼画面即可), 播放中可在 VR 控制面板随时切换。
-  static bool get vrStereoOutput =>
-      _setting.get(SettingBoxKey.vrStereoOutput, defaultValue: false);
-
   // 本地板块
 
   /// 列表排序方式

@@ -101,6 +101,10 @@ class LocalMediaLibrary {
 
   /// 已发现的媒体文件数(不走 Rx, 由 [_progressTimer] 批量同步)
   int _fileCount = 0;
+
+  /// 数据源①: 系统媒体索引(MediaStore)聚合出的文件夹, 与自有遍历结果
+  /// 取并集展示(见 [mergeFolders])
+  List<LocalMediaFolder> _msFolders = const [];
   Timer? _progressTimer;
   DateTime? _lastPublish;
 
@@ -151,6 +155,7 @@ class LocalMediaLibrary {
     scanning.value = true;
     lastError.value = null;
     truncated.value = false;
+    _msFolders = const [];
     _abort = false;
     _fileCount = 0;
     _lastPublish = null;
@@ -172,10 +177,28 @@ class LocalMediaLibrary {
         lastError.value = '没有可访问的存储卷';
         return;
       }
+      // ① 系统媒体索引(VLC 的媒体库同样建立在"按内容识别"的索引上):
+      // 秒级出结果先展示, 且能兜住目录遍历看不到的文件(索引/权限差异)。
+      final msRows = await LocalMediaService.queryMediaStoreFolders();
+      _msFolders = [
+        for (final r in msRows)
+          LocalMediaFolder(
+            path: r.path,
+            name: r.path.substring(r.path.lastIndexOf('/') + 1),
+            count: r.count,
+            totalSize: r.totalSize,
+            latest: r.latest,
+          ),
+      ];
+      if (_msFolders.isNotEmpty) {
+        _fileCount = _msFolders.fold(0, (sum, f) => sum + f.count);
+        folders.value = mergeFolders(_msFolders, const []);
+      }
+      // ② 自有目录遍历(拿到什么算什么, 补上索引未覆盖的文件)
       for (final root in roots) {
         await _walk(root.url, byFolder);
       }
-      folders.value = _snapshot(byFolder);
+      folders.value = mergeFolders(_msFolders, _snapshot(byFolder));
       await saveCache();
     } catch (err) {
       lastError.value = err.toString();
@@ -202,15 +225,49 @@ class LocalMediaLibrary {
       scannedFiles.value = _fileCount;
     }
     // 已经有缓存时不要在扫描途中把列表清空(重扫会闪一下)
-    if (byFolder.isEmpty) {
+    if (byFolder.isEmpty && _msFolders.isEmpty) {
       return;
     }
     final now = DateTime.now();
     if (_lastPublish == null ||
         now.difference(_lastPublish!) >= _publishInterval) {
       _lastPublish = now;
-      folders.value = _snapshot(byFolder);
+      folders.value = mergeFolders(_msFolders, _snapshot(byFolder));
     }
+  }
+
+  /// 合并两路文件夹结果(系统媒体索引 + 自有遍历): 按路径取并集, 数量/
+  /// 大小取较大者, 时间取最新。两路各自都可能漏掉对方看得到的文件
+  /// (索引未及时更新 vs 遍历受权限/上限影响), 并集才是完整列表 ——
+  /// 对齐 VLC"按内容识别、不漏文件"的媒体库行为。纯函数, 可单测。
+  static List<LocalMediaFolder> mergeFolders(
+    List<LocalMediaFolder> a,
+    List<LocalMediaFolder> b,
+  ) {
+    final byPath = <String, LocalMediaFolder>{};
+    for (final f in a) {
+      byPath[f.path] = f;
+    }
+    for (final f in b) {
+      final old = byPath[f.path];
+      if (old == null) {
+        byPath[f.path] = f;
+        continue;
+      }
+      var latest = old.latest;
+      if (f.latest != null && (latest == null || f.latest!.isAfter(latest))) {
+        latest = f.latest;
+      }
+      byPath[f.path] = LocalMediaFolder(
+        path: f.path,
+        name: old.name.isNotEmpty ? old.name : f.name,
+        count: f.count > old.count ? f.count : old.count,
+        totalSize: f.totalSize > old.totalSize ? f.totalSize : old.totalSize,
+        latest: latest,
+      );
+    }
+    return byPath.values.toList()
+      ..sort((x, y) => x.name.toLowerCase().compareTo(y.name.toLowerCase()));
   }
 
   static List<LocalMediaFolder> _snapshot(Map<String, _FolderAgg> byFolder) =>

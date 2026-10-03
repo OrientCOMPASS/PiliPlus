@@ -568,33 +568,9 @@ class HeaderControlState extends State<HeaderControl>
                       ),
                     ),
                   ),
-                  Obx(
-                    () => ListTile(
-                      dense: true,
-                      onTap: () => plPlayerController.setVrStereoOutput(
-                        !plPlayerController.vrStereoOutput.value,
-                      ),
-                      leading: const Icon(Icons.view_in_ar_outlined, size: 20),
-                      title: const Text('立体分屏输出', style: titleStyle),
-                      subtitle: Text(
-                        plPlayerController.vrStereoOutput.value
-                            ? '已开启：左右眼分屏 + 镜头畸变(Cardboard 头显)'
-                            : '未开启：单眼画面, 适合手机/平板裸屏观看',
-                        style: subTitleStyle,
-                      ),
-                      trailing: Icon(
-                        plPlayerController.vrStereoOutput.value
-                            ? Icons.toggle_on
-                            : Icons.toggle_off,
-                        size: 32,
-                        color: plPlayerController.vrStereoOutput.value
-                            ? theme.colorScheme.primary
-                            : null,
-                      ),
-                    ),
-                  ),
-                  if (plPlayerController.vrProjection.value.isStereo &&
-                      !plPlayerController.vrStereoOutput.value)
+                  // 「立体分屏输出」(Cardboard) 已按 REQUIREMENTS.md 范围外
+                  // 条款移除(第十五轮真机闪退)
+                  if (plPlayerController.vrProjection.value.isStereo)
                     PopupListTile<VrEye>(
                       dense: true,
                       leading: const Icon(Icons.visibility_outlined, size: 20),

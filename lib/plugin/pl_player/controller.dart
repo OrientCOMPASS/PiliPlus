@@ -939,15 +939,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   static const double vrStepDeg = 10.0;
   static const double vrFovStep = 8.0;
 
-  /// 双目片源渲染哪只眼睛(单屏输出只显示一只; 立体分屏输出时忽略)
+  /// 双目片源渲染哪只眼睛(单屏输出只显示一只)
   late final Rx<VrEye> vrEye = Rx<VrEye>(Pref.vrEye);
 
-  /// 立体分屏输出(Cardboard 头显模式): 左右眼各渲染一次并做镜头畸变。
-  /// 默认关, 手机裸屏直接观看用单眼画面。
-  late final RxBool vrStereoOutput = RxBool(Pref.vrStereoOutput);
+  // 「VR 立体分屏输出」(Cardboard 双眼分屏)已按 REQUIREMENTS.md 范围外条款
+  // 移除(第十五轮): 真机切换该开关触发 native 渲染路径闪退, 且需求方确认
+  // 分屏输出不在交付范围。libmpv 侧 vr-stereo-output 选项保留但不再下发。
 
-  /// 当前视角(手动分量)。头追开启时实际画面朝向 = 头姿 × 手动偏移,
-  /// 头姿在 native 侧维护; 这里只记录手动部分, 供读数显示与拖拽。
+  /// 当前视角(手动分量)。实际画面朝向 = 头姿 × 折叠偏置 × 手动偏移
+  /// (native 侧合成); HUD 读数用 [vrHudAngles](有效视角), 这里只承载
+  /// 拖拽/按钮的手动输入。
   late final Rx<VrViewState> vrView = Rx<VrViewState>(
     VrViewState(fov: Pref.vrDefaultFov),
   );
@@ -1226,18 +1227,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     applyVrView(force: true);
   }
 
-  /// 立体分屏输出开关(Cardboard 头显模式)
-  void setVrStereoOutput(bool value, {bool persist = true}) {
-    if (persist) {
-      GStorage.setting.put(SettingBoxKey.vrStereoOutput, value);
-    }
-    if (vrStereoOutput.value == value) {
-      return;
-    }
-    vrStereoOutput.value = value;
-    applyVrView(force: true);
-  }
-
   /// 屏幕按钮步进: 偏航/俯仰/视场角
   void vrStep({double dyaw = 0, double dpitch = 0, double dfov = 0}) {
     if (!vrEnabled) {
@@ -1272,12 +1261,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       return;
     }
     final cur = vrView.value;
-    // 一屏宽度对应 1.5 倍水平视场角
+    // 一屏宽度对应 1.5 倍水平视场角。
+    // 方向对齐 xl_player(SinglePlayerActivity.onScroll 用 GestureDetector 的
+    // distanceX/Y = 手指位移取反, 累积进 rotX/rotY): 两轴统一为"拖动世界"
+    // 语义 —— 手指右移视线向左, 手指下移视线向上。此前俯仰与手指同向、
+    // 水平与手指反向, 两轴不一致(第十五轮真机反馈)。
     final scale = cur.fov * 1.5;
     vrView.value = cur
         .copyWith(
           yaw: cur.yaw - dx * scale / max(width, 1.0),
-          pitch: cur.pitch + dy * scale / max(height, 1.0),
+          pitch: cur.pitch - dy * scale / max(height, 1.0),
         )
         .clamped(
           vrProjection.value,
@@ -1371,37 +1364,86 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _vrApplyTimer?.cancel();
     _vrApplyTimer = null;
     _vrLastApplyMs = now;
-    _applyVrProperties();
+    _applyVrProperties(force: force);
   }
 
-  /// 全量下发 VR 属性。setProperty 是同步 FFI 调用, 一轮十来个,
-  /// 开销可忽略; 属性值没变化时 mpv 内部也不会产生额外动作。
-  void _applyVrProperties() {
+  /// 上次成功下发的 VR 属性值(差分下发用)。新建播放器实例时清空。
+  final Map<String, String> _vrSent = {};
+
+  void _vrSend(NativePlayer player, String key, String value) {
+    if (_vrSent[key] == value) {
+      return;
+    }
+    player.setProperty(key, value);
+    _vrSent[key] = value;
+  }
+
+  /// 下发 VR 属性(差分 + 合并)。
+  ///
+  /// **每个 setProperty 都是一次"客户端→mpv core 同步派发→core→VO 同步
+  /// 握手"的跨线程往返**(第十五轮真机"手势拖动卡顿而陀螺仪流畅"的根因:
+  /// 旧实现每批全量 9 个属性 × ~33 批/s ≈ 300 次往返/s)。因此:
+  ///   * 值没变的属性不再重复下发([force] 时全量重发);
+  ///   * 连续的视角参数(yaw/pitch/fov)合并进单个 `vr-view` 字符串属性,
+  ///     拖拽一批只有 1 次往返(libmpv 补丁侧解析, 见 docs §20)。
+  void _applyVrProperties({bool force = false}) {
     final player = _vrNativePlayer;
     if (player == null || !vrMpvSupported.value) {
       return;
     }
+    if (force) {
+      _vrSent.clear();
+    }
     final projection = vrProjection.value;
     final view = vrView.value;
     try {
-      player.setProperty('vr', projection.enabled ? 'yes' : 'no');
+      _vrSend(player, 'vr', projection.enabled ? 'yes' : 'no');
       if (!projection.enabled) {
         return;
       }
-      player.setProperty('vr-layout', projection.mpvLayout);
-      player.setProperty('vr-projection', projection.mpvCoverage);
-      player
-          .setProperty('vr-eye', vrEye.value == VrEye.left ? 'left' : 'right');
-      player
-          .setProperty('vr-stereo-output', vrStereoOutput.value ? 'yes' : 'no');
-      player.setProperty('vr-fov', view.fov.toStringAsFixed(2));
-      player.setProperty('vr-yaw', view.yaw.toStringAsFixed(2));
-      player.setProperty('vr-pitch', view.pitch.toStringAsFixed(2));
-      player
-          .setProperty('vr-head-tracking', vrGyroEnabled.value ? 'yes' : 'no');
+      _vrSend(player, 'vr-layout', projection.mpvLayout);
+      _vrSend(player, 'vr-projection', projection.mpvCoverage);
+      _vrSend(player, 'vr-eye', vrEye.value == VrEye.left ? 'left' : 'right');
+      _vrSend(
+        player,
+        'vr-view',
+        'yaw=${view.yaw.toStringAsFixed(2)},'
+        'pitch=${view.pitch.toStringAsFixed(2)},'
+        'fov=${view.fov.toStringAsFixed(2)}',
+      );
+      _vrSend(
+        player,
+        'vr-head-tracking',
+        vrGyroEnabled.value ? 'yes' : 'no',
+      );
       vrError.value = null;
     } catch (err) {
       _reportVrError('下发 VR 属性失败: $err');
+    }
+  }
+
+  /// native 每帧缓存的**有效**视角中心(手动偏移+折叠偏置+头姿的合成结果,
+  /// `vr-view-yaw`/`vr-view-pitch` 只读属性)。HUD 显示它而不是 vrView——
+  /// 陀螺仪/折叠偏置参与后 vrView 只是手动分量(第十五轮真机反馈:
+  /// "陀螺仪运动不影响 HUD 读数, 两种输入的量是分开的")。
+  /// null = 尚不可用(旧引擎/未渲染), HUD 回退显示 vrView。
+  final Rxn<(double, double)> vrHudAngles = Rxn<(double, double)>();
+
+  /// 轮询有效视角(VrControlLayer 可见期间 ~5Hz; getProperty 是同步往返,
+  /// 频率刻意压低)
+  void pollVrHudAngles() {
+    final player = _vrNativePlayer;
+    if (player == null || !vrMpvSupported.value || !vrEnabled) {
+      return;
+    }
+    try {
+      final yaw = double.tryParse(player.getProperty('vr-view-yaw'));
+      final pitch = double.tryParse(player.getProperty('vr-view-pitch'));
+      if (yaw != null && pitch != null) {
+        vrHudAngles.value = (yaw, pitch);
+      }
+    } catch (_) {
+      // 旧引擎没有该属性: 保持 null, HUD 回退 vrView
     }
   }
 
@@ -1462,6 +1504,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _startListeners(player);
 
     _vrProbePending = true;
+    _vrSent.clear();
+    vrHudAngles.value = null;
     return player;
   }
 

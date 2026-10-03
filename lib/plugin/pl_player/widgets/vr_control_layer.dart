@@ -40,7 +40,30 @@ class _VrControlLayerState extends State<VrControlLayer> {
   /// 双指缩放开始时的视场角, 缩放按该基准做绝对映射(避免累积漂移)
   double _fovBase = VrViewState.kVrDefaultFov;
 
+  /// HUD 有效视角轮询(手动偏移+折叠偏置+头姿的合成结果在 native 侧,
+  /// Dart 只能读属性; getProperty 是同步往返, 5Hz 足够 HUD 显示又不至于
+  /// 给 core/VO 线程添堵)
+  Timer? _hudTimer;
+
   PlPlayerController get _c => widget.controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _c.vrHudAngles.value = null;
+    _c.pollVrHudAngles();
+    _hudTimer = Timer.periodic(
+      const Duration(milliseconds: 200),
+      (_) => _c.pollVrHudAngles(),
+    );
+  }
+
+  @override
+  void dispose() {
+    _hudTimer?.cancel();
+    _hudTimer = null;
+    super.dispose();
+  }
 
   void _onScaleStart(ScaleStartDetails details) {
     _fovBase = _c.vrView.value.fov;
@@ -90,6 +113,11 @@ class _VrControlLayerState extends State<VrControlLayer> {
             child: Obx(() {
               final view = _c.vrView.value;
               final error = _c.vrError.value;
+              // 读数优先显示 native 的**有效**视角(含陀螺仪头姿与折叠
+              // 偏置); 旧引擎没有该属性时回退显示手动分量
+              final eff = _c.vrHudAngles.value;
+              final yawShow = eff?.$1 ?? view.yaw;
+              final pitchShow = eff?.$2 ?? view.pitch;
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 spacing: 6,
@@ -99,8 +127,8 @@ class _VrControlLayerState extends State<VrControlLayer> {
                     icon: Icons.gesture_outlined,
                     label:
                         '${_c.vrProjection.value.label}  ·  '
-                        '偏航 ${view.yaw.toStringAsFixed(1)}°  '
-                        '俯仰 ${view.pitch.toStringAsFixed(1)}°  '
+                        '偏航 ${yawShow.toStringAsFixed(1)}°  '
+                        '俯仰 ${pitchShow.toStringAsFixed(1)}°  '
                         '视场 ${view.fov.toStringAsFixed(0)}°  ·  点按退出VR操作',
                   ),
                   // VR 没生效时把原因摊开, 不要让用户面对"操作没反应"
@@ -152,21 +180,9 @@ class _VrControlLayerState extends State<VrControlLayer> {
                     onStep: () => _c.setVrGyro(!_c.vrGyroEnabled.value),
                   ),
                 ),
+                // (立体分屏输出按钮已随该功能一并移除, 见 controller 注释)
                 Obx(
-                  () => _VrStepButton(
-                    icon: Icons.view_in_ar_outlined,
-                    tooltip: _c.vrStereoOutput.value
-                        ? '立体分屏: 开(Cardboard 头显, 点按关闭)'
-                        : '立体分屏: 关(点按开启头显模式)',
-                    repeat: false,
-                    active: _c.vrStereoOutput.value,
-                    onStep: () =>
-                        _c.setVrStereoOutput(!_c.vrStereoOutput.value),
-                  ),
-                ),
-                Obx(
-                  () => _c.vrProjection.value.isStereo &&
-                          !_c.vrStereoOutput.value
+                  () => _c.vrProjection.value.isStereo
                       ? _VrStepButton(
                           icon: Icons.visibility_outlined,
                           tooltip: '切换眼位',

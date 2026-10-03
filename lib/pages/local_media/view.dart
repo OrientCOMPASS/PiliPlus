@@ -162,15 +162,15 @@ class _LocalMediaPageState extends State<LocalMediaPage>
 
       // 安卓 14+「选择照片和视频」部分访问: 未勾选的文件根本不可见,
       // 必须明说, 不能让用户以为是列表在"过滤"文件
-      if (!scanning && _controller.accessNotice.value case final notice?) {
+      if (_controller.accessNotice.value case final notice? when !scanning) {
         children.add(
           ListTile(
             leading: const Icon(Icons.lock_person_outlined),
             title: const Text('存储权限为「部分访问」'),
             subtitle: Text('$notice可在系统设置中改为「允许访问全部」。'),
-            trailing: TextButton(
+            trailing: const TextButton(
               onPressed: openAppSettings,
-              child: const Text('去设置'),
+              child: Text('去设置'),
             ),
           ),
         );
@@ -179,10 +179,10 @@ class _LocalMediaPageState extends State<LocalMediaPage>
       // 扫描触到上限: 结果不完整也要明说(不静默吞文件)
       if (!scanning && library.truncated.value) {
         children.add(
-          ListTile(
-            leading: const Icon(Icons.warning_amber_rounded),
-            title: const Text('扫描已达上限，结果可能不完整'),
-            subtitle: const Text(
+          const ListTile(
+            leading: Icon(Icons.warning_amber_rounded),
+            title: Text('扫描已达上限，结果可能不完整'),
+            subtitle: Text(
               '本机视频文件过多, 只列出了前面一部分; '
               '找不到的文件请用上方「存储卷」直接浏览目录',
             ),

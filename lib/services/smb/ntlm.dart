@@ -460,7 +460,7 @@ Uint8List buildType3({
   required String user,
   required String password,
   required String domain,
-  String workstation = 'PILIPLUS',
+  String workstation = 'PILIPLAYER',
   Random? random,
 }) {
   final rng = random ?? Random.secure();

@@ -196,7 +196,7 @@ class Smb2Client {
   Smb2Client({
     required this.host,
     this.port = 445,
-    this.workstation = 'PILIPLUS',
+    this.workstation = 'PILIPLAYER',
     this.maxReadSize = 1 << 20,
     this.fallbackAddress,
   });

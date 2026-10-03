@@ -54,24 +54,15 @@ android {
         }
     }
 
-    buildFeatures {
-        if (project.hasProperty("dev")) {
-            resValues = true
-        }
-    }
-
     buildTypes {
         all {
             signingConfig = config ?: signingConfigs["debug"]
         }
         release {
+            // dev 构建(CI 测试包)只改包名后缀以便与正式版共存;
+            // 显示名统一为 piliplayer(第十七轮, 走 strings.xml 的 app_name)
             if (project.hasProperty("dev")) {
                 applicationIdSuffix = ".dev"
-                resValue(
-                    type = "string",
-                    name = "app_name",
-                    value = "PiliPlus dev",
-                )
             }
 //            proguardFiles(
 //                getDefaultProguardFile("proguard-android-optimize.txt"),

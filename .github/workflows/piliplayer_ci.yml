@@ -195,6 +195,40 @@ jobs:
 
             # 测试包只出 arm64-v8a: 真机/平板验证用不到其它 ABI,
             # 少两条腿能省一半以上的构建时间(上游 build.yml 仍然全 ABI)
+            # release 签名(第十七轮): 仓库 secrets 里配置了 keystore
+            # (KEYSTORE_BASE64/KEYSTORE_PASSWORD/KEY_ALIAS/KEY_PASSWORD)。
+            # android/app/build.gradle.kts 已支持从 android/key.properties 读
+            # release 签名(缺失时回落 debug 签名), 这里只负责把 secrets 落成
+            # 临时文件——key.properties 与 *.jks 都在 .gitignore 里, 不会入库。
+            - name: 配置 release 签名
+              if: ${{ matrix.mode == 'release' }}
+              shell: bash
+              env:
+                  KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+                  KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+                  KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+                  KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+              run: |
+                  set -euo pipefail
+                  if [ -z "${KEYSTORE_BASE64:-}" ] || [ -z "${KEYSTORE_PASSWORD:-}" ] \
+                     || [ -z "${KEY_ALIAS:-}" ] || [ -z "${KEY_PASSWORD:-}" ]; then
+                    echo "::error::release 签名 secrets 不完整(KEYSTORE_BASE64/KEYSTORE_PASSWORD/KEY_ALIAS/KEY_PASSWORD)"
+                    exit 1
+                  fi
+                  ks="$RUNNER_TEMP/piliplayer-release.jks"
+                  printf '%s' "$KEYSTORE_BASE64" | tr -d '\r' | base64 -d > "$ks"
+                  # 先验证 keystore 可读、别名存在, 失败立刻报清楚的错
+                  keytool -list -keystore "$ks" -storepass "$KEYSTORE_PASSWORD" \
+                    -alias "$KEY_ALIAS" > /dev/null
+                  cat > android/key.properties <<EOF
+                  storeFile=$ks
+                  storePassword=$KEYSTORE_PASSWORD
+                  keyAlias=$KEY_ALIAS
+                  keyPassword=$KEY_PASSWORD
+                  EOF
+                  chmod 600 android/key.properties
+                  echo "::notice::release 签名已配置(alias=$KEY_ALIAS)"
+
             - name: Build Release Apk
               if: ${{ matrix.mode == 'release' }}
               run: >-
@@ -208,6 +242,24 @@ jobs:
 
             - name: List outputs
               run: ls -la build/app/outputs/flutter-apk/ || true
+
+            # 出包后核验签名者不是 Android Debug(release 必须用配置的 keystore)
+            - name: 核验 release 签名
+              if: ${{ matrix.mode == 'release' }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  apk="$(ls build/app/outputs/flutter-apk/app-arm64-v8a-release.apk)"
+                  owner="$(keytool -printcert -jarfile "$apk" | grep -m1 'Owner:' || true)"
+                  echo "APK 签名者: $owner"
+                  if echo "$owner" | grep -qi 'Android Debug'; then
+                    echo "::error::release APK 仍是 debug 签名, key.properties 未生效"
+                    exit 1
+                  fi
+                  if [ -z "$owner" ]; then
+                    echo "::error::读不到 APK 签名信息"
+                    exit 1
+                  fi
 
             - name: Upload artifact
               if: ${{ github.event_name != 'workflow_dispatch' || inputs.upload_apk }}

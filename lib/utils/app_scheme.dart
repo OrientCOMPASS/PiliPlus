@@ -12,6 +12,8 @@ import 'package:PiliPlus/models/common/fav_type.dart';
 import 'package:PiliPlus/models/common/video/source_type.dart';
 import 'package:PiliPlus/models/local_media/local_media_item.dart';
 import 'package:PiliPlus/models/local_media/local_media_source.dart';
+import 'package:PiliPlus/services/local_media_service.dart';
+import 'package:PiliPlus/services/smb/smb_browse.dart';
 import 'package:PiliPlus/pages/audio/view.dart';
 import 'package:PiliPlus/pages/dynamics/widgets/vote.dart';
 import 'package:PiliPlus/pages/fan/view.dart';
@@ -74,6 +76,172 @@ abstract final class PiliScheme {
   static const MethodChannel _sharedMediaChannel = MethodChannel(
     'piliplus/local_media',
   );
+
+  /// 自定义深链: **piliplayer://play?url=<百分号编码的目标地址>**
+  /// (可选 `&title=<编码标题>`、`&start=<秒>`)。
+  ///
+  /// 为什么不是 `piliplayer://smb://…`: 按 RFC 3986, 一个 URI 只有一个
+  /// scheme(到第一个 ":" 为止), 第二个 "://" 落在 scheme-specific part 里
+  /// 属于保留字符的非法裸用——浏览器/WebView/系统意图解析器对此行为不一
+  /// (截断、拒绝或错误路由)。标准做法是把嵌套地址整体百分号编码后作为
+  /// 查询参数传递(与 Android 官方 deep link 指南一致), Dart 的
+  /// [Uri.queryParameters] 取值时会自动解码。
+  ///
+  /// 目标地址支持: smb://(含 user:pass@, 走「本地」板块同一条播放链路,
+  /// 直连/代理跟随设置)、http(s)://、ftp://(直链文件)、file://(本机路径)、
+  /// content://(转系统分享链路)。
+  static Future<bool> _playDeepLink(Uri uri) async {
+    if (uri.host != 'play') {
+      SmartDialog.showToast(
+        '未知深链主机: ${uri.host}。格式: piliplayer://play?url=<百分号编码的地址>',
+      );
+      return false;
+    }
+    final target = uri.queryParameters['url'];
+    if (target == null || target.isEmpty) {
+      SmartDialog.showToast(
+        '缺少 url 参数。格式: piliplayer://play?url=<百分号编码的地址>',
+      );
+      return false;
+    }
+    final title = uri.queryParameters['title'];
+    final startSec = double.tryParse(uri.queryParameters['start'] ?? '');
+    final progressMs = startSec != null ? (startSec * 1000).round() : null;
+    final Uri targetUri;
+    try {
+      final parsed = Uri.parse(target);
+      if (parsed.scheme.isEmpty) {
+        throw const FormatException('no scheme');
+      }
+      targetUri = parsed;
+    } catch (_) {
+      SmartDialog.showToast('url 参数不是合法地址: $target');
+      return false;
+    }
+    switch (targetUri.scheme.toLowerCase()) {
+      case 'content':
+        return _openSharedMedia(targetUri);
+      case 'file':
+        final path = targetUri.path;
+        if (path.isEmpty) {
+          SmartDialog.showToast('file 地址缺少路径');
+          return false;
+        }
+        return _playDeepLinkItem(
+          LocalMediaItem(
+            name: title ?? path.substring(path.lastIndexOf('/') + 1),
+            uri: path,
+            source: const LocalMediaSource(
+              type: LocalMediaSourceType.device,
+              name: '深链',
+              url: '',
+            ),
+          ),
+          progressMs: progressMs,
+        );
+      case 'smb':
+        final ep = SmbBrowse.parseEndpoint(target);
+        if (ep == null) {
+          SmartDialog.showToast('smb 地址格式不正确: $target');
+          return false;
+        }
+        // userinfo: [domain;][user[:password]](百分号编码, Uri 已按最后一个
+        // '@' 切分; 解码失败按原样处理)
+        String? user;
+        String? password;
+        String? domain;
+        var info = targetUri.userInfo;
+        if (info.isNotEmpty) {
+          try {
+            info = Uri.decodeComponent(info);
+          } catch (_) {}
+          var cred = info;
+          final semi = info.indexOf(';');
+          if (semi >= 0) {
+            domain = info.substring(0, semi);
+            cred = info.substring(semi + 1);
+          }
+          final colon = cred.indexOf(':');
+          if (colon >= 0) {
+            user = cred.substring(0, colon);
+            password = cred.substring(colon + 1);
+          } else if (cred.isNotEmpty) {
+            user = cred;
+          }
+        }
+        final source = LocalMediaSource(
+          type: LocalMediaSourceType.smb,
+          name: ep.host,
+          url: SmbBrowse.uri(
+            host: ep.host,
+            port: ep.port,
+            share: ep.share,
+            remotePath: ep.path,
+          ),
+          username: user,
+          password: (password == null || password.isEmpty) ? null : password,
+          domain: (domain == null || domain.isEmpty) ? null : domain,
+        );
+        final segs = ep.path
+            .split(RegExp(r'[\\/]+'))
+            .where((e) => e.isNotEmpty)
+            .toList();
+        final item = LocalMediaItem(
+          name: title ?? (segs.isEmpty ? ep.share : segs.last),
+          uri: source.url,
+          source: source,
+          remotePath: ep.path,
+        );
+        // 与「本地」板块完全同一条解析链: 默认 libmpv 内置 smb:// 直连,
+        // 设置关闭时回退回环代理
+        final playUrl = await LocalMediaService.resolvePlayUrl(item);
+        return _playDeepLinkItem(item, playUrl: playUrl, progressMs: progressMs);
+      case 'http' || 'https' || 'ftp':
+        final segs = targetUri.pathSegments.where((e) => e.isNotEmpty).toList();
+        final source = LocalMediaSource(
+          type: targetUri.scheme.toLowerCase() == 'ftp'
+              ? LocalMediaSourceType.ftp
+              : LocalMediaSourceType.http,
+          name: title ?? (segs.isEmpty ? '深链媒体' : segs.last),
+          url: target,
+        );
+        return _playDeepLinkItem(
+          LocalMediaItem(name: source.name, uri: target, source: source),
+          progressMs: progressMs,
+        );
+      default:
+        SmartDialog.showToast('深链暂不支持 ${targetUri.scheme}:// 协议');
+        return false;
+    }
+  }
+
+  /// 深链播放: 走与「本地」板块一致的播放页链路(本地媒体模式)
+  static Future<bool> _playDeepLinkItem(
+    LocalMediaItem item, {
+    String? playUrl,
+    int? progressMs,
+  }) async {
+    try {
+      await PageUtils.toVideoPage(
+        aid: 0,
+        bvid: '',
+        cid: item.cid,
+        title: item.name,
+        progress: progressMs,
+        extraArguments: {
+          'sourceType': SourceType.localMedia,
+          'localMedia': item,
+          'localPlaylist': [item],
+          'localIndex': 0,
+          'localPlayUrl': playUrl ?? item.uri,
+        },
+      );
+      return true;
+    } catch (err) {
+      SmartDialog.showToast('无法播放: $err');
+      return false;
+    }
+  }
 
   /// 打开系统分享/「用其他应用打开」的视频。
   ///
@@ -510,6 +678,9 @@ abstract final class PiliScheme {
       // 交给定制 libmpv(fd 协议)播放, file:// 直接按路径播。
       case 'content' || 'file':
         return _openSharedMedia(uri);
+      // 自定义深链(第十七轮): piliplayer://play?url=<百分号编码的地址>
+      case 'piliplayer':
+        return _playDeepLink(uri);
       default:
         final aid = IdUtils.avRegexExact.matchAsPrefix(path)?.group(1);
         final bvid = IdUtils.bvRegexExact.matchAsPrefix(path)?.group(0);

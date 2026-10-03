@@ -2045,3 +2045,82 @@ file:// 直接按路径播（无需 fd）。桌面平台该入口自动短路（
 - Dart：`dart format` 解析通过；vr_test 自由视角断言全量改写；Kotlin 走
   CI 编译把关；
 - APK：出包后解包比对 libmpv.so 与滚动 jar 一致（交付说明附校验和）。
+
+## 22. 第十七轮：piliplayer:// 深链标准设计 + release 签名 + 应用名统一
+
+> 需求方本轮三条：① 深链不能做成 `piliplayer://smb://…`（两个 `://`），
+> 按最新浏览器/URI 标准重新设计；② 仓库已配置 keystore secrets
+> （KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD），
+> release 必须用它签名；③ 应用名统一为 **piliplayer**。
+
+### 22.1 深链设计（RFC 3986 + Android deep link 指南）
+
+**为什么 `piliplayer://smb://host/…` 不行**：按 RFC 3986，一个 URI 只有
+一个 scheme（到第一个 `:` 为止），其后的 scheme-specific part 里 `:` 与
+`//` 都是保留字符——裸写第二个 `://` 时浏览器/WebView/系统意图解析器的
+行为互不一致（有的截断、有的拒绝跳转、有的把内层 scheme 当外层 authority
+解析）。**标准做法**：嵌套地址整体百分号编码（RFC 3986 §2.1）后放进查询
+参数（Android 官方 deep link 指南同款结构）：
+
+```
+piliplayer://play?url=<percent-encoded-url>[&title=<percent-encoded>][&start=<秒>]
+
+例:
+piliplayer://play?url=smb%3A%2F%2FNAS%2Fvideo%2FVR%2Fa.mp4
+piliplayer://play?url=smb%3A%2F%2Fuser%40dom%3BWORK%253A...（凭据同样编码）
+piliplayer://play?url=https%3A%2F%2Fhost%2Fa.mp4&title=%E6%B5%8B%E8%AF%95&start=90
+```
+
+- Manifest 注册 `scheme=piliplayer, host=play`（VIEW + DEFAULT +
+  BROWSABLE，可从浏览器地址栏/网页链接直接拉起）；
+- `PiliScheme.routePush` 增 `case 'piliplayer'` → `_playDeepLink`：
+  Dart `Uri.queryParameters['url']` 自动完成百分号解码；
+- 目标协议分发：`smb://`（含 `[domain;][user[:pass]@]` userinfo，百分号
+  编码；走「本地」板块同一条 `resolvePlayUrl` 链——默认 libmpv 内置
+  smb:// 直连、设置可回退代理）、`http(s)://`/`ftp://`（直链文件）、
+  `file://`（本机路径）、`content://`（转第十六轮 fd:// 系统分享链路）；
+- `title` 覆盖显示名，`start`（秒，可带小数）映射到播放页 `progress`（毫秒）；
+- 播放链路 = 本地媒体模式：无 B 站接口/弹幕/上报，VR 文件名自动识别、
+  外挂字幕自动匹配照常生效。
+
+### 22.2 release 签名（CI secrets）
+
+`android/app/build.gradle.kts` 本就支持 `android/key.properties` →
+release signingConfig（v1+v2 签名，缺失时回落 debug）。本轮在
+`piliplayer_ci.yml` 的 release leg 增加两步：
+
+1. **配置 release 签名**：四个 secrets 完整性检查 → base64 解码 keystore
+   到 `$RUNNER_TEMP`（`tr -d '\r'` 容忍 Windows 换行）→ `keytool -list`
+   预验证口令与别名 → 写 `android/key.properties`（.gitignore 已覆盖
+   key.properties/*.jks/*.keystore，不会入库）；
+2. **核验 release 签名**：出包后 `keytool -printcert -jarfile` 检查签名者，
+   仍是 "Android Debug" 或缺失即构建失败——签名不生效不可能静默出包。
+
+**注意**：此前所有测试包都是 debug 签名，本轮起为正式 keystore 签名——
+**签名不一致无法覆盖安装，需先卸载旧包**（本机设置/历史/媒体库缓存会
+随卸载清空）。debug 构建（workflow_dispatch）仍用 debug 签名不受影响。
+
+### 22.3 应用名统一为 piliplayer
+
+所有用户可见面（代码包名 `com.example.piliplus` 与 Dart package `PiliPlus`
+属功能性标识，不在此列）：
+
+| 位置 | 旧 | 新 |
+| --- | --- | --- |
+| `android/.../values/string.xml` app_name | PiliPlus | piliplayer |
+| debug 变体 label | PiliPlus debug | piliplayer debug |
+| dev release resValue 覆盖 | PiliPlus dev | **删除**（统一走 strings.xml，dev 只保留 `.dev` 包名后缀共存） |
+| Manifest 意图选择器 label ×3 | PiliPlus / PiliPlus 播放 | piliplayer / piliplayer 播放 |
+| 自定义 scheme（新增） | — | `piliplayer://` |
+| iOS CFBundleDisplayName/Name | PiliPlus | piliplayer |
+| `Constants.appName`（窗口标题/通知频道/SponsorBlock origin 等） | PiliPlus | piliplayer |
+| SMB 工作站名（NAS 连接列表可见） | PILIPLUS | PILIPLAYER |
+
+### 22.4 本轮验证
+
+- Manifest XML minidom 解析通过（并修复了上一轮 XML 注释含 `--` 的教训：
+  注释里不再出现双连字符）；workflow YAML 解析通过；
+- `dart format` 全部改动文件解析通过；CI analyze/test + Kotlin 编译 +
+  签名核验把关；
+- 出包后解包比对 libmpv.so 与滚动 jar 一致 + `keytool -printcert` 签名者
+  非 Android Debug（CI 步骤内置）。

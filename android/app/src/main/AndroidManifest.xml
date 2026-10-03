@@ -78,7 +78,7 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <intent-filter android:label="PiliPlus">
+            <intent-filter android:label="piliplayer">
                 <action android:name="android.intent.action.VIEW" />
 
                 <category android:name="android.intent.category.DEFAULT" />
@@ -104,11 +104,24 @@
                 <!--<data android:host="bangumi.bilibili.com"/>-->
                 <!--<data android:host="space.bilibili.com"/>-->
             </intent-filter>
+            <!-- 第十七轮: 自定义深链 scheme。按 RFC 3986, 嵌套的目标地址必须
+                 百分号编码后放进 url 查询参数(不允许 piliplayer://smb://… 这种
+                 双 "://" 形式):
+                   piliplayer://play?url=smb%3A%2F%2Fhost%2Fshare%2Fa.mp4
+                 见 PiliScheme._playDeepLink 与 docs/piliplayer.md §22 -->
+            <intent-filter android:label="piliplayer 播放">
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data android:scheme="piliplayer" android:host="play" />
+            </intent-filter>
             <!-- 第十六轮: 注册为系统视频播放器 —— 其它应用的「用其他应用
                  打开/分享」进来的 content:// 与 file:// 视频, 经
                  ContentResolver 导出 fd 后以 fd://N 交给定制 libmpv 播放
                  (ffmpeg 的 fd 协议; 见 PiliScheme._openSharedMedia) -->
-            <intent-filter android:label="PiliPlus 播放">
+            <intent-filter android:label="piliplayer 播放">
                 <action android:name="android.intent.action.VIEW" />
 
                 <category android:name="android.intent.category.DEFAULT" />
@@ -118,7 +131,7 @@
                 <data android:scheme="file" />
                 <data android:mimeType="video/*" />
             </intent-filter>
-            <intent-filter android:label="PiliPlus">
+            <intent-filter android:label="piliplayer">
                 <action android:name="android.intent.action.VIEW" />
                 <action android:name="android.intent.action.SEARCH" />
                 <action android:name="com.example.piliplus.SHORTCUT" />

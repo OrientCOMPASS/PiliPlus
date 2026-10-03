@@ -222,12 +222,26 @@ jobs:
                   fi
                   ks="$RUNNER_TEMP/piliplayer-release.jks"
                   printf '%s' "$KEYSTORE_BASE64" | tr -d '\r' | base64 -d > "$ks"
-                  # keytool -list 只验 store 密码; 签名还要用 key 密码解私钥。
-                  # 这里用 importkeystore 真正解一次私钥(等价于签名所需权限),
-                  # KEY_PASSWORD 解不开就回退 KEYSTORE_PASSWORD —— PKCS12
-                  # 库里两者本来就是同一个密码, secrets 分开配置常出错位。
+                  # keystore 类型决定 key 密码语义:
+                  #  * PKCS12 —— 格式上只有一个密码, key 密码 == store 密码;
+                  #    keytool -importkeystore 对 PKCS12 会**忽略** -srckeypass
+                  #    (预验假阳性!), 而 AGP 拿不同的 KEY_PASSWORD 去 getKey
+                  #    必报 "Given final block not properly padded"(第十七轮
+                  #    两次 CI 失败的根因)。所以 PKCS12 一律强制 keypass=store
+                  #    密码, 并把类型显式传给 Gradle(storeType)。
+                  #  * JKS —— key 密码独立, importkeystore 预验是真实的;
+                  #    KEY_PASSWORD 解不开再回退 KEYSTORE_PASSWORD。
+                  kstype="$(keytool -list -keystore "$ks" -storepass "$sp" 2>/dev/null \
+                    | sed -n 's/^Keystore type: //p' | head -1)"
+                  echo "keystore type: ${kstype:-unknown}"
                   probe="$RUNNER_TEMP/sign-probe.p12"
                   keypass="${kp:-$sp}"
+                  if [ "$kstype" = "PKCS12" ]; then
+                    if [ -n "$kp" ] && [ "$kp" != "$sp" ]; then
+                      echo "::warning::keystore 为 PKCS12: key 密码即 store 密码, KEY_PASSWORD secret 与此不一致已被忽略"
+                    fi
+                    keypass="$sp"
+                  fi
                   if ! keytool -importkeystore -srckeystore "$ks" \
                        -srcalias "$al" -srcstorepass "$sp" -srckeypass "$keypass" \
                        -destkeystore "$probe" -deststoretype PKCS12 \
@@ -236,7 +250,7 @@ jobs:
                          -srcalias "$al" -srcstorepass "$sp" -srckeypass "$sp" \
                          -destkeystore "$probe" -deststoretype PKCS12 \
                          -deststorepass probe-only -noprompt > /dev/null 2>&1; then
-                      echo "::warning::KEY_PASSWORD 无法解密私钥, 已回退使用 KEYSTORE_PASSWORD(PKCS12 惯例); 建议把 KEY_PASSWORD secret 改成与 KEYSTORE_PASSWORD 一致"
+                      echo "::warning::KEY_PASSWORD 无法解密私钥, 已回退使用 KEYSTORE_PASSWORD; 建议修正 KEY_PASSWORD secret"
                       keypass="$sp"
                     else
                       echo "::error::keystore 私钥无法解密: KEY_PASSWORD 与 KEYSTORE_PASSWORD 都打不开别名 '$al' 的私钥, 请核对 secrets"
@@ -253,6 +267,7 @@ jobs:
                     echo "PILI_KEYSTORE_PASSWORD=$sp"
                     echo "PILI_KEY_ALIAS=$al"
                     echo "PILI_KEY_PASSWORD=$keypass"
+                    if [ -n "$kstype" ]; then echo "PILI_KEYSTORE_TYPE=$kstype"; fi
                   } >> "$GITHUB_ENV"
                   echo "::notice::release 签名已配置并通过私钥解密验证(alias=$al, 环境变量直传)"
 

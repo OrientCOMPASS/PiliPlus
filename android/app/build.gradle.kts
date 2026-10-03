@@ -52,6 +52,10 @@ android {
     val config = storeFilePath?.let {
         signingConfigs.create("release") {
             storeFile = file(it)
+            // PKCS12 库必须显式声明类型(AGP 默认按 JKS 处理会解密失败)
+            (System.getenv("PILI_KEYSTORE_TYPE")
+                ?: keyProperties.getProperty("storeType"))?.takeIf { t -> t.isNotEmpty() }
+                ?.let { t -> storeType = t }
             storePassword = System.getenv("PILI_KEYSTORE_PASSWORD")
                 ?: keyProperties.getProperty("storePassword")
             keyAlias = System.getenv("PILI_KEY_ALIAS")

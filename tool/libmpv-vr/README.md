@@ -30,6 +30,15 @@
   手动环视（头追关闭）时 `vr_manual_angles()` 还会在 native 侧兜底夹取视角：
   180° 片源的偏航在覆盖边界收敛、俯仰在极点收敛（转出画面见黑不可接受），
   头追开启时不夹取（陀螺仪模式按需求放宽）。
+  **第十五轮（真机"手势卡顿/HUD 与陀螺仪分离"修复）**：
+  ① `vr-view` 合并字符串属性（`"yaw=..,pitch=..,fov=.."`，解析后覆盖标量
+  字段）：mpv 客户端每次 setProperty 都要一次"客户端→core 同步派发 +
+  core→VO 同步 VOCTRL 握手"，拖拽时 9 个属性/批 × ~33 批/s ≈ 300 次跨线程
+  往返/s，正是"手势拖动卡顿而陀螺仪（零属性流量）流畅"的根因——合并后
+  每批只剩 1 次；② `vr-view-yaw`/`vr-view-pitch` 只读属性（经
+  `VOCTRL_VR_VIEW_ANGLES` 读 vr.c 每帧缓存的有效视角中心，含头姿与折叠
+  偏置），HUD 从此显示**真实**视线方向而不是只显示手动分量（属性实现在
+  vr_metadata.patch，避免两个补丁同时改 command.c 产生重叠 hunk）。
   **VR_GYRO_CONT（第十四轮，真机"陀螺仪开关跳变/背对画面"修复）**：
   开启头追时不再直接使用原始设备姿态——等首个真实陀螺仪样本到达后采样
   参考系 `ref_inv = head⁻¹·B·A⁻¹`（A=on 模式手动部 Ry·Rx，B=off 模式
@@ -60,7 +69,12 @@
   个库，LGPL、静态链入 libmpv.so）：mpv 直接持有 SMB socket，seek 是同句柄
   定位读（不重连），停播即断开；URL 形如
   `smb://[domain;][user[:pass]@]host[:port]/share/path`（各分量百分号编码，
-  密码不落日志），命令级超时默认 10s（`timeout` AVOption）。配套：
+  密码不落日志），命令级超时默认 10s（`timeout` AVOption）。
+  **SMB2_BLANK_PW（第十五轮，真机 `STATUS_INVALID_PARAMETER` 根因）**：
+  libsmb2 客户端把 NULL 密码当"匿名登录"（`ntlmssp.c: password == NULL →
+  anonymous`），空密码的真实账号会被服务器拒绝——有用户名时必须显式
+  `smb2_set_password("")` 走空密码 NTLMv2（Dart 浏览客户端正是这样做的，
+  所以浏览正常而直连播放失败）。配套：
   `depinfo.sh`/`download-deps.sh`/`scripts/libsmb2.sh`（cmake 静态+PIC 构建，
   安装后把不自包含的头文件补齐 stddef/stdint/time 前置与 umbrella include，
   ffmpeg configure 的单头探测才能通过）与 `flavors/default.sh` 的

@@ -29,7 +29,7 @@ piliplayer 在完整的 PiliPlus（B 站）客户端之上，重点打磨了两�
 ## 适配平台
 
 - [x] Android（arm64-v8a）
-- [ ] iOS / Windows / Linux / macOS —— 本仓库已移除对应平台工程与 CI，不再维护
+- [ ] iOS / Windows / Linux / macOS —— 不再维护：对应平台工程、CI，以及 Dart 侧桌面专用代码与依赖（`window_manager` / `tray_manager` / `win32` / `screen_retriever` / `desktop_webview_window`）均已移除，`lib/` 仅保留 Android 路径
 
 <br/>
 

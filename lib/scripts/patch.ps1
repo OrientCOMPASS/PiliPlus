@@ -1,6 +1,11 @@
 param(
-    [string]$platform = ""
+    [string]$platform = "android"
 )
+
+# CI patch script — Android only (piliplayer).
+# Patches the Flutter SDK (in $FLUTTER_ROOT) and the material_ui package in the
+# pub cache, then runs `flutter pub get`. The iOS/Linux/macOS/Windows branches
+# that used to live here were removed together with the other-platform projects.
 
 git config --global user.name "ci"
 git config --global user.email "example@example.com"
@@ -11,10 +16,6 @@ $NewOverScrollIndicator = "362b1de29974ffc1ed6faa826e1df870d7bec75f";
 
 # set `gestureSettings`
 $BottomSheetAndroidPatch = "lib/scripts/bottom_sheet_android.patch"
-
-# https://github.com/bggRGjQaUbCoE/PiliPlus/issues/1906
-$BottomSheetIOSFlutterPatch = "lib/scripts/bottom_sheet_ios_flutter.patch"
-$BottomSheetIOSPiliPlusPatch = "lib/scripts/bottom_sheet_ios_piliplus.patch"
 
 # https://github.com/bggRGjQaUbCoE/PiliPlus/issues/1662
 # handle bottom scroll event
@@ -99,81 +100,18 @@ $ModalBarrierPatch = "lib/scripts/modal_barrier.patch"
 # https://github.com/flutter/flutter/issues/182466
 $MouseCursorPatch = "lib/scripts/mouse_cursor.patch"
 
-$GeetestIOSPatch = "lib/scripts/geetest_ios.patch"
-
-if ($platform.ToLower() -eq "ios") {
-    git apply $BottomSheetIOSPiliPlusPatch
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "$BottomSheetIOSPiliPlusPatch applied"
-    } else {
-        throw "$LASTEXITCODE"
-    }
-    git apply $GeetestIOSPatch
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "$GeetestIOSPatch applied"
-    } else {
-        throw "$LASTEXITCODE"
-    }
-}
-
 Set-Location $env:FLUTTER_ROOT
 
-$picks   = @()
-$reverts = @()
+git reset --hard HEAD
+
 $patches = @($ModalBarrierPatch, $TextSelectionPatch, $MouseCursorPatch,
             $ImageAnimPatch, $LayoutBuilderPatch, $NavigationDrawerPatch,
             $PopupMenuPatch, $FABPatch, $NullSafetySelectableRegionPatch,
             $SelectableRegionPatch, $EditableTextPatch, $TextFieldPatch,
             $ScrollPositionPatch, $ScrollablePatch, $ScrollableGesturePatch,
             $DraggableScrollableSheetPatch, $ScaffoldPatch, $TextPatch,
-            $TextPainterPatch, $SliverPatch, $RefreshIndicatorPatch)
-
-switch ($platform.ToLower()) {
-    "android" {
-        $patches += $BottomSheetAndroidPatch
-        $patches += $ScrollViewPatch
-        $patches += $NavigatorPatch
-
-        git reset --hard HEAD
-    }
-    "ios" {
-        $patches += $ScrollViewPatch
-        $patches += $BottomSheetIOSFlutterPatch
-        $patches += $NavigatorPatch
-    }
-    "linux" {
-        git reset --hard HEAD
-    }
-    "macos" {
-    }
-    "windows" {
-    }
-    default {}
-}
-
-foreach ($pick in $picks) {
-    git stash
-    git cherry-pick $pick --no-edit
-    if ($LASTEXITCODE -eq 0) {
-        git reset --soft HEAD~1
-        Write-Host "$pick picked"
-    } else {
-        throw "$LASTEXITCODE"
-    }
-    git stash pop
-}
-
-foreach ($revert in $reverts) {
-    git stash
-    git revert $revert --no-edit
-    if ($LASTEXITCODE -eq 0) {
-        git reset --soft HEAD~1
-        Write-Host "$revert reverted"
-    } else {
-        throw "$LASTEXITCODE"
-    }
-    git stash pop
-}
+            $TextPainterPatch, $SliverPatch, $RefreshIndicatorPatch,
+            $BottomSheetAndroidPatch, $ScrollViewPatch, $NavigatorPatch)
 
 foreach ($patch in $patches) {
     git apply "$env:GITHUB_WORKSPACE/$patch"
@@ -187,8 +125,6 @@ foreach ($patch in $patches) {
 Set-Location $env:GITHUB_WORKSPACE
 
 $BottomSheetAndroidPatchMaterial = "lib/scripts/material/bottom_sheet_android.patch"
-
-$BottomSheetIOSFlutterMaterialPatchMaterial = "lib/scripts/material/bottom_sheet_ios_flutter_material.patch"
 
 $ModalBarrierPatchMaterial = "lib/scripts/material/modal_barrier_material.patch"
 
@@ -208,26 +144,9 @@ $TabsPatchMaterial = "lib/scripts/material/tabs.patch"
 
 $patches_material = @($ModalBarrierPatchMaterial, $NavigationDrawerPatchMaterial, $PopupMenuPatchMaterial,
                     $FABPatchMaterial, $TextFieldPatchMaterial, $ScaffoldPatchMaterial, $RefreshIndicatorPatchMaterial,
-                    $TabsPatchMaterial)
+                    $TabsPatchMaterial, $BottomSheetAndroidPatchMaterial)
 
 $PubCacheDir = "~/.pub-cache"
-
-switch ($platform.ToLower()) {
-    "android" {
-        $patches_material += $BottomSheetAndroidPatchMaterial
-    }
-    "ios" {
-        $patches_material += $BottomSheetIOSFlutterMaterialPatchMaterial
-    }
-    "linux" {
-    }
-    "macos" {
-    }
-    "windows" {
-        $PubCacheDir = "$env:LOCALAPPDATA/Pub/Cache"
-    }
-    default {}
-}
 
 try {
     $MaterialUiDir = Get-ChildItem "$PubCacheDir/hosted/pub.dev" -Directory |
@@ -253,58 +172,13 @@ if (-not $MaterialUiDir) {
 Write-Host "material_ui dir: $($MaterialUiDir.FullName)"
 
 Get-ChildItem -Path "$env:GITHUB_WORKSPACE/lib/scripts/material" -Filter *.patch | ForEach-Object {
-    (Get-Content $_.FullName -Raw) -replace "`r`n", "`n" | 
+    (Get-Content $_.FullName -Raw) -replace "`r`n", "`n" |
         Set-Content -NoNewline $_.FullName
 }
 
 cd $MaterialUiDir.FullName
 
 foreach ($patch in $patches_material) {
-    git apply "$env:GITHUB_WORKSPACE/$patch"
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "$patch applied"
-    } else {
-        throw "$LASTEXITCODE"
-    }
-}
-
-$BottomSheetIOSFlutterPatchCupertino = "lib/scripts/cupertino/bottom_sheet_ios_flutter.patch"
-
-$patches_cupertino = @()
-
-switch ($platform.ToLower()) {
-    "android" {
-    }
-    "ios" {
-        $patches_cupertino += $BottomSheetIOSFlutterPatchCupertino
-    }
-    "linux" {
-    }
-    "macos" {
-    }
-    "windows" {
-    }
-    default {}
-}
-
-$CupertinoUiDir = Get-ChildItem "$PubCacheDir/hosted/pub.dev" -Directory |
-    Where-Object { $_.Name -like "cupertino_ui-*" } |
-    Select-Object -Last 1
-
-if (-not $CupertinoUiDir) {
-    throw "cupertino_ui package not found in pub cache"
-}
-
-Write-Host "cupertino_ui dir: $($CupertinoUiDir.FullName)"
-
-Get-ChildItem -Path "$env:GITHUB_WORKSPACE/lib/scripts/cupertino" -Filter *.patch | ForEach-Object {
-    (Get-Content $_.FullName -Raw) -replace "`r`n", "`n" | 
-        Set-Content -NoNewline $_.FullName
-}
-
-cd $CupertinoUiDir.FullName
-
-foreach ($patch in $patches_cupertino) {
     git apply "$env:GITHUB_WORKSPACE/$patch"
     if ($LASTEXITCODE -eq 0) {
         Write-Host "$patch applied"

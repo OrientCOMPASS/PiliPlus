@@ -116,42 +116,16 @@ class _LiveHeaderControlState extends State<LiveHeaderControl>
       padding: const .symmetric(horizontal: 14, vertical: 13),
       child: Row(
         children: [
-          if (isFullScreen || plPlayerController.isDesktopPip)
+          if (isFullScreen)
             ComBtn(
               height: btnHeight,
               tooltip: '返回',
               icon: const Icon(FontAwesomeIcons.arrowLeft, size: 15),
-              onTap: () {
-                if (plPlayerController.isDesktopPip) {
-                  plPlayerController.exitDesktopPip();
-                } else {
-                  plPlayerController.triggerFullScreen(status: false);
-                }
-              },
+              onTap: () => plPlayerController.triggerFullScreen(status: false),
             ),
           child,
           ...?timeBatteryWidgets,
           const SizedBox(width: 10),
-          if (PlatformUtils.isDesktop && !plPlayerController.isDesktopPip)
-            Obx(() {
-              final isAlwaysOnTop = plPlayerController.isAlwaysOnTop.value;
-              return ComBtn(
-                height: btnHeight,
-                tooltip: '${isAlwaysOnTop ? '取消' : ''}置顶',
-                icon: isAlwaysOnTop
-                    ? const Icon(
-                        size: 18,
-                        Icons.push_pin,
-                        color: Colors.white,
-                      )
-                    : const Icon(
-                        size: 18,
-                        Icons.push_pin_outlined,
-                        color: Colors.white,
-                      ),
-                onTap: () => plPlayerController.setAlwaysOnTop(!isAlwaysOnTop),
-              );
-            }),
           if (isFullScreen || PlatformUtils.isDesktop)
             ComBtn(
               height: btnHeight,
@@ -168,10 +142,6 @@ class _LiveHeaderControlState extends State<LiveHeaderControl>
               height: btnHeight,
               tooltip: '画中画',
               onTap: () {
-                if (PlatformUtils.isDesktop) {
-                  plPlayerController.toggleDesktopPip();
-                  return;
-                }
                 if (AndroidHelper.isPipAvailable) {
                   plPlayerController.enterPip();
                 }

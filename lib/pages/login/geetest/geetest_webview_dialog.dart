@@ -1,4 +1,4 @@
-import 'dart:convert' show base64, jsonDecode, jsonEncode, utf8;
+import 'dart:convert' show jsonDecode, jsonEncode;
 import 'dart:io' show Platform;
 
 import 'package:PiliPlus/http/browser_ua.dart';
@@ -7,7 +7,6 @@ import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/main.dart';
 import 'package:PiliPlus/utils/accounts/account.dart';
 import 'package:PiliPlus/utils/extension/string_ext.dart';
-import 'package:desktop_webview_window/desktop_webview_window.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:get/get.dart';
@@ -35,8 +34,6 @@ class _GeetestWebviewDialogState extends State<GeetestWebviewDialog> {
       'https://static.geetest.com/static/js/fullpage.0.0.0.js';
 
   late final Future<LoadingState<String>> _future;
-  Webview? _linuxWebview;
-  late bool _linuxWebviewLoading = true;
 
   static String _showJs(String response) =>
       't=Geetest($response).onSuccess(()=>R("success",t.getValidate())).onError(o=>R("error",o)).onClose(o=>R("close",o));t.onReady(()=>t.verify())';
@@ -45,9 +42,6 @@ class _GeetestWebviewDialogState extends State<GeetestWebviewDialog> {
   void initState() {
     super.initState();
     _future = _getConfig(widget.gt, widget.challenge);
-    if (Platform.isLinux) {
-      _initLinuxWebview();
-    }
   }
 
   static Future<LoadingState<String>> _getConfig(
@@ -93,116 +87,8 @@ class _GeetestWebviewDialogState extends State<GeetestWebviewDialog> {
     return Error(res.data['message']);
   }
 
-  Future<void> _initLinuxWebview() async {
-    final config = await _future;
-
-    if (!mounted) {
-      return;
-    }
-
-    if (config is Error) {
-      config.toast();
-      Get.back();
-      return;
-    }
-
-    final webview = await WebviewWindow.create(
-      configuration: const CreateConfiguration(
-        windowWidth: 300,
-        windowHeight: 400,
-        title: "验证码",
-      ),
-    );
-
-    _linuxWebview = webview;
-
-    if (!mounted) {
-      _closeLinuxWebview();
-      return;
-    }
-
-    webview.addOnWebMessageReceivedCallback((msg) {
-      final msgStr = msg.toString();
-      if (msgStr.startsWith("success:")) {
-        final dataStr = msgStr.substring("success:".length);
-        try {
-          final data = jsonDecode(dataStr);
-          Get.back(result: data);
-        } catch (e) {
-          debugPrint('geetest decode error: $e');
-        }
-      } else if (msgStr.startsWith("error:")) {
-        debugPrint('geetest error: $msgStr');
-      } else if (msgStr.startsWith('close:')) {
-        Get.back();
-      }
-    });
-
-    webview.onClose.whenComplete(() {
-      if (mounted) {
-        Get.back();
-      }
-    });
-
-    final html =
-        '''
-<!DOCTYPE html><html><head></head><body>
-<script src="$_geetestJsUri"></script>
-<script>
-  R=(n,o)=>webkit.messageHandlers.msgToNative.postMessage(n+':'+JSON.stringify(o))
-  ${_showJs(config.data)}
-</script>
-</body></html>
-''';
-
-    webview.launch(
-      'data:text/html;base64,${base64.encode(utf8.encode(html))}',
-    );
-
-    if (mounted) {
-      setState(() {
-        _linuxWebviewLoading = false;
-      });
-    }
-  }
-
-  void _closeLinuxWebview() {
-    _linuxWebview?.close();
-    _linuxWebview = null;
-  }
-
-  @override
-  void dispose() {
-    _closeLinuxWebview();
-    super.dispose();
-  }
-
   @override
   Widget build(BuildContext context) {
-    if (Platform.isLinux) {
-      return AlertDialog(
-        title: const Text('验证码'),
-        content: SizedBox(
-          width: 300,
-          height: 400,
-          child: Center(
-            child: _linuxWebviewLoading
-                ? const CircularProgressIndicator()
-                : const Text('请在弹出的新窗口中完成验证'),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: Get.back,
-            child: Text(
-              '取消',
-              style: TextStyle(color: ColorScheme.of(context).outline),
-            ),
-          ),
-        ],
-      );
-    }
-
     return Stack(
       children: [
         InAppWebView(

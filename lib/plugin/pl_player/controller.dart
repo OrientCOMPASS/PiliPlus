@@ -65,7 +65,6 @@ import 'package:native_device_orientation/native_device_orientation.dart';
 import 'package:path/path.dart' as path;
 import 'package:screen_brightness_platform_interface/screen_brightness_platform_interface.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
-import 'package:window_manager/window_manager.dart';
 
 typedef PlayCallback = Future<void>? Function();
 
@@ -198,72 +197,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       isLive ? enableShowLiveDanmaku : enableShowDanmaku;
 
   late final bool autoPiP = Pref.autoPiP;
-  bool get isPipMode =>
-      (Platform.isAndroid && AndroidHelper.isPipMode) ||
-      (PlatformUtils.isDesktop && isDesktopPip);
-  late bool isDesktopPip = false;
-  late Rect _lastWindowBounds;
+  bool get isPipMode => Platform.isAndroid && AndroidHelper.isPipMode;
 
-  late final showWindowTitleBar = Pref.showWindowTitleBar;
-  late final RxBool isAlwaysOnTop = false.obs;
-  Future<void> setAlwaysOnTop(bool value) {
-    isAlwaysOnTop.value = value;
-    return windowManager.setAlwaysOnTop(value);
-  }
-
-  Future<void> exitDesktopPip() {
-    isDesktopPip = false;
-    return Future.wait([
-      if (showWindowTitleBar)
-        windowManager.setTitleBarStyle(TitleBarStyle.normal),
-      windowManager.setMinimumSize(const Size(400, 700)),
-      windowManager.setBounds(_lastWindowBounds),
-      setAlwaysOnTop(false),
-      windowManager.setAspectRatio(0),
-    ]);
-  }
-
-  Future<void> enterDesktopPip() async {
-    if (isFullScreen.value) return;
-
-    isDesktopPip = true;
-
-    _lastWindowBounds = await windowManager.getBounds();
-
-    if (showWindowTitleBar) {
-      windowManager.setTitleBarStyle(TitleBarStyle.hidden);
-    }
-
-    final Size size;
-    final state = videoPlayerController!.state;
-    int width = state.width;
-    int height = state.height;
-    if (width == 0) {
-      width = this.width ?? 16;
-    }
-    if (height == 0) {
-      height = this.height ?? 9;
-    }
-    if (height > width) {
-      size = Size(280.0, 280.0 * height / width);
-    } else {
-      size = Size(280.0 * width / height, 280.0);
-    }
-
-    await windowManager.setMinimumSize(size);
-    setAlwaysOnTop(true);
-    windowManager
-      ..setSize(size)
-      ..setAspectRatio(width / height);
-  }
-
-  void toggleDesktopPip() {
-    if (isDesktopPip) {
-      exitDesktopPip();
-    } else {
-      enterDesktopPip();
-    }
-  }
+  /// piliplayer 为安卓专供构建: 桌面悬浮窗 PiP 已随 window_manager 整体移除。
+  /// 该标志恒为 false, 仅为让播放器 UI 中大量 `isFullScreen || isDesktopPip`
+  /// 之类的判断无需逐处改写(在安卓上始终走非 PiP 分支)。
+  bool get isDesktopPip => false;
 
   late bool _isAutoEnterPip = false;
   bool get isAutoEnterPip => _isAutoEnterPip;
@@ -2383,10 +2322,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       // playerStatus.close();
       // dataStatus.close();
 
-      if (PlatformUtils.isDesktop && isAlwaysOnTop.value) {
-        windowManager.setAlwaysOnTop(false);
-      }
-
       if (playerStatus.isPlaying) {
         WakelockPlus.disable();
       }
@@ -2532,10 +2467,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     if (controlsLock.value) {
       onLockControl(false);
-      return;
-    }
-    if (isDesktopPip) {
-      exitDesktopPip();
       return;
     }
     if (isFullScreen.value) {

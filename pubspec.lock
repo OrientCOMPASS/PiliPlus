@@ -391,15 +391,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.7.15"
-  desktop_webview_window:
-    dependency: "direct main"
-    description:
-      path: "."
-      ref: main
-      resolved-ref: b429f8ba6b8a99cd0f7eb5fe8d1621f325635c3d
-      url: "https://github.com/Predidit/linux_webview_window"
-    source: git
-    version: "0.2.4"
   device_info_plus:
     dependency: "direct main"
     description:
@@ -1555,14 +1546,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.1.2"
-  screen_retriever:
-    dependency: "direct main"
-    description:
-      name: screen_retriever
-      sha256: ace919117a7520c13a50a6259e60c4a0d4cbe98809468792a91b5c5adada2aa6
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.2.2"
   screen_retriever_linux:
     dependency: transitive
     description:
@@ -1769,14 +1752,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.7.12"
-  tray_manager:
-    dependency: "direct main"
-    description:
-      name: tray_manager
-      sha256: "1a659b08baa6e9b91ef8ce16eda37740de398be1c4cf322b8a1ddfef25c68c5a"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.5.3"
   typed_data:
     dependency: transitive
     description:
@@ -1978,14 +1953,6 @@ packages:
       url: "https://github.com/wgh136/webdav_client.git"
     source: git
     version: "1.2.2"
-  win32:
-    dependency: "direct main"
-    description:
-      name: win32
-      sha256: a0b93865d5644f11cf6a8c3f6db909f1ec168958b5805f6cc684adea957cd63d
-      url: "https://pub.dev"
-    source: hosted
-    version: "6.4.0"
   win32_registry:
     dependency: transitive
     description:
@@ -1994,15 +1961,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.0.3"
-  window_manager:
-    dependency: "direct main"
-    description:
-      path: "packages/window_manager"
-      ref: main
-      resolved-ref: ac535d09a5850279e6591a9bdd285f9a3edeebf8
-      url: "https://github.com/bggRGjQaUbCoE/window_manager.git"
-    source: git
-    version: "0.5.2"
   windows_file_picker:
     dependency: transitive
     description:

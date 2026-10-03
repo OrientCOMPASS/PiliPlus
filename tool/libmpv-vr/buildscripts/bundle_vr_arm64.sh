@@ -45,7 +45,15 @@ grep -q "vr-metadata-projection" deps/mpv/player/command.c
 # ffmpeg smb:// protocol via libsmb2 (VLC-parity LAN playback, no loopback
 # HTTP proxy: seeks are positioned reads, quit closes the socket outright)
 grep -q "ff_libsmb2_protocol" deps/ffmpeg/libavformat/libsmb2.c
+# SMB2_BLANK_PW: blank-password accounts must authenticate with NTLM over the
+# empty password; libsmb2 treats a NULL password as anonymous login, which
+# Windows/NAS reject with STATUS_INVALID_PARAMETER (round-15 device log).
+grep -q "SMB2_BLANK_PW" deps/ffmpeg/libavformat/libsmb2.c
 grep -q "enable-libsmb2" flavors/default.sh
+# round 15: packed vr-view property (single round trip per drag batch) and
+# effective-angle HUD properties
+grep -q "vr_parse_view_string" deps/mpv/video/out/gpu/video.c
+grep -q "VOCTRL_VR_VIEW_ANGLES" deps/mpv/player/command.c
 
 cp flavors/default.sh scripts/ffmpeg.sh
 ./build.sh mpv --arch arm64
@@ -67,6 +75,10 @@ fi
 # the ffmpeg smb:// protocol (patches/ffmpeg/libsmb2.patch) must be compiled in
 if ! strings -a "$NEW_SO" | grep -q "Malformed smb:// url"; then
     echo "FATAL: libmpv.so does not contain the libsmb2 smb:// protocol" >&2
+    exit 1
+fi
+if ! strings -a "$NEW_SO" | grep -q "vr-view-yaw"; then
+    echo "FATAL: libmpv.so does not contain the vr-view-* HUD properties" >&2
     exit 1
 fi
 # libsmb2 must be linked STATICALLY (the jar ships no extra .so files)

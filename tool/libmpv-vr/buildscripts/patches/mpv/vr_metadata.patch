@@ -197,10 +197,10 @@ index 42046a4..347b64f 100644
      struct pl_color_repr repr;   // color representation info where available
      enum pl_chroma_location chroma_location; // chroma location
 diff --git a/player/command.c b/player/command.c
-index 96bc06a..5e4afa9 100644
+index 96bc06a..bba743e 100644
 --- a/player/command.c
 +++ b/player/command.c
-@@ -2620,6 +2620,45 @@ static int mp_property_vd_imgparams(void *ctx, struct m_property *prop,
+@@ -2620,6 +2620,63 @@ static int mp_property_vd_imgparams(void *ctx, struct m_property *prop,
      return M_PROPERTY_UNAVAILABLE;
  }
  
@@ -243,16 +243,36 @@ index 96bc06a..5e4afa9 100644
 +    return m_property_strdup_ro(action, arg, val);
 +}
 +
++// PiliPlus VR: the *effective* view angles (manual offsets + folded gyro
++// bias + head pose) as rendered by vo=gpu's VR renderer, so the client HUD
++// can show the real look direction instead of only the manual component.
++static int mp_property_vr_view_angle(void *ctx, struct m_property *prop,
++                                     int action, void *arg)
++{
++    MPContext *mpctx = ctx;
++    struct vo *vo = mpctx->video_out;
++    if (!vo)
++        return M_PROPERTY_UNAVAILABLE;
++    double angles[2] = {0, 0};
++    if (vo_control(vo, VOCTRL_VR_VIEW_ANGLES, angles) <= 0)
++        return M_PROPERTY_UNAVAILABLE;
++    const char *which = prop->priv;
++    return m_property_double_ro(action, arg,
++                                which[0] == 'y' ? angles[0] : angles[1]);
++}
++
  static int mp_property_video_frame_info(void *ctx, struct m_property *prop,
                                          int action, void *arg)
  {
-@@ -4447,6 +4486,9 @@ static const struct m_property mp_properties_base[] = {
+@@ -4447,6 +4504,11 @@ static const struct m_property mp_properties_base[] = {
      {"video-dec-params", mp_property_dec_imgparams},
      {"video-params", mp_property_vd_imgparams},
      {"video-frame-info", mp_property_video_frame_info},
 +    // VR / panoramic source metadata (PiliPlus)
 +    {"vr-metadata-projection", mp_property_vr_metadata, .priv = "projection"},
 +    {"vr-metadata-layout", mp_property_vr_metadata, .priv = "layout"},
++    {"vr-view-yaw", mp_property_vr_view_angle, .priv = "yaw"},
++    {"vr-view-pitch", mp_property_vr_view_angle, .priv = "pitch"},
      M_PROPERTY_ALIAS("video-format", "current-tracks/video/codec"),
      M_PROPERTY_ALIAS("video-codec", "current-tracks/video/codec-desc"),
      M_PROPERTY_ALIAS("dwidth", "video-out-params/dw"),

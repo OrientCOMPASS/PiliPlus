@@ -49,10 +49,10 @@ index 0d2e757..6ce7228 100644
  OBJS-$(CONFIG_LIBSSH_PROTOCOL)           += libssh.o
 diff --git a/libavformat/libsmb2.c b/libavformat/libsmb2.c
 new file mode 100644
-index 0000000..ea6948b
+index 0000000..e9a4b96
 --- /dev/null
 +++ b/libavformat/libsmb2.c
-@@ -0,0 +1,374 @@
+@@ -0,0 +1,383 @@
 +/*
 + * SMB2/SMB3 protocol via libsmb2
 + * Copyright (c) 2026 PiliPlus contributors
@@ -290,10 +290,19 @@ index 0000000..ea6948b
 +    }
 +    if (c->timeout > 0)
 +        smb2_set_timeout(c->smb2, c->timeout);
-+    if (user && *user)
++    if (user && *user) {
 +        smb2_set_user(c->smb2, user);
-+    if (password)
++        /* SMB2_BLANK_PW: libsmb2 treats a NULL password as "log in
++         * anonymously" (ntlmssp.c: password == NULL -> anonymous), which
++         * servers reject for real accounts with a blank password (observed:
++         * Windows answers SESSION_SETUP with STATUS_INVALID_PARAMETER).
++         * Passing "" explicitly produces proper NTLMv2 over the empty
++         * password, matching what other clients (VLC, our Dart browse
++         * client) do. */
++        smb2_set_password(c->smb2, password ? password : "");
++    } else if (password) {
 +        smb2_set_password(c->smb2, password);
++    }
 +    if (domain && *domain)
 +        smb2_set_domain(c->smb2, domain);
 +

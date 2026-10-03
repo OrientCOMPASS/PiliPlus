@@ -12,10 +12,18 @@ index fb10be5..04dfbc9 100644
      'video/out/vo.c',
      'video/out/vo_gpu.c',
 diff --git a/video/out/gpu/video.c b/video/out/gpu/video.c
-index c0a1be8..139d90d 100644
+index c0a1be8..18e9ee0 100644
 --- a/video/out/gpu/video.c
 +++ b/video/out/gpu/video.c
-@@ -39,6 +39,7 @@
+@@ -20,6 +20,7 @@
+ #include <math.h>
+ #include <stdarg.h>
+ #include <stdbool.h>
++#include <stdio.h>
+ #include <string.h>
+ 
+ #include <libavutil/common.h>
+@@ -39,6 +40,7 @@
  #include "video_shaders.h"
  #include "user_shaders.h"
  #include "error_diffusion.h"
@@ -23,7 +31,7 @@ index c0a1be8..139d90d 100644
  #include "video/out/filter_kernels.h"
  #include "video/out/aspect.h"
  #include "video/out/dither.h"
-@@ -204,6 +205,17 @@ struct gl_video {
+@@ -204,6 +206,17 @@ struct gl_video {
      struct ra_tex *error_diffusion_tex[2];
      struct ra_tex *screen_tex;
      struct ra_tex *output_tex;
@@ -41,7 +49,7 @@ index c0a1be8..139d90d 100644
      struct ra_tex **hook_textures;
      int num_hook_textures;
      int idx_hook_textures;
-@@ -410,6 +422,10 @@ static const struct gl_video_opts gl_video_opts_def = {
+@@ -410,6 +423,10 @@ static const struct gl_video_opts gl_video_opts_def = {
      .shader_cache = true,
      .hwdec_interop = "auto",
      .treat_srgb_as_power22 = 1|2|4, // auto
@@ -52,7 +60,7 @@ index c0a1be8..139d90d 100644
  };
  
  static OPT_STRING_VALIDATE_FUNC(validate_error_diffusion_opt);
-@@ -556,6 +572,26 @@ const struct m_sub_options gl_video_conf = {
+@@ -556,6 +573,27 @@ const struct m_sub_options gl_video_conf = {
          {"gpu-shader-cache-dir", OPT_STRING(shader_cache_dir), .flags = M_OPT_FILE},
          {"gpu-hwdec-interop",
              OPT_STRING_VALIDATE(hwdec_interop, ra_hwdec_validate_opt)},
@@ -76,10 +84,19 @@ index c0a1be8..139d90d 100644
 +        {"vr-pitch", OPT_FLOAT(vr_pitch), M_RANGE(-90.0, 90.0)},
 +        {"vr-head-tracking", OPT_BOOL(vr_head_tracking)},
 +        {"vr-reset-view", OPT_INT(vr_reset_view)},
++        {"vr-view", OPT_STRING(vr_view)},
          {"gamut-warning", OPT_REMOVED("Replaced by --gamut-mapping-mode=warn")},
          {"gamut-clipping", OPT_REMOVED("Replaced by --gamut-mapping-mode=desaturate")},
          {"tone-mapping-desaturate", OPT_REMOVED("Replaced by --tone-mapping-mode")},
-@@ -666,6 +702,7 @@ static void uninit_rendering(struct gl_video *p)
+@@ -575,6 +613,7 @@ static void reinit_from_options(struct gl_video *p);
+ static void get_scale_factors(struct gl_video *p, bool transpose_rot, double xy[2]);
+ static void gl_video_setup_hooks(struct gl_video *p);
+ static void gl_video_update_options(struct gl_video *p);
++static void vr_parse_view_string(struct gl_video_opts *opts);
+ 
+ #define GLSL(x) gl_sc_add(p->sc, #x "\n");
+ #define GLSLF(...) gl_sc_addf(p->sc, __VA_ARGS__)
+@@ -666,6 +705,7 @@ static void uninit_rendering(struct gl_video *p)
      ra_tex_free(p->ra, &p->blend_subs_tex);
      ra_tex_free(p->ra, &p->screen_tex);
      ra_tex_free(p->ra, &p->output_tex);
@@ -87,7 +104,7 @@ index c0a1be8..139d90d 100644
  
      for (int n = 0; n < 2; n++)
          ra_tex_free(p->ra, &p->error_diffusion_tex[n]);
-@@ -3206,8 +3243,24 @@ static void pass_draw_to_screen(struct gl_video *p, const struct ra_fbo *fbo, in
+@@ -3206,8 +3246,24 @@ static void pass_draw_to_screen(struct gl_video *p, const struct ra_fbo *fbo, in
  
      if (flags & RENDER_SCREEN_COLOR)
          pass_dither(p, fbo);
@@ -114,7 +131,7 @@ index c0a1be8..139d90d 100644
  }
  
  // flags: bit set of RENDER_FRAME_* flags
-@@ -3445,7 +3498,10 @@ void gl_video_render_frame(struct gl_video *p, struct vo_frame *frame,
+@@ -3445,7 +3501,10 @@ void gl_video_render_frame(struct gl_video *p, struct vo_frame *frame,
      }
  
      if (has_frame) {
@@ -126,7 +143,7 @@ index c0a1be8..139d90d 100644
                             (p->frames_drawn || !frame->still);
          if (interpolate) {
              double ratio = frame->ideal_frame_duration / frame->vsync_interval;
-@@ -3473,7 +3529,14 @@ void gl_video_render_frame(struct gl_video *p, struct vo_frame *frame,
+@@ -3473,7 +3532,14 @@ void gl_video_render_frame(struct gl_video *p, struct vo_frame *frame,
                  // texture to speed up subsequent re-draws (if any exist)
                  bool repeats = frame->num_vsyncs > 1 && frame->display_synced;
                  bool r = false;
@@ -141,7 +158,7 @@ index c0a1be8..139d90d 100644
                      (p->ra->caps & RA_CAP_BLIT) && fbo->tex->params.blit_dst)
                  {
                      // Attempt to use the same format as the destination FBO
-@@ -3515,7 +3578,12 @@ done:
+@@ -3515,7 +3581,12 @@ done:
  
      debug_check_gl(p, "after video rendering");
  
@@ -155,7 +172,7 @@ index c0a1be8..139d90d 100644
          // If we haven't actually drawn anything so far, then we technically
          // need to consider this the start of a new pass. Let's call it a
          // redraw just because, since it's basically a blank frame anyway
-@@ -3847,6 +3915,14 @@ static bool check_dumb_mode(struct gl_video *p)
+@@ -3847,6 +3918,14 @@ static bool check_dumb_mode(struct gl_video *p)
      struct gl_video_opts *o = &p->opts;
      if (p->use_integer_conversion)
          return false;
@@ -170,7 +187,7 @@ index c0a1be8..139d90d 100644
      if (o->dumb_mode > 0) // requested by user
          return true;
      if (o->dumb_mode < 0) // disabled by user
-@@ -3953,6 +4029,14 @@ static void check_gl_features(struct gl_video *p)
+@@ -3953,6 +4032,14 @@ static void check_gl_features(struct gl_video *p)
      p->forced_dumb_mode = p->opts.dumb_mode > 0 || !have_fbo || !have_texrg;
      bool voluntarily_dumb = check_dumb_mode(p);
      if (p->forced_dumb_mode || voluntarily_dumb) {
@@ -185,7 +202,7 @@ index c0a1be8..139d90d 100644
          if (voluntarily_dumb) {
              MP_VERBOSE(p, "No advanced processing required. Enabling dumb mode.\n");
          } else if (p->opts.dumb_mode <= 0) {
-@@ -4084,6 +4168,7 @@ void gl_video_uninit(struct gl_video *p)
+@@ -4084,6 +4171,7 @@ void gl_video_uninit(struct gl_video *p)
  
      uninit_video(p);
      ra_hwdec_ctx_uninit(&p->hwdec_ctx);
@@ -193,7 +210,7 @@ index c0a1be8..139d90d 100644
      gl_sc_destroy(p->sc);
  
      ra_tex_free(p->ra, &p->lut_3d_texture);
-@@ -4120,6 +4205,13 @@ bool gl_video_showing_interpolated_frame(struct gl_video *p)
+@@ -4120,6 +4208,18 @@ bool gl_video_showing_interpolated_frame(struct gl_video *p)
      return p->is_interpolated;
  }
  
@@ -204,10 +221,15 @@ index c0a1be8..139d90d 100644
 +    return p->opts.vr && p->opts.vr_head_tracking;
 +}
 +
++bool gl_video_vr_view_angles(struct gl_video *p, double *yaw, double *pitch)
++{
++    return vr_get_view_angles(p->vr, yaw, pitch);
++}
++
  static bool is_imgfmt_desc_supported(struct gl_video *p,
                                       const struct ra_imgfmt_desc *desc)
  {
-@@ -4154,6 +4246,9 @@ void gl_video_config(struct gl_video *p, struct mp_image_params *params)
+@@ -4154,6 +4254,9 @@ void gl_video_config(struct gl_video *p, struct mp_image_params *params)
          p->image_params = *params;
          if (params->imgfmt)
              init_video(p);
@@ -217,7 +239,7 @@ index c0a1be8..139d90d 100644
      }
  
      gl_video_reset_surfaces(p);
-@@ -4181,9 +4276,11 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
+@@ -4181,9 +4284,12 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
      };
      // make sure this variable is initialized to *something*
      p->pass = p->pass_fresh;
@@ -226,13 +248,31 @@ index c0a1be8..139d90d 100644
      p->cms = gl_lcms_init(p, log, g, opts->icc_opts),
      p->opts = *opts;
 +    p->opts_cache_copy = *opts;
++    vr_parse_view_string(&p->opts);
      for (int n = 0; n < SCALER_COUNT; n++)
          p->scaler[n] = (struct scaler){.index = n};
      // our VAO always has the vec2 position as the first element
-@@ -4199,11 +4296,76 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
+@@ -4199,11 +4305,96 @@ struct gl_video *gl_video_init(struct ra *ra, struct mp_log *log,
      return p;
  }
  
++// Parse the packed "yaw=..,pitch=..,fov=.." view string (option vr-view)
++// over the scalar view fields, so a client can update all continuous view
++// parameters with a single property set (see video.h). Values are clamped to
++// the same ranges as the scalar options; the coverage/pole bounds are
++// applied per frame in vr_manual_angles() as usual.
++static void vr_parse_view_string(struct gl_video_opts *opts)
++{
++    if (!opts->vr_view || !opts->vr_view[0])
++        return;
++    float y, p, f;
++    if (sscanf(opts->vr_view, "yaw=%f,pitch=%f,fov=%f", &y, &p, &f) != 3)
++        return;
++    opts->vr_yaw = MPMIN(MPMAX(y, -360.0f), 360.0f);
++    opts->vr_pitch = MPMIN(MPMAX(p, -90.0f), 90.0f);
++    opts->vr_fov = MPMIN(MPMAX(f, 10.0f), 150.0f);
++}
++
 +// Returns true if the only differences between the two option sets are the
 +// "hot" VR *view* fields (layout/projection/eye/stereo-output/fov/yaw/pitch/
 +// head-tracking/reset-view). Those are consumed per-frame by vr.c (mesh
@@ -252,6 +292,7 @@ index c0a1be8..139d90d 100644
 +    if (a->vr != b->vr)
 +        return false;
 +    struct gl_video_opts x = *a, y = *b;
++    x.vr_view = y.vr_view; // pointer owned by the cache; content is re-parsed
 +    x.vr_layout = y.vr_layout;
 +    x.vr_projection = y.vr_projection;
 +    x.vr_eye = y.vr_eye;
@@ -273,6 +314,7 @@ index c0a1be8..139d90d 100644
 +                         const struct gl_video_opts *src)
 +{
 +    dst->vr = src->vr;
++    dst->vr_view = src->vr_view;
 +    dst->vr_layout = src->vr_layout;
 +    dst->vr_projection = src->vr_projection;
 +    dst->vr_eye = src->vr_eye;
@@ -296,6 +338,7 @@ index c0a1be8..139d90d 100644
 +        // render chain each time.
 +        if (only_vr_view_opts_changed(&p->opts_cache_copy, new_opts)) {
 +            copy_vr_opts(&p->opts, new_opts);
++            vr_parse_view_string(&p->opts);
 +            // This path only runs when VR view fields changed (drag/zoom/
 +            // gyro/reset/...): the cached output frame shows the old view.
 +            p->output_tex_valid = false;
@@ -308,17 +351,27 @@ index c0a1be8..139d90d 100644
      }
  
      if (mp_csp_equalizer_state_changed(p->video_eq))
+@@ -4218,6 +4409,7 @@ static void reinit_from_options(struct gl_video *p)
+     // This works only for the fields themselves of course, not for any memory
+     // referenced by them.
+     p->opts = *(struct gl_video_opts *)p->opts_cache->opts;
++    vr_parse_view_string(&p->opts);
+ 
+     if (!p->force_clear_color)
+         p->clear_color = p->opts.background_color;
 diff --git a/video/out/gpu/video.h b/video/out/gpu/video.h
-index f8e05b1..ccb7a15 100644
+index f8e05b1..fcff2cc 100644
 --- a/video/out/gpu/video.h
 +++ b/video/out/gpu/video.h
-@@ -178,6 +178,32 @@ struct gl_video_opts {
+@@ -178,6 +178,39 @@ struct gl_video_opts {
      int early_flush;
      char *shader_cache_dir;
      char *hwdec_interop;
 +    // VR / panoramic rendering (PiliPlus, see gpu/vr.c). All of these are
-+    // plain values (no allocations), which gl_video_update_options() relies
-+    // on: changes confined to these fields are applied per-frame without
++    // plain values (no allocations - vr_view points into the option cache
++    // like every other OPT_STRING and is equalized by pointer in the
++    // hot-change comparison), which gl_video_update_options() relies on:
++    // changes confined to these fields are applied per-frame without
 +    // rebuilding the render chain (except vr_projection/vr_layout, which
 +    // vr.c re-meshes on its own).
 +    bool vr;
@@ -331,6 +384,11 @@ index f8e05b1..ccb7a15 100644
 +    float vr_pitch;         // manual pitch offset, degrees
 +    bool vr_head_tracking;  // NDK sensor + OrientationEKF head tracking
 +    int vr_reset_view;      // increment to recenter the head pose reference
++    // Packed view update "yaw=<f>,pitch=<f>,fov=<f>": lets a client change
++    // all continuous view parameters with ONE property set (each set costs a
++    // synchronous client->core->VO round trip; per-field sets made drag-look
++    // stutter). Parsed over the scalar fields whenever non-empty.
++    char *vr_view;
 +};
 +
 +enum {
@@ -345,22 +403,26 @@ index f8e05b1..ccb7a15 100644
  };
  
  extern const struct m_sub_options gl_video_conf;
-@@ -225,6 +251,9 @@ bool gl_video_gamma_auto_enabled(struct gl_video *p);
+@@ -225,6 +258,13 @@ bool gl_video_gamma_auto_enabled(struct gl_video *p);
  void gl_video_reset(struct gl_video *p);
  bool gl_video_showing_interpolated_frame(struct gl_video *p);
  
 +// VR head tracking needs continuous redraws (PiliPlus, see gpu/vr.c)
 +bool gl_video_vr_needs_redraw(struct gl_video *p);
 +
++// Effective VR view angles (yaw/pitch in degrees) of the last rendered
++// frame - head pose and folded bias included (PiliPlus HUD readout).
++bool gl_video_vr_view_angles(struct gl_video *p, double *yaw, double *pitch);
++
  struct mp_hwdec_devices;
  void gl_video_init_hwdecs(struct gl_video *p, struct ra_ctx *ra_ctx,
                            struct mp_hwdec_devices *devs,
 diff --git a/video/out/gpu/vr.c b/video/out/gpu/vr.c
 new file mode 100644
-index 0000000..544ab5b
+index 0000000..f3e27ad
 --- /dev/null
 +++ b/video/out/gpu/vr.c
-@@ -0,0 +1,981 @@
+@@ -0,0 +1,1005 @@
 +/*
 + * VR / panoramic video reprojection for vo=gpu (PiliPlus).
 + * See vr.h for the design notes and xl_player provenance.
@@ -455,6 +517,13 @@ index 0000000..544ab5b
 +    float last_model[16];   // last model rendered while tracking
 +    bool have_last_tracked;
 +    bool was_vr;            // previous opts->vr (rising-edge detection)
++
++    // Effective view center of the last rendered frame (decomposed to
++    // yaw/pitch degrees), exposed as the vr-view-yaw/vr-view-pitch
++    // properties so the HUD shows the *real* look direction - manual
++    // offsets, folded bias and head pose combined.
++    double view_yaw, view_pitch;
++    bool view_valid;
 +
 +    // Stereo intermediate texture
 +    struct ra_tex *stereo_tex;
@@ -1153,6 +1222,23 @@ index 0000000..544ab5b
 +            vr->want_reset = false;
 +        }
 +    }
++
++    // HUD readout: decompose the rendered view center back to yaw/pitch.
++    float d[3], vy, vp;
++    vr_center_dir(model, d);
++    vr_angles_from_dir(d, &vy, &vp);
++    vr->view_yaw = vy;
++    vr->view_pitch = vp;
++    vr->view_valid = true;
++}
++
++bool vr_get_view_angles(struct vr_ctx *vr, double *yaw, double *pitch)
++{
++    if (!vr || !vr->view_valid)
++        return false;
++    *yaw = vr->view_yaw;
++    *pitch = vr->view_pitch;
++    return true;
 +}
 +
 +// ---------------------------------------------------------------------------
@@ -1344,10 +1430,10 @@ index 0000000..544ab5b
 +}
 diff --git a/video/out/gpu/vr.h b/video/out/gpu/vr.h
 new file mode 100644
-index 0000000..c631807
+index 0000000..f7f8314
 --- /dev/null
 +++ b/video/out/gpu/vr.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,70 @@
 +/*
 + * VR / panoramic video reprojection for vo=gpu (PiliPlus).
 + *
@@ -1405,6 +1491,11 @@ index 0000000..c631807
 +// New video stream (playlist advance / reconfig): drop per-stream manual
 +// residue (folded gyro bias). See VR_GYRO_CONT in vr.c.
 +void vr_new_stream(struct vr_ctx *vr);
++
++// Effective view center (yaw/pitch degrees) of the last rendered frame, or
++// false if nothing has been rendered yet. Backs the vr-view-yaw/pitch
++// properties used by the client HUD.
++bool vr_get_view_angles(struct vr_ctx *vr, double *yaw, double *pitch);
 +
 +// Render the VR view. flat_tex is the fully composited flat frame (the
 +// equirectangular map), target is the destination framebuffer. Uses the
@@ -2274,8 +2365,23 @@ index 0000000..9e23fe4
 +// matrix (ekf_to_head_tracker) from upstream xl_tracker.c. If the tracker is
 +// not running, writes the identity matrix.
 +void vr_tracker_get_view(struct vr_tracker *t, float m[16]);
+diff --git a/video/out/vo.h b/video/out/vo.h
+index 160d860..97fd17e 100644
+--- a/video/out/vo.h
++++ b/video/out/vo.h
+@@ -133,6 +133,10 @@ enum mp_voctrl {
+     // Clipboard
+     VOCTRL_GET_CLIPBOARD,               // struct voctrl_clipboard*
+     VOCTRL_SET_CLIPBOARD,
++
++    // PiliPlus VR: effective view angles (yaw/pitch degrees, head tracking
++    // and folded bias included), data = double[2]. See gpu/vr.c.
++    VOCTRL_VR_VIEW_ANGLES,
+ };
+ 
+ // Helper to expose what kind of content is currently playing to the VO.
 diff --git a/video/out/vo_gpu.c b/video/out/vo_gpu.c
-index 8436833..10a2440 100644
+index 8436833..062a4a4 100644
 --- a/video/out/vo_gpu.c
 +++ b/video/out/vo_gpu.c
 @@ -80,6 +80,12 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
@@ -2291,3 +2397,16 @@ index 8436833..10a2440 100644
      if (!sw->fns->submit_frame(sw, frame)) {
          MP_ERR(vo, "Failed presenting frame!\n");
          return VO_FALSE;
+@@ -203,6 +209,12 @@ static int control(struct vo *vo, uint32_t request, void *data)
+     case VOCTRL_LOAD_HWDEC_API:
+         request_hwdec_api(vo, data);
+         return true;
++    case VOCTRL_VR_VIEW_ANGLES: {
++        double *angles = data;
++        if (!gl_video_vr_view_angles(p->renderer, &angles[0], &angles[1]))
++            return VO_NOTAVAIL;
++        return VO_TRUE;
++    }
+     case VOCTRL_UPDATE_RENDER_OPTS: {
+         struct ra_ctx_opts *ctx_opts = mp_get_config_group(vo, vo->global, &ra_ctx_conf);
+         update_ra_ctx_options(vo, ctx_opts);

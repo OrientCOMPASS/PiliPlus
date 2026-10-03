@@ -210,24 +210,48 @@ jobs:
                   KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
               run: |
                   set -euo pipefail
-                  if [ -z "${KEYSTORE_BASE64:-}" ] || [ -z "${KEYSTORE_PASSWORD:-}" ] \
-                     || [ -z "${KEY_ALIAS:-}" ] || [ -z "${KEY_PASSWORD:-}" ]; then
+                  # secrets 里的换行/回车一律剥掉(密码本身不受影响:
+                  # keytool 设置的密码不可能含 \r\n)
+                  strip() { printf '%s' "$1" | tr -d '\r\n'; }
+                  sp="$(strip "${KEYSTORE_PASSWORD:-}")"
+                  al="$(strip "${KEY_ALIAS:-}")"
+                  kp="$(strip "${KEY_PASSWORD:-}")"
+                  if [ -z "${KEYSTORE_BASE64:-}" ] || [ -z "$sp" ] || [ -z "$al" ]; then
                     echo "::error::release 签名 secrets 不完整(KEYSTORE_BASE64/KEYSTORE_PASSWORD/KEY_ALIAS/KEY_PASSWORD)"
                     exit 1
                   fi
                   ks="$RUNNER_TEMP/piliplayer-release.jks"
                   printf '%s' "$KEYSTORE_BASE64" | tr -d '\r' | base64 -d > "$ks"
-                  # 先验证 keystore 可读、别名存在, 失败立刻报清楚的错
-                  keytool -list -keystore "$ks" -storepass "$KEYSTORE_PASSWORD" \
-                    -alias "$KEY_ALIAS" > /dev/null
+                  # keytool -list 只验 store 密码; 签名还要用 key 密码解私钥。
+                  # 这里用 importkeystore 真正解一次私钥(等价于签名所需权限),
+                  # KEY_PASSWORD 解不开就回退 KEYSTORE_PASSWORD —— PKCS12
+                  # 库里两者本来就是同一个密码, secrets 分开配置常出错位。
+                  probe="$RUNNER_TEMP/sign-probe.p12"
+                  keypass="${kp:-$sp}"
+                  if ! keytool -importkeystore -srckeystore "$ks" \
+                       -srcalias "$al" -srcstorepass "$sp" -srckeypass "$keypass" \
+                       -destkeystore "$probe" -deststoretype PKCS12 \
+                       -deststorepass probe-only -noprompt > /dev/null 2>&1; then
+                    if [ "$keypass" != "$sp" ] && keytool -importkeystore -srckeystore "$ks" \
+                         -srcalias "$al" -srcstorepass "$sp" -srckeypass "$sp" \
+                         -destkeystore "$probe" -deststoretype PKCS12 \
+                         -deststorepass probe-only -noprompt > /dev/null 2>&1; then
+                      echo "::warning::KEY_PASSWORD 无法解密私钥, 已回退使用 KEYSTORE_PASSWORD(PKCS12 惯例); 建议把 KEY_PASSWORD secret 改成与 KEYSTORE_PASSWORD 一致"
+                      keypass="$sp"
+                    else
+                      echo "::error::keystore 私钥无法解密: KEY_PASSWORD 与 KEYSTORE_PASSWORD 都打不开别名 '$al' 的私钥, 请核对 secrets"
+                      exit 1
+                    fi
+                  fi
+                  rm -f "$probe"
                   cat > android/key.properties <<EOF
                   storeFile=$ks
-                  storePassword=$KEYSTORE_PASSWORD
-                  keyAlias=$KEY_ALIAS
-                  keyPassword=$KEY_PASSWORD
+                  storePassword=$sp
+                  keyAlias=$al
+                  keyPassword=$keypass
                   EOF
                   chmod 600 android/key.properties
-                  echo "::notice::release 签名已配置(alias=$KEY_ALIAS)"
+                  echo "::notice::release 签名已配置并通过私钥解密验证(alias=$al)"
 
             - name: Build Release Apk
               if: ${{ matrix.mode == 'release' }}

@@ -539,15 +539,15 @@ void main() {
     test('sniffVideoFile: 真实文件读取(读不到按 false)', () async {
       final dir = Directory.systemTemp.createTempSync('pili_sniff_test');
       try {
-        final mp4 = File('${dir.path}/noext_video');
-        mp4.writeAsBytesSync([
+        final mp4Path = '${dir.path}/noext_video';
+        File(mp4Path).writeAsBytesSync([
           0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70,
           0x69, 0x73, 0x6f, 0x6d, ...List<int>.filled(64, 0),
         ]);
-        expect(await LocalMediaService.sniffVideoFile(mp4.path), isTrue);
-        final junk = File('${dir.path}/junk');
-        junk.writeAsBytesSync(List<int>.filled(128, 0x42));
-        expect(await LocalMediaService.sniffVideoFile(junk.path), isFalse);
+        expect(await LocalMediaService.sniffVideoFile(mp4Path), isTrue);
+        final junkPath = '${dir.path}/junk';
+        File(junkPath).writeAsBytesSync(List<int>.filled(128, 0x42));
+        expect(await LocalMediaService.sniffVideoFile(junkPath), isFalse);
         expect(
           await LocalMediaService.sniffVideoFile('${dir.path}/不存在'),
           isFalse,

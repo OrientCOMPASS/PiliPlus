@@ -2089,12 +2089,28 @@ piliplayer://play?url=https%3A%2F%2Fhost%2Fa.mp4&title=%E6%B5%8B%E8%AF%95&start=
 release signingConfig（v1+v2 签名，缺失时回落 debug）。本轮在
 `piliplayer_ci.yml` 的 release leg 增加两步：
 
-1. **配置 release 签名**：四个 secrets 完整性检查 → base64 解码 keystore
-   到 `$RUNNER_TEMP`（`tr -d '\r'` 容忍 Windows 换行）→ `keytool -list`
-   预验证口令与别名 → 写 `android/key.properties`（.gitignore 已覆盖
-   key.properties/*.jks/*.keystore，不会入库）；
+1. **配置 release 签名**：四个 secrets 完整性检查（剥 `\r\n`）→ base64
+   解码 keystore 到 `$RUNNER_TEMP` → `keytool -list` 探测 **keystore 类型**
+   → `keytool -importkeystore` 真正解一次私钥做预验 → 参数经 `$GITHUB_ENV`
+   **环境变量直传 Gradle**（`PILI_KEYSTORE_FILE/PASSWORD/ALIAS/KEY_PASSWORD/
+   TYPE`，`build.gradle.kts` 环境变量优先、`key.properties` 兜底本地开发；
+   key.properties/*.jks 均在 .gitignore，不会入库）；
 2. **核验 release 签名**：出包后 `keytool -printcert -jarfile` 检查签名者，
    仍是 "Android Debug" 或缺失即构建失败——签名不生效不可能静默出包。
+
+**两次 CI 失败换来的 keystore 密码语义课**（配置 secrets 的人必须知道）：
+本仓库的 keystore 是 **PKCS12**（`Keystore type: PKCS12`，尽管文件名叫
+`.jks`）。PKCS12 格式**只有一个密码**——key 密码恒等于 store 密码：
+- `keytool -importkeystore` 对 PKCS12 会**忽略** `-srckeypass`，所以用它
+  做预验是假阳性；而 AGP 签名时 `KeyStore.getKey(alias, keyPassword)`
+  拿到与加载密码不同的 KEY_PASSWORD 就报
+  `Get Key failed: Given final block not properly padded`；
+- 因此 CI 检测到 PKCS12 时**强制 keypass=storepass**（并打 warning 提示
+  KEY_PASSWORD secret 配得不一致）、把类型显式传给 Gradle（`storeType`，
+  AGP 默认按 JKS 处理）；JKS 库则保留"KEY_PASSWORD 失败回退
+  KEYSTORE_PASSWORD"的探测链。
+- 结论：**KEY_PASSWORD secret 请与 KEYSTORE_PASSWORD 保持一致**（或改用
+  真正的 JKS 库并为私钥单独设密码）。
 
 **注意**：此前所有测试包都是 debug 签名，本轮起为正式 keystore 签名——
 **签名不一致无法覆盖安装，需先卸载旧包**（本机设置/历史/媒体库缓存会

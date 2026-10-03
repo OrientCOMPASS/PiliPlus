@@ -14,8 +14,8 @@ import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:material_ui/material_ui.dart';
 
 class PlayerFocus extends StatelessWidget {
-  /// 手柄 L1/R1 的单次快退/快进秒数
-  static const int kShoulderSeekSeconds = 60;
+  /// 手柄 L1/R1 的单次快退/快进步长
+  static const Duration kShoulderSeek = Duration(seconds: 60);
 
   const PlayerFocus({
     super.key,
@@ -122,9 +122,9 @@ class PlayerFocus extends StatelessWidget {
         key == LogicalKeyboardKey.gameButtonRight1) {
       if (event is KeyDownEvent && hasPlayer && !plPlayerController.isLive) {
         if (key == LogicalKeyboardKey.gameButtonRight1) {
-          plPlayerController.onForward(kShoulderSeekSeconds);
+          plPlayerController.onForward(kShoulderSeek);
         } else {
-          plPlayerController.onBackward(kShoulderSeekSeconds);
+          plPlayerController.onBackward(kShoulderSeek);
         }
       }
       return true;

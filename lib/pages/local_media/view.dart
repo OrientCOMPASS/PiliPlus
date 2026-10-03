@@ -35,7 +35,7 @@ class _LocalMediaPageState extends State<LocalMediaPage>
   @override
   void initState() {
     super.initState();
-    _controller = Get.putOrFind<LocalMediaController>();
+    _controller = Get.putOrFind(LocalMediaController.new);
     // 从后台切回来时刷新权限提示与存储卷(可能刚插了 SD 卡/U 盘,
     // 也可能刚在系统设置里改了照片权限)。不再触发全盘扫描。
     _observer = _ResumeObserver(_controller);
@@ -112,7 +112,7 @@ class _LocalMediaPageState extends State<LocalMediaPage>
                 overflow: TextOverflow.ellipsis,
               ),
               trailing: const Icon(Icons.chevron_right),
-              onTap: () => _controller.openDevice(context, source),
+              onTap: () => _controller.openDevice(source),
             ),
           );
         }
